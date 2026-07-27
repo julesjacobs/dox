@@ -1,0 +1,3 @@
+[submodule "vendor/oxcaml"]
+	path = vendor/oxcaml
+	url = https://github.com/oxcaml/oxcaml.git
