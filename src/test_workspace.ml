@@ -1,0 +1,356 @@
+let fail message =
+  prerr_endline message;
+  exit 1
+
+let expect condition message = if not condition then fail message
+let result = function Ok value -> value | Error message -> fail message
+
+let project_result = function
+  | Ok value -> value
+  | Error error -> fail (Project.error_message error)
+
+let rec remove_tree path =
+  if Sys.file_exists path then
+    match (Unix.lstat path).st_kind with
+    | Unix.S_DIR ->
+        Sys.readdir path
+        |> Array.iter (fun name -> remove_tree (Filename.concat path name));
+        Unix.rmdir path
+    | _ -> Sys.remove path
+
+let write root path source =
+  let absolute = Filename.concat root path in
+  result (Util.ensure_directory (Filename.dirname absolute));
+  result (Util.write_file absolute source)
+
+let () =
+  expect
+    (Module_path.of_source_path "models/statistics.live.md"
+    = Ok "Models.Statistics")
+    "source path did not decode to a qualified module";
+  expect
+    (String.equal
+       (Module_path.source_path "Models.Statistics")
+       "models/statistics.live.md")
+    "qualified module did not encode reversibly";
+  expect
+    (Result.is_error (Module_path.validate "Models.Bad-Name"))
+    "invalid module component was accepted";
+  expect
+    (Compiler_workspace.internal_violations
+       [
+         {
+           Compiler_workspace.module_path = "Models.Internal.Secret";
+           uses = [];
+           used_by = [ "Reports.Use" ];
+         };
+       ]
+    <> [])
+    "an Internal namespace boundary violation was accepted";
+  let directory = Filename.temp_dir "doclang-workspace-test-" "" in
+  Fun.protect
+    ~finally:(fun () -> remove_tree directory)
+    (fun () ->
+      write directory "models/statistics.live.md"
+        "# Statistics\n\n    let mean values = List.length values\n";
+      write directory "reports/forecast.live.md"
+        "# Forecast\n\n\
+         See [[Models.Statistics]]. Models.Statistics in ordinary prose stays \
+         literal.\n\n\
+        \    let label = \"Models.Statistics\"\n\
+        \    let quoted = {tag|Models.Statistics|tag}\n\
+        \    (* Models.Statistics in a comment *)\n\
+        \    let result = Models.Statistics.mean [1; 2]\n";
+      let project = Project.create directory in
+      let snapshot = project_result (Project.snapshot project) in
+      expect
+        (Page_index.modules snapshot.page_index
+        = [ "Models.Statistics"; "Reports.Forecast" ])
+        "page index did not use qualified module identity";
+      expect
+        (Module_graph.dependencies snapshot.module_graph "Reports.Forecast"
+        = [ "Models.Statistics" ])
+        "module graph missed a qualified reference";
+      expect
+        (Module_graph.dependents snapshot.module_graph "Models.Statistics"
+        = [ "Reports.Forecast" ])
+        "reverse module graph missed a dependent";
+      expect
+        (Page_index.backlinks snapshot.page_index "Models.Statistics"
+        = [ "Reports.Forecast" ])
+        "page index missed a wiki-link backlink";
+      let forecast =
+        project_result (Project.page snapshot "Reports.Forecast")
+      in
+      let qualified_documents =
+        project_result (Project.resolve_documents project snapshot forecast)
+      in
+      let qualified_evaluation =
+        Evaluator.evaluate_documents ~project_version:snapshot.version
+          ~documents:qualified_documents ~target:forecast ()
+      in
+      expect qualified_evaluation.ok
+        "qualified page modules did not compile and evaluate";
+      write directory "reports/shadow.live.md"
+        "# Shadow\n\n\
+        \    module Models = struct\n\
+        \      module Statistics = struct\n\
+        \        let mean _ = 99\n\
+        \      end\n\
+        \    end\n\
+        \    let () = Printf.printf \"%d\\n\" (Models.Statistics.mean [])\n";
+      let shadow_snapshot = project_result (Project.snapshot project) in
+      let shadow =
+        project_result (Project.page shadow_snapshot "Reports.Shadow")
+      in
+      let shadow_documents =
+        project_result
+          (Project.resolve_documents project shadow_snapshot shadow)
+      in
+      expect
+        (Module_graph.dependencies shadow_snapshot.module_graph "Reports.Shadow"
+        = [])
+        "a locally shadowed namespace created a workspace dependency";
+      let shadow_evaluation =
+        Evaluator.evaluate_documents ~project_version:shadow_snapshot.version
+          ~documents:shadow_documents ~target:shadow ()
+      in
+      expect
+        (shadow_evaluation.ok && String.equal shadow_evaluation.stdout "99\n")
+        "a local module did not shadow the workspace namespace";
+      write directory "reports/declaration_order.live.md"
+        "# Declaration order\n\n\
+        \    let before_shadow = Models.Statistics.mean [1; 2]\n\
+        \    module Models = struct end\n";
+      let declaration_order_snapshot =
+        project_result (Project.snapshot project)
+      in
+      expect
+        (Module_graph.dependencies declaration_order_snapshot.module_graph
+           "Reports.Declaration_order"
+        = [ "Models.Statistics" ])
+        "a reference before a local module declaration lost its dependency";
+      let declaration_order =
+        project_result
+          (Project.page declaration_order_snapshot "Reports.Declaration_order")
+      in
+      let declaration_order_evaluation =
+        Evaluator.evaluate_documents
+          ~project_version:declaration_order_snapshot.version
+          ~documents:
+            (project_result
+               (Project.resolve_documents project declaration_order_snapshot
+                  declaration_order))
+          ~target:declaration_order ()
+      in
+      expect declaration_order_evaluation.ok
+        "a reference before a local module declaration did not compile";
+      write directory "reports/nested_shadow.live.md"
+        "# Nested shadow\n\n\
+        \    module X = struct\n\
+        \      module Models = struct end\n\
+        \    end\n\
+        \    let after_nested = Models.Statistics.mean [1; 2]\n";
+      let nested_shadow_snapshot = project_result (Project.snapshot project) in
+      let nested_shadow =
+        project_result
+          (Project.page nested_shadow_snapshot "Reports.Nested_shadow")
+      in
+      let nested_shadow_evaluation =
+        Evaluator.evaluate_documents
+          ~project_version:nested_shadow_snapshot.version
+          ~documents:
+            (project_result
+               (Project.resolve_documents project nested_shadow_snapshot
+                  nested_shadow))
+          ~target:nested_shadow ()
+      in
+      expect nested_shadow_evaluation.ok
+        "a nested local module hid a later workspace dependency";
+      write directory "broken.live.md"
+        "# Broken\n\n    let this_does_not_parse =\n";
+      let partially_broken_snapshot =
+        project_result (Project.snapshot project)
+      in
+      let nested_shadow =
+        project_result
+          (Project.page partially_broken_snapshot "Reports.Nested_shadow")
+      in
+      let nested_shadow_with_broken_page =
+        Evaluator.evaluate_documents
+          ~project_version:partially_broken_snapshot.version
+          ~documents:
+            (project_result
+               (Project.resolve_documents project partially_broken_snapshot
+                  nested_shadow))
+          ~target:nested_shadow ()
+      in
+      expect nested_shadow_with_broken_page.ok
+        "an unrelated broken page discarded valid compiler dependencies";
+      Sys.remove (Filename.concat directory "broken.live.md");
+      write directory "reports/opened.live.md"
+        "# Opened\n\n\
+        \    open Models\n\
+        \    let opened_result = Statistics.mean [1; 2]\n";
+      let opened_snapshot = project_result (Project.snapshot project) in
+      let opened =
+        project_result (Project.page opened_snapshot "Reports.Opened")
+      in
+      expect
+        (Module_graph.dependencies opened_snapshot.module_graph "Reports.Opened"
+        = [ "Models.Statistics" ])
+        "an opened workspace namespace did not create a dependency";
+      let opened_evaluation =
+        Evaluator.evaluate_documents ~project_version:opened_snapshot.version
+          ~documents:
+            (project_result
+               (Project.resolve_documents project opened_snapshot opened))
+          ~target:opened ()
+      in
+      expect opened_evaluation.ok
+        "open Models did not resolve the qualified workspace namespace";
+      Sys.remove (Filename.concat directory "reports/opened.live.md");
+      let compiler_graph =
+        Compiler_workspace.analyze ~root:directory ~version:snapshot.version
+          snapshot.page_index
+      in
+      expect compiler_graph.ok "the compiler-backed workspace analysis failed";
+      let forecast_dependencies =
+        List.find
+          (fun entry ->
+            String.equal entry.Compiler_workspace.module_path "Reports.Forecast")
+          compiler_graph.modules
+      in
+      expect
+        (forecast_dependencies.uses = [ "Models.Statistics" ])
+        "ocamldep did not report the qualified page dependency";
+      let statistics =
+        project_result (Project.page snapshot "Models.Statistics")
+      in
+      write directory "notes.live.md" "# Notes\n";
+      let changed_source = statistics.source ^ "\nA prose-only autosave.\n" in
+      let _, saved_snapshot, acknowledged =
+        project_result
+          (Project.save_page_source project ~module_path:"Models.Statistics"
+             ~source:changed_source ~expected_digest:statistics.version
+             ~edit_revision:7)
+      in
+      expect (acknowledged = 7) "autosave did not acknowledge its revision";
+      expect
+        (Option.is_some (Page_index.find saved_snapshot.page_index "Notes"))
+        "an unrelated external page change was lost during autosave";
+      let created, _, created_snapshot =
+        project_result
+          (Project.create_page project ~module_path:"Models.Linear"
+             ~base_project_version:saved_snapshot.version ~principal:"test")
+      in
+      expect
+        (String.equal created.path "models/linear.live.md")
+        "nested module creation used the wrong source path";
+      let renames =
+        [
+          {
+            Project.before = "Models.Statistics";
+            after = "Analysis.Statistics";
+          };
+        ]
+      in
+      let _, renamed_snapshot, _ =
+        let preview_id = Project.refactor_preview_id created_snapshot renames in
+        project_result
+          (Project.apply_module_refactor project
+             ~expected_project_version:created_snapshot.version
+             ~expected_preview_id:preview_id renames)
+      in
+      expect
+        (Option.is_some
+           (Page_index.find renamed_snapshot.page_index "Analysis.Statistics"))
+        "module refactor did not create the renamed identity";
+      expect
+        (not
+           (Sys.file_exists
+              (Filename.concat directory "models/statistics.live.md")))
+        "module refactor left the old source path behind";
+      let forecast =
+        project_result (Project.page renamed_snapshot "Reports.Forecast")
+      in
+      expect
+        (try
+           ignore
+             (Str.search_forward
+                (Str.regexp_string "Analysis.Statistics.mean")
+                forecast.source 0);
+           true
+         with Not_found -> false)
+        "module refactor did not rewrite a qualified reference";
+      expect
+        (try
+           ignore
+             (Str.search_forward
+                (Str.regexp_string "\"Models.Statistics\"")
+                forecast.source 0);
+           ignore
+             (Str.search_forward
+                (Str.regexp_string "{tag|Models.Statistics|tag}")
+                forecast.source 0);
+           ignore
+             (Str.search_forward
+                (Str.regexp_string
+                   "Models.Statistics in ordinary prose stays literal")
+                forecast.source 0);
+           true
+         with Not_found -> false)
+        "module refactor rewrote prose, comments, or string literals";
+      write directory "alpha.live.md" "# Alpha\n\n    let alpha = 1\n";
+      write directory "bravo.live.md" "# Bravo\n\n    let bravo = 2\n";
+      let swap_snapshot = project_result (Project.snapshot project) in
+      let swap =
+        [
+          { Project.before = "Alpha"; after = "Bravo" };
+          { Project.before = "Bravo"; after = "Alpha" };
+        ]
+      in
+      expect
+        (String.equal
+           (Project.rewrite_import_paths swap
+              "<!-- doclang: imports=alpha.live.md,bravo.live.md -->")
+           "<!-- doclang: imports=bravo.live.md,alpha.live.md -->")
+        "a swap refactor rewrote legacy imports sequentially";
+      let _, swapped_snapshot, _ =
+        project_result
+          (Project.apply_module_refactor project
+             ~expected_project_version:swap_snapshot.version
+             ~expected_preview_id:
+               (Project.refactor_preview_id swap_snapshot swap)
+             swap)
+      in
+      let alpha = project_result (Project.page swapped_snapshot "Alpha") in
+      let bravo = project_result (Project.page swapped_snapshot "Bravo") in
+      expect
+        (try
+           ignore
+             (Str.search_forward
+                (Str.regexp_string "let bravo = 2")
+                alpha.source 0);
+           true
+         with Not_found -> false)
+        "a swap refactor clobbered the first module";
+      expect
+        (try
+           ignore
+             (Str.search_forward
+                (Str.regexp_string "let alpha = 1")
+                bravo.source 0);
+           true
+         with Not_found -> false)
+        "a swap refactor clobbered the second module";
+      write directory "bad-name.live.md" "# Needs migration\n";
+      let migration_snapshot = project_result (Project.snapshot project) in
+      expect
+        (migration_snapshot.page_index.diagnostics <> [])
+        "an invalid existing path did not produce a migration diagnostic";
+      expect
+        (Option.is_some
+           (Page_index.find migration_snapshot.page_index "Analysis.Statistics"))
+        "an invalid existing path made valid pages unavailable";
+      print_endline "workspace tests passed")

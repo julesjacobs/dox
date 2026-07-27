@@ -1,8 +1,11 @@
 import {
   mountMarkdownEditor,
+  mountModuleOutlineEditor,
+  updateModuleOutlineEditor,
   setMarkdownEditorEvaluation,
   setMarkdownEditorResultInvalidation,
-} from "./editor.bundle.js?v=20260727ab";
+  replaceEditorStateDocument,
+} from "./editor.bundle.js?v=20260727ad";
 
 const app = document.querySelector("#app");
 
@@ -10,6 +13,7 @@ const state = {
   project: null,
   projectVersion: null,
   sessionToken: null,
+  module: null,
   path: null,
   document: null,
   savedVersion: null,
@@ -18,7 +22,6 @@ const state = {
   evaluationPlan: null,
   evaluationInvalidation: null,
   traceContext: null,
-  changes: [],
   view: "document",
   selected: null,
   selectedDefinitionName: null,
@@ -49,6 +52,17 @@ const state = {
   suppressNextSelectionLookup: false,
   hoveredObservationSite: null,
   toastTimer: null,
+  sessions: new Map(),
+  outlineView: null,
+  outlineText: "",
+  outlineCommittedText: "",
+  outlineLineMap: [],
+  outlineSelection: 0,
+  outlineCommitController: null,
+  outlineCommitting: false,
+  refactorInFlight: false,
+  workspaceError: null,
+  dependency: null,
 };
 
 const escapeHtml = (value = "") =>
@@ -58,6 +72,48 @@ const escapeHtml = (value = "") =>
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+
+const recoveryKey = (modulePath) => `doclang:v2:draft:${modulePath}`;
+
+function storeRecoveryDraft(session, source) {
+  try {
+    localStorage.setItem(
+      recoveryKey(session.module),
+      JSON.stringify({
+        source,
+        expectedDigest: session.savedVersion,
+        editRevision: session.editRevision,
+      }),
+    );
+  } catch {
+    // Autosave remains authoritative when private browsing disables storage.
+  }
+}
+
+function recoveredDraft(modulePath, expectedDigest) {
+  try {
+    const key = recoveryKey(modulePath);
+    const raw = localStorage.getItem(key);
+    const value = JSON.parse(raw);
+    if (!value) return null;
+    if (value.expectedDigest === expectedDigest) return value;
+    const conflictKey =
+      `doclang:v2:conflict:${modulePath}:${Date.now()}`;
+    localStorage.setItem(conflictKey, raw);
+    localStorage.removeItem(key);
+    return { conflictKey };
+  } catch {
+    return null;
+  }
+}
+
+function clearRecoveryDraft(modulePath) {
+  try {
+    localStorage.removeItem(recoveryKey(modulePath));
+  } catch {
+    // Nothing else is required when storage is unavailable.
+  }
+}
 
 async function api(url, options = {}) {
   const response = await fetch(url, {
@@ -89,18 +145,94 @@ async function initialize() {
   try {
     const session = await api("/api/session");
     state.sessionToken = session.token;
-    const [project, changes] = await Promise.all([
-      api("/api/project"),
-      api("/api/changes"),
-    ]);
+    const project = await api("/api/project");
     state.project = project;
     state.projectVersion = project.version;
-    state.changes = changes;
-    state.path = project.documents[0]?.path || null;
-    if (state.path) await loadDocument(state.path, { force: true });
+    const routeModule = decodeURIComponent(
+      window.location.pathname.match(/^\/page\/(.+)$/)?.[1] || "",
+    );
+    const initialModule =
+      project.documents.find((document) => document.module === routeModule)
+        ?.module ||
+      project.documents[0]?.module ||
+      null;
+    if (initialModule) {
+      await loadDocument(initialModule, {
+        force: true,
+        history: "replace",
+        focus: "none",
+      });
+    }
     else render();
   } catch (error) {
     app.innerHTML = `<div class="empty-state"><h2>Could not open the project</h2><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function currentSession() {
+  return state.module ? state.sessions.get(state.module) : null;
+}
+
+function captureCurrentSession() {
+  if (!state.module || !state.document) return;
+  const session = currentSession() || { module: state.module };
+  session.module = state.module;
+  session.path = state.path;
+  session.document = state.document;
+  session.savedVersion = state.savedVersion;
+  session.savedSource = state.savedSource;
+  session.evaluation = state.evaluation;
+  session.evaluationPlan = state.evaluationPlan;
+  session.evaluationInvalidation = state.evaluationInvalidation;
+  session.traceContext = state.traceContext;
+  session.selected = state.selected;
+  session.selectedTraceId = state.selectedTraceId;
+  session.editorState = state.sourceEditorView?.state || session.editorState;
+  session.scrollTop =
+    state.sourceEditorView?.scrollDOM.scrollTop ?? session.scrollTop ?? 0;
+  session.editRevision ??= 0;
+  session.acknowledgedRevision ??= 0;
+  session.autosaveTimer ??= null;
+  session.autosaveInFlight ??= false;
+  session.conflict ??= null;
+  state.sessions.set(state.module, session);
+}
+
+function restoreSession(session) {
+  state.module = session.module;
+  state.path = session.path;
+  state.document = session.document;
+  state.savedVersion = session.savedVersion;
+  state.savedSource = session.savedSource;
+  state.evaluation = session.evaluation || null;
+  state.evaluationPlan = session.evaluationPlan || null;
+  state.evaluationInvalidation = session.evaluationInvalidation || null;
+  state.traceContext = session.traceContext || null;
+  state.selected = session.selected || session.document.blocks[0]?.id || null;
+  state.selectedTraceId = session.selectedTraceId || null;
+  state.dirty = session.document.source !== session.savedSource;
+}
+
+function updateRoute(modulePath, mode = "push") {
+  const url = `/page/${encodeURIComponent(modulePath)}`;
+  const payload = { module: modulePath };
+  if (mode === "replace") window.history.replaceState(payload, "", url);
+  else if (mode === "push") window.history.pushState(payload, "", url);
+}
+
+async function loadDependencyContext(modulePath) {
+  try {
+    const payload = await api(
+      `/api/dependencies?module=${encodeURIComponent(modulePath)}`,
+    );
+    if (state.module !== modulePath) return;
+    state.dependency = payload.dependency;
+    refreshInspector();
+  } catch {
+    if (state.module === modulePath) {
+      state.dependency = null;
+      refreshInspector();
+    }
   }
 }
 
@@ -140,35 +272,68 @@ function invalidateEvaluation() {
 }
 
 async function loadDocument(
-  path,
-  { force = false, preserveTrace = false } = {},
+  modulePath,
+  {
+    force = false,
+    preserveTrace = false,
+    history = "push",
+    focus = "main",
+  } = {},
 ) {
-  if (state.saving) {
-    toast("Wait for the current save to finish before navigating.");
-    return false;
-  }
-  if (!force && path === state.path) return true;
-  if (
-    !force &&
-    state.dirty &&
-    !window.confirm("Discard the unsaved changes in this document?")
-  ) {
-    return false;
-  }
+  if (!force && modulePath === state.module) return true;
+  captureCurrentSession();
+  const cached = state.sessions.get(modulePath);
   invalidateEvaluation();
+  if (cached?.document) {
+    restoreSession(cached);
+    state.view = "document";
+    state.showBuild = false;
+    if (!preserveTrace) state.traceContext = cached.traceContext || null;
+    updateRoute(modulePath, history);
+    render();
+    void loadDependencyContext(modulePath);
+    if (!cached.evaluation) {
+      scheduleEvaluation(cached.document.source, { immediate: true });
+    }
+    if (focus === "main") {
+      queueMicrotask(() => state.sourceEditorView?.focus());
+    } else if (focus === "outline") {
+      queueMicrotask(() => state.outlineView?.focus());
+    }
+    return true;
+  }
   const generation = state.loadGeneration;
   const controller = new AbortController();
   state.requestController = controller;
   try {
-    const payload = await api(`/api/document?path=${encodeURIComponent(path)}`, {
-      signal: controller.signal,
-    });
+    const payload = await api(
+      `/api/page?module=${encodeURIComponent(modulePath)}`,
+      { signal: controller.signal },
+    );
     if (generation !== state.loadGeneration) return false;
-    state.path = path;
+    const diskSource = payload.document.source;
+    const diskVersion = payload.document.version;
+    const recovery = recoveredDraft(payload.module, diskVersion);
+    const recovered =
+      recovery?.source && recovery.source !== payload.document.source;
+    if (recovery?.conflictKey) {
+      state.workspaceError =
+        "A browser recovery draft was based on an older file version and was preserved as a conflict.";
+    }
+    if (recovered) {
+      payload.document = {
+        ...payload.document,
+        source: recovery.source,
+        blocks: parseDraftBlocks(recovery.source),
+      };
+      state.workspaceError = "Recovered an autosave draft from this browser.";
+    }
+    state.module = payload.module;
+    state.path = payload.document.path;
     state.document = payload.document;
     state.project = payload.project;
-    state.savedVersion = payload.document.version;
-    state.savedSource = payload.document.source;
+    state.savedVersion = diskVersion;
+    state.savedSource = diskSource;
     state.projectVersion = payload.projectVersion;
     state.evaluation = null;
     state.evaluationPlan = null;
@@ -182,9 +347,38 @@ async function loadDocument(
     state.typeInfo = null;
     state.cursorPosition = null;
     state.hoveredObservationSite = null;
-    state.dirty = false;
+    state.dirty = Boolean(recovered);
+    const session = {
+      module: payload.module,
+      path: payload.document.path,
+      document: payload.document,
+      savedVersion: diskVersion,
+      savedSource: diskSource,
+      evaluation: null,
+      evaluationPlan: null,
+      evaluationInvalidation: null,
+      traceContext: preserveTrace ? state.traceContext : null,
+      selected: payload.document.blocks[0]?.id || null,
+      selectedTraceId: null,
+      editorState: null,
+      scrollTop: 0,
+      editRevision: recovery?.editRevision || 0,
+      acknowledgedRevision: 0,
+      autosaveTimer: null,
+      autosaveInFlight: false,
+      conflict: null,
+    };
+    state.sessions.set(payload.module, session);
+    updateRoute(payload.module, history);
     render();
+    void loadDependencyContext(payload.module);
     scheduleEvaluation(payload.document.source, { immediate: true });
+    if (recovered) scheduleAutosave(session, { immediate: true });
+    if (focus === "main") {
+      queueMicrotask(() => state.sourceEditorView?.focus());
+    } else if (focus === "outline") {
+      queueMicrotask(() => state.outlineView?.focus());
+    }
     return true;
   } catch (error) {
     if (error.name === "AbortError") return false;
@@ -194,7 +388,9 @@ async function loadDocument(
 }
 
 function currentProjectDocument() {
-  return state.project?.documents.find((document) => document.path === state.path);
+  return state.project?.documents.find(
+    (document) => document.module === state.module,
+  );
 }
 
 function evaluationStatus() {
@@ -210,22 +406,15 @@ function evaluationStatus() {
 }
 
 function renderShell() {
-  const status = evaluationStatus();
-
+  const existingSidebar = app.querySelector(".sidebar");
   app.innerHTML = `
     <div class="workspace ${state.view === "document" ? "document-context" : ""}">
       <header class="topbar">
         <div class="brand"><span class="brand-mark">D</span><span>Doclang</span></div>
-        <div></div>
+        <div class="view-title">${escapeHtml(state.module || "")}</div>
         <div class="top-actions">
           <button class="button pane-toggle files-toggle" id="files-toggle" aria-label="Show project files">Files</button>
-          ${
-            state.view === "document"
-              ? `<button class="button secondary-action" data-view="changes">History</button>
-                 <button class="button" id="artifact-button" ${!state.document ? "disabled" : ""}>Build</button>`
-              : '<button class="button secondary-action" data-view="document">Document</button>'
-          }
-          <button class="button primary" id="save-button" ${!state.dirty ? "disabled" : ""}>Save</button>
+          <button class="button" id="artifact-button" ${!state.document ? "disabled" : ""}>Build</button>
         </div>
       </header>
       <div class="body-grid">
@@ -233,59 +422,487 @@ function renderShell() {
         <main class="main" id="main-pane">${renderMain()}</main>
         <aside class="inspector">${renderInspector()}</aside>
       </div>
-      <footer class="statusbar" aria-live="polite">
-        <div class="status-left">
-          <span class="${status.className}">${escapeHtml(status.label)}</span>
-          ${state.dirty ? '<span class="dirty">Unsaved change</span>' : ""}
-        </div>
-      </footer>
+      ${
+        state.workspaceError
+          ? `<footer class="statusbar status-error" aria-live="assertive">${escapeHtml(state.workspaceError)}</footer>`
+          : '<footer class="statusbar" aria-hidden="true"></footer>'
+      }
     </div>
   `;
+  if (existingSidebar) {
+    app.querySelector(".sidebar")?.replaceWith(existingSidebar);
+  }
   bindEvents();
 }
 
 function renderSidebar() {
   if (!state.project?.documents.length) {
-    return `<div class="pane-heading"><p class="pane-label">Documents</p><div><button class="mini-button" data-view="project">Overview</button><button class="mini-button" id="new-document">New</button></div></div><div class="empty-state">Create a <code>.live.md</code> file to begin.</div>`;
+    return `<div class="pane-heading"><p class="pane-label">Modules</p></div><div class="module-outline-host" data-module-outline></div>`;
   }
-  const titleCounts = state.project.documents.reduce((counts, document) => {
-    counts.set(document.title, (counts.get(document.title) || 0) + 1);
-    return counts;
-  }, new Map());
   return `
-    <div class="pane-heading"><p class="pane-label">Documents</p><div><button class="mini-button" data-view="project">Overview</button><button class="mini-button" id="new-document">New</button></div></div>
-    ${state.project.documents
-      .map(
-        (document) => `
-          <div>
-            <button class="file-button ${document.path === state.path ? "active" : ""}" data-path="${escapeHtml(document.path)}">
-              <span>
-                <span class="file-title">${escapeHtml(document.title)}</span>
-                ${titleCounts.get(document.title) > 1 ? `<span class="file-path">${escapeHtml(document.path)}</span>` : ""}
-              </span>
-            </button>
-            ${
-              document.path === state.path && document.outline?.length
-                ? `<details class="outline-details"><summary>Symbols</summary><div class="outline">${document.outline
-                    .map(
-                      (entity) =>
-                        `<button data-definition="${escapeHtml(entity.name)}">${escapeHtml(entity.name)}</button>`,
-                    )
-                    .join("")}</div></details>`
-                : ""
-            }
-          </div>`,
-      )
-      .join("")}
+    <div class="pane-heading"><p class="pane-label">Modules</p></div>
+    <div class="module-outline-host" data-module-outline aria-label="Editable module outline"></div>
   `;
 }
 
+function refreshOutlineModel({ force = false } = {}) {
+  const entries = state.project?.pageIndex?.outline || [];
+  const text = entries.map((entry) => entry.text).join("\n");
+  state.outlineLineMap = entries;
+  if (force || !state.outlineCommittedText) {
+    state.outlineText = text;
+    state.outlineCommittedText = text;
+  }
+  return { entries, text };
+}
+
+function parseOutlineDraft(source) {
+  const raw = source.split("\n");
+  const rows = [];
+  const stack = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const text = raw[index];
+    if (!text.trim()) continue;
+    const spaces = text.match(/^ */)?.[0].length || 0;
+    if (spaces % 2 !== 0) {
+      throw new Error(`Line ${index + 1} must use two spaces per level.`);
+    }
+    const depth = spaces / 2;
+    const component = text.slice(spaces);
+    if (!/^[A-Z][a-z0-9_']*$/.test(component)) {
+      throw new Error(
+        `Line ${index + 1} is not an OCaml module component.`,
+      );
+    }
+    if (depth > stack.length) {
+      throw new Error(`Line ${index + 1} skips a namespace level.`);
+    }
+    stack.length = depth;
+    stack.push(component);
+    rows.push({
+      sourceLine: index + 1,
+      depth,
+      component,
+      module: stack.join("."),
+    });
+  }
+  for (let index = 0; index < rows.length; index += 1) {
+    rows[index].namespace =
+      index + 1 < rows.length && rows[index + 1].depth > rows[index].depth;
+  }
+  const modules = rows
+    .filter((row) => !row.namespace)
+    .map((row) => row.module);
+  if (new Set(modules).size !== modules.length) {
+    throw new Error("The outline contains a duplicate page module.");
+  }
+  const moduleSet = new Set(modules);
+  for (const modulePath of modules) {
+    const parts = modulePath.split(".");
+    for (let length = 1; length < parts.length; length += 1) {
+      const prefix = parts.slice(0, length).join(".");
+      if (moduleSet.has(prefix)) {
+        throw new Error(
+          `${prefix} cannot be both a page and a namespace.`,
+        );
+      }
+    }
+  }
+  return { rows, modules };
+}
+
+function outlineModuleAtLine(source, lineNumber) {
+  try {
+    return parseOutlineDraft(source).rows.find(
+      (row) => row.sourceLine === lineNumber && !row.namespace,
+    )?.module;
+  } catch {
+    return null;
+  }
+}
+
+function rewriteModulePaths(source, mapping) {
+  const entries = [...mapping].sort(
+    (left, right) => right.before.length - left.before.length,
+  );
+  let result = "";
+  for (let index = 0; index < source.length; ) {
+    const match = entries.find(({ before }) => {
+      if (!source.startsWith(before, index)) return false;
+      const prior = index > 0 ? source[index - 1] : "";
+      const after = source[index + before.length] || "";
+      const identifier = /[A-Za-z0-9_']/;
+      return (!prior || (!identifier.test(prior) && prior !== ".")) &&
+        (!after || after === "." || !identifier.test(after));
+    });
+    if (match) {
+      result += match.after;
+      index += match.before.length;
+    } else {
+      result += source[index];
+      index += 1;
+    }
+  }
+  return result;
+}
+
+async function refreshSessionsAfterRefactor(mapping, project, bases) {
+  const renamed = new Map(mapping.map(({ before, after }) => [before, after]));
+  const entries = Array.from(state.sessions.entries());
+  const currentModule = renamed.get(state.module) || state.module;
+  const payloads = new Map();
+  for (const [oldModule, session] of entries) {
+    const modulePath = renamed.get(oldModule) || oldModule;
+    const payload = await api(
+      `/api/page?module=${encodeURIComponent(modulePath)}`,
+    );
+    payloads.set(oldModule, { modulePath, payload, session });
+  }
+
+  let refreshed;
+  for (;;) {
+    const staged = [];
+    const revisions = new Map(
+      entries.map(([oldModule, session]) => [
+        oldModule,
+        session.editRevision,
+      ]),
+    );
+    for (const [oldModule] of entries) {
+      const { modulePath, payload, session } = payloads.get(oldModule);
+      const savedSource = payload.document.source;
+      const baseSource = bases.get(oldModule)?.source;
+      const draft =
+        session.editorState?.doc.toString() || session.document.source;
+      let source = savedSource;
+      let changedDuringRefactor = false;
+      if (draft !== baseSource) {
+        const rewritten = await api("/api/refactor/rewrite", {
+          method: "POST",
+          body: JSON.stringify({
+            path: session.path,
+            source: draft,
+            renames: mapping,
+          }),
+        });
+        source = rewritten.source;
+        changedDuringRefactor = true;
+      }
+      staged.push({
+        oldModule,
+        modulePath,
+        payload,
+        session,
+        source,
+        changedDuringRefactor,
+        editorState: replaceEditorStateDocument(session.editorState, source),
+      });
+    }
+    if (
+      entries.every(
+        ([oldModule, session]) =>
+          session.editRevision === revisions.get(oldModule),
+      )
+    ) {
+      refreshed = staged;
+      break;
+    }
+  }
+
+  const nextSessions = new Map();
+  for (const {
+    oldModule,
+    modulePath,
+    payload,
+    session,
+    source,
+    changedDuringRefactor,
+    editorState,
+  } of refreshed) {
+    const savedSource = payload.document.source;
+    clearRecoveryDraft(oldModule);
+    session.module = modulePath;
+    session.path = payload.document.path;
+    session.document = changedDuringRefactor
+      ? {
+          ...payload.document,
+          source,
+          blocks: parseDraftBlocks(source),
+        }
+      : payload.document;
+    session.editorState = editorState;
+    session.savedSource = savedSource;
+    session.savedVersion = payload.document.version;
+    session.evaluation = null;
+    session.evaluationPlan = null;
+    session.evaluationInvalidation = null;
+    session.conflict = null;
+    session.autosaveQueued = changedDuringRefactor;
+    if (changedDuringRefactor) storeRecoveryDraft(session, source);
+    else clearRecoveryDraft(modulePath);
+    nextSessions.set(modulePath, session);
+  }
+  state.sessions = nextSessions;
+  state.project = project;
+  state.projectVersion = project.version;
+  state.module = currentModule;
+  const current = state.sessions.get(currentModule);
+  if (current) {
+    restoreSession(current);
+    updateRoute(currentModule, "replace");
+  }
+}
+
+async function drainDirtySessions() {
+  captureCurrentSession();
+  for (let pass = 0; pass < 5; pass += 1) {
+    const dirty = Array.from(state.sessions.values()).filter((session) => {
+      const source =
+        session.editorState?.doc.toString() || session.document.source;
+      return source !== session.savedSource;
+    });
+    if (!dirty.length) {
+      return new Map(
+        Array.from(state.sessions.entries()).map(([modulePath, session]) => [
+          modulePath,
+          {
+            source:
+              session.editorState?.doc.toString() ||
+              session.document.source,
+            revision: session.editRevision,
+          },
+        ]),
+      );
+    }
+    for (const session of dirty) {
+      if (!(await drainAutosave(session))) {
+        throw new Error(
+          `Could not save ${session.module} before refactoring.`,
+        );
+      }
+    }
+  }
+  throw new Error("Pause typing briefly so the refactor can catch up.");
+}
+
+async function commitOutline({ navigateLine = null } = {}) {
+  if (
+    state.outlineCommitting ||
+    state.outlineText === state.outlineCommittedText
+  ) {
+    if (navigateLine !== null) {
+      const modulePath = outlineModuleAtLine(
+        state.outlineText,
+        navigateLine,
+      );
+      if (modulePath) {
+        await loadDocument(modulePath, {
+          history: "replace",
+          focus: "outline",
+        });
+      }
+    }
+    return;
+  }
+  const submittedDraft = state.outlineText;
+  let draft;
+  try {
+    draft = parseOutlineDraft(submittedDraft);
+  } catch (error) {
+    state.workspaceError = error.message;
+    return;
+  }
+  const previous = state.outlineLineMap
+    .filter((entry) => entry.module)
+    .map((entry) => entry.module);
+  const next = draft.modules;
+  const previousSet = new Set(previous);
+  const nextSet = new Set(next);
+  const removed = previous.filter((modulePath) => !nextSet.has(modulePath));
+  const added = next.filter((modulePath) => !previousSet.has(modulePath));
+  const commonPrefix = (modulePaths) => {
+    if (!modulePaths.length) return [];
+    const components = modulePaths.map((modulePath) => modulePath.split("."));
+    const prefix = [];
+    for (let index = 0; ; index += 1) {
+      const component = components[0][index];
+      if (
+        component === undefined ||
+        !components.every((parts) => parts[index] === component)
+      ) {
+        return prefix;
+      }
+      prefix.push(component);
+    }
+  };
+  state.outlineCommitting = true;
+  state.outlineCommitController?.abort();
+  const controller = new AbortController();
+  state.outlineCommitController = controller;
+  try {
+    if (!removed.length && !added.length) {
+      state.outlineText = state.outlineCommittedText;
+    } else if (!removed.length && added.length === 1) {
+      const created = added;
+      if (next.length !== previous.length + 1) {
+        throw new Error("Create one module at a time before reorganizing it.");
+      }
+      const payload = await api("/api/page", {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({
+          module: created[0],
+          baseProjectVersion: state.projectVersion,
+        }),
+      });
+      state.project = payload.project;
+      state.projectVersion = payload.projectVersion;
+    } else if (removed.length === added.length) {
+      const renames =
+        removed.length === 1
+          ? [{ before: removed[0], after: added[0] }]
+          : (() => {
+              const beforePrefix = commonPrefix(removed);
+              const afterPrefix = commonPrefix(added);
+              if (!beforePrefix.length || !afterPrefix.length) {
+                throw new Error(
+                  "Move or rename one namespace subtree at a time.",
+                );
+              }
+              const addedSet = new Set(added);
+              const mapping = removed.map((before) => {
+                const suffix = before.split(".").slice(beforePrefix.length);
+                const after = [...afterPrefix, ...suffix].join(".");
+                if (!addedSet.has(after)) {
+                  throw new Error(
+                    "Move or rename one namespace subtree at a time.",
+                  );
+                }
+                return { before, after };
+              });
+              if (
+                mapping.some(
+                  ({ after }, index) => after !== added[index],
+                )
+              ) {
+                throw new Error(
+                  "Keep page lines in order while moving a namespace subtree.",
+                );
+              }
+              return mapping;
+            })();
+      if (new Set(renames.map(({ after }) => after)).size !== renames.length) {
+        throw new Error(
+          "This outline edit is ambiguous. Rename or move one module at a time.",
+        );
+      }
+      state.refactorInFlight = true;
+      const refactorBases = await drainDirtySessions();
+      const preview = await api("/api/refactor/preview", {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({
+          projectVersion: state.projectVersion,
+          renames,
+        }),
+      });
+      const payload = await api("/api/refactor/apply", {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({
+          projectVersion: state.projectVersion,
+          previewId: preview.previewId,
+          renames,
+        }),
+      });
+      await refreshSessionsAfterRefactor(
+        payload.mapping,
+        payload.project,
+        refactorBases,
+      );
+    } else {
+      throw new Error(
+        "Removing a module requires an explicit delete confirmation.",
+      );
+    }
+    const newerDraft = state.outlineText;
+    const changedDuringCommit = newerDraft !== submittedDraft;
+    state.workspaceError = null;
+    refreshOutlineModel({ force: true });
+    if (changedDuringCommit) {
+      state.outlineText = newerDraft;
+      state.workspaceError =
+        "The refactor finished. A newer outline edit was kept for review.";
+    }
+    render();
+    if (navigateLine !== null) {
+      const modulePath = outlineModuleAtLine(
+        state.outlineCommittedText,
+        navigateLine,
+      );
+      if (modulePath) {
+        await loadDocument(modulePath, {
+          history: "replace",
+          focus: "outline",
+        });
+      }
+    }
+  } catch (error) {
+    if (error.name !== "AbortError") state.workspaceError = error.message;
+  } finally {
+    state.refactorInFlight = false;
+    for (const session of state.sessions.values()) {
+      if (session.autosaveQueued) scheduleAutosave(session, { immediate: true });
+    }
+    if (state.outlineCommitController === controller) {
+      state.outlineCommitController = null;
+    }
+    state.outlineCommitting = false;
+  }
+}
+
+function mountOutlineEditor() {
+  const parent = document.querySelector("[data-module-outline]");
+  if (!parent) return;
+  refreshOutlineModel();
+  if (state.outlineView && state.outlineView.dom.isConnected) {
+    updateModuleOutlineEditor(state.outlineView, {
+      doc: state.outlineText,
+      selection: state.outlineSelection,
+      activeModule: state.module,
+      lineMap: state.outlineLineMap,
+    });
+    return;
+  }
+  state.outlineView = mountModuleOutlineEditor(parent, {
+    doc: state.outlineText,
+    selection: state.outlineSelection,
+    activeModule: state.module,
+    lineMap: state.outlineLineMap,
+    onChange: (source, update) => {
+      state.outlineText = source;
+      state.outlineSelection = update.state.selection.main.head;
+      state.workspaceError = null;
+    },
+    onNavigate: (selection, update) => {
+      if (!selection.empty || update.view.composing) return;
+      state.outlineSelection = selection.head;
+      const line = update.state.doc.lineAt(selection.head);
+      void commitOutline({ navigateLine: line.number });
+    },
+    onCommit: () => void commitOutline(),
+    onCancel: () => {
+      state.outlineText = state.outlineCommittedText;
+      render();
+      queueMicrotask(() => state.outlineView?.focus());
+    },
+  });
+}
+
 function renderMain() {
-  if (!state.document && state.view !== "project" && state.view !== "changes") {
+  if (!state.document) {
     return `<div class="empty-state"><h2>The project has no live documents yet.</h2><p>Create a file ending in <code>.live.md</code>.</p></div>`;
   }
-  if (state.view === "changes") return renderChanges();
-  if (state.view === "project") return renderProject();
   return renderDocument();
 }
 
@@ -359,64 +976,6 @@ function renderProject() {
               )
               .join("")}</div>`
           : ""
-      }
-    </section>`;
-}
-
-function chips(values) {
-  return values?.length
-    ? values.map((value) => `<span class="dependency">${escapeHtml(value)}</span>`).join("")
-    : '<span class="entity-kind">None</span>';
-}
-
-function renderChanges() {
-  return `
-    <section class="changes-view">
-      <div class="page-heading">
-        <h1>Change sets</h1>
-        <p>Direct source edits and inferred downstream impact stay separate.</p>
-      </div>
-      ${
-        state.changes.length
-          ? state.changes
-              .map(
-                (change) => `
-                  <article class="change-card">
-                    <div class="change-head">
-                      <span class="change-path">${escapeHtml(change.path)}</span>
-                      <span class="change-time">${escapeHtml(change.principal)} · ${escapeHtml(change.timestamp)}</span>
-                    </div>
-                    <div class="change-columns">
-                      <div class="change-column"><strong>Direct edits</strong>${chips(change.directEntities)}</div>
-                      <div class="change-column"><strong>Inferred impact</strong>${chips([...(change.affectedEntities || []), ...(change.affectedDocuments || [])])}</div>
-                    </div>
-                    ${
-                      change.changedBlocks?.length
-                        ? `<div class="change-blocks">${change.changedBlocks
-                            .map(
-                              (block) =>
-                                `<span class="change-block ${escapeHtml(block.change)}">${escapeHtml(block.kind)} · ${escapeHtml(block.id)}</span>`,
-                            )
-                            .join("")}</div>`
-                        : ""
-                    }
-                    ${
-                      change.sourceDiff
-                        ? `<details class="source-diff">
-                            <summary>Exact source changes</summary>
-                            <div class="diff-lines">${change.sourceDiff
-                              .map(
-                                (line) =>
-                                  `<div class="diff-line ${line.kind}"><span class="diff-number">${line.beforeLine ?? ""}</span><span class="diff-number">${line.afterLine ?? ""}</span><span class="diff-marker">${line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}</span><code>${escapeHtml(line.text)}</code></div>`,
-                              )
-                              .join("")}</div>
-                          </details>`
-                        : ""
-                    }
-                  </article>`,
-              )
-              .join("")
-          : '<div class="empty-state"><h2>No saved changes yet</h2><p>Your first edit will appear here as a versioned change set.</p></div>'
       }
     </section>`;
 }
@@ -651,6 +1210,40 @@ function renderCompletion() {
   </section>`;
 }
 
+function renderDependencyContext() {
+  const dependency = state.dependency;
+  if (!dependency) return "";
+  const section = (label, values) =>
+    values?.length
+      ? `<div class="module-relations"><span>${label}</span>${values
+          .map(
+            (modulePath) =>
+              `<button type="button" data-module-link="${escapeHtml(modulePath)}">${escapeHtml(modulePath)}</button>`,
+          )
+          .join("")}</div>`
+      : "";
+  const boundary =
+    dependency.boundary === "cross-namespace"
+      ? "Used across namespaces"
+      : dependency.boundary === "namespace-local"
+        ? "Used within this namespace"
+        : "No incoming module references";
+  const backlinks = state.project?.pageIndex?.backlinks?.[dependency.module] || [];
+  const compilerDiagnostics = dependency.diagnostics?.length
+    ? `<div class="module-compiler-error">${dependency.diagnostics
+        .map((message) => `<p>${escapeHtml(message)}</p>`)
+        .join("")}</div>`
+    : "";
+  return `<section class="inspect-section module-context">
+    <h3>${escapeHtml(dependency.module)}</h3>
+    ${section("Uses", dependency.uses)}
+    ${section("Used by", dependency.usedBy)}
+    ${section("Linked from", backlinks)}
+    <p class="module-boundary">${escapeHtml(boundary)}</p>
+    ${compilerDiagnostics}
+  </section>`;
+}
+
 function renderInspector() {
   if (!state.document || state.view !== "document") return "";
   const diagnostics = (state.evaluation?.diagnostics || []).filter(
@@ -687,6 +1280,7 @@ function renderInspector() {
         : ""
     }
     ${diagnosticsHtml}
+    ${renderDependencyContext()}
     ${
       state.showBuild
         ? `<section class="inspect-section build-section">
@@ -1012,6 +1606,14 @@ function updateSource(source, { evaluate = true } = {}) {
     issues: [],
   };
   state.dirty = source !== state.savedSource;
+  const session = currentSession();
+  if (session) {
+    session.document = state.document;
+    session.editRevision += 1;
+    session.conflict = null;
+    storeRecoveryDraft(session, source);
+    scheduleAutosave(session);
+  }
   state.evaluationInvalidation = invalidation;
   if (invalidation) {
     state.traceContext = null;
@@ -1513,72 +2115,112 @@ function scheduleEvaluation(
 }
 
 function updateStatusOnly() {
-  const status = document.querySelector(".status-left span:first-child");
-  if (status) {
-    const next = evaluationStatus();
-    status.textContent = next.label;
-    status.classList.remove("status-ok", "status-error");
-    if (next.className) status.classList.add(next.className);
+  const footer = document.querySelector(".statusbar");
+  if (!footer) return;
+  footer.textContent = state.workspaceError || "";
+  footer.classList.toggle("status-error", Boolean(state.workspaceError));
+  footer.setAttribute(
+    "aria-hidden",
+    state.workspaceError ? "false" : "true",
+  );
+}
+
+function scheduleAutosave(session, { immediate = false } = {}) {
+  if (state.refactorInFlight) {
+    session.autosaveQueued = true;
+    return;
   }
-  const saveButton = document.querySelector("#save-button");
-  if (saveButton) saveButton.disabled = !state.dirty || state.saving;
+  clearTimeout(session.autosaveTimer);
+  session.autosaveTimer = setTimeout(
+    () => void drainAutosave(session),
+    immediate ? 0 : 300,
+  );
+}
+
+async function drainAutosave(session) {
+  clearTimeout(session.autosaveTimer);
+  session.autosaveTimer = null;
+  if (session.autosaveInFlight) {
+    session.autosaveQueued = true;
+    return false;
+  }
+  const source =
+    session === currentSession()
+      ? state.document.source
+      : session.editorState?.doc.toString() || session.document.source;
+  if (source === session.savedSource) return true;
+  const revision = session.editRevision;
+  const expectedDigest = session.savedVersion;
+  session.autosaveInFlight = true;
+  session.autosaveQueued = false;
+  let succeeded = false;
+  try {
+    const payload = await api("/api/page/source", {
+      method: "PUT",
+      body: JSON.stringify({
+        module: session.module,
+        source,
+        expectedDigest,
+        editRevision: revision,
+      }),
+    });
+    session.savedVersion = payload.digest;
+    session.savedSource = source;
+    session.acknowledgedRevision = payload.acknowledgedRevision;
+    session.conflict = null;
+    const latestSource =
+      session === currentSession()
+        ? state.document.source
+        : session.editorState?.doc.toString() || session.document.source;
+    if (latestSource === source) clearRecoveryDraft(session.module);
+    else storeRecoveryDraft(session, latestSource);
+    state.project = payload.project;
+    state.projectVersion = payload.projectVersion;
+    if (session === currentSession()) {
+      state.savedVersion = session.savedVersion;
+      state.savedSource = session.savedSource;
+      state.dirty = state.document.source !== session.savedSource;
+      state.workspaceError = null;
+      updateStatusOnly();
+      if (state.evaluationInvalidation) {
+        scheduleEvaluation(state.document.source, {
+          immediate: true,
+          plan: buildExecutionPlan(
+            state.document.source,
+            state.document.blocks,
+          ),
+        });
+      }
+    }
+    succeeded = true;
+    return true;
+  } catch (error) {
+    session.conflict = error.message;
+    if (session === currentSession()) {
+      state.workspaceError = error.message;
+      updateStatusOnly();
+    }
+    return false;
+  } finally {
+    session.autosaveInFlight = false;
+    const currentSource =
+      session === currentSession()
+        ? state.document.source
+        : session.editorState?.doc.toString() || session.document.source;
+    if (
+      succeeded &&
+      (session.autosaveQueued || currentSource !== session.savedSource)
+    ) {
+      scheduleAutosave(session, { immediate: true });
+    }
+  }
 }
 
 async function save() {
-  if (!state.dirty) return true;
-  if (state.saving) return false;
-  const path = state.path;
-  const source = state.document.source;
-  const baseVersion = state.savedVersion;
-  const baseProjectVersion = state.projectVersion;
-  state.saving = true;
-  updateStatusOnly();
-  invalidateEvaluation();
-  try {
-    const payload = await api("/api/document", {
-      method: "PUT",
-      body: JSON.stringify({
-        path,
-        source,
-        baseVersion,
-        baseProjectVersion,
-      }),
-    });
-    state.changes.unshift(payload.change);
-    state.project = payload.project;
-    state.projectVersion = payload.project.version;
-    const sameDocument = state.path === path;
-    const sameDraft = sameDocument && state.document.source === source;
-    if (sameDraft) {
-      state.document = payload.document;
-      state.savedVersion = payload.document.version;
-      state.savedSource = payload.document.source;
-      state.evaluation = payload.evaluation;
-      state.evaluationPlan = buildExecutionPlan(
-        payload.document.source,
-        payload.document.blocks,
-      );
-      state.evaluationInvalidation = null;
-      state.dirty = false;
-      toast("Saved as a versioned change set.");
-    } else if (sameDocument) {
-      state.savedVersion = payload.document.version;
-      state.savedSource = source;
-      state.dirty = state.document.source !== state.savedSource;
-      scheduleEvaluation(state.document.source, { immediate: true });
-      toast("Saved the earlier revision; newer edits remain unsaved.");
-    } else {
-      toast(`Saved ${path}; the current document was left unchanged.`);
-    }
-    render();
-    return sameDraft;
-  } catch (error) {
-    toast(error.message);
-    return false;
-  } finally {
-    state.saving = false;
-    updateStatusOnly();
-  }
+  const session = currentSession();
+  if (!session) return true;
+  captureCurrentSession();
+  return drainAutosave(session);
 }
 
 async function buildArtifact(entry, name) {
@@ -1607,16 +2249,39 @@ async function buildArtifact(entry, name) {
 function mountEmbeddedEditors() {
   const documentParent = document.querySelector("[data-document-editor]");
   if (documentParent) {
+    const session = currentSession();
     state.sourceEditorView = mountMarkdownEditor(documentParent, {
       doc: state.document.source,
+      editorState: session?.editorState || null,
+      wikiModules:
+        state.project?.pageIndex?.modules ||
+        state.project?.documents.map((document) => document.module) ||
+        [],
+      onWikiNavigate: async (modulePath) => {
+        if (
+          !state.project.documents.some(
+            (document) => document.module === modulePath,
+          )
+        ) {
+          state.workspaceError = `Module ${modulePath} does not exist yet. Add it in the module outline.`;
+          updateStatusOnly();
+          return;
+        }
+        await loadDocument(modulePath, {
+          history: "push",
+          focus: "main",
+        });
+      },
       onSave: save,
+      onStateChange: (editorState) => {
+        const active = currentSession();
+        if (active) active.editorState = editorState;
+      },
       onCompletionKey: handleCompletionKey,
       onChange: (source) => {
-        if (!documentParent.isConnected) return;
         updateSource(source);
       },
       onSelectionChange: (position) => {
-        if (!documentParent.isConnected) return;
         if (state.suppressNextSelectionLookup) {
           state.suppressNextSelectionLookup = false;
           return;
@@ -1639,7 +2304,6 @@ function mountEmbeddedEditors() {
       },
       onBlur: () => {
         if (
-          !documentParent.isConnected ||
           !state.dirty ||
           !state.evaluationInvalidation
         ) {
@@ -1654,6 +2318,14 @@ function mountEmbeddedEditors() {
         });
       },
     });
+    if (session) {
+      session.editorState = state.sourceEditorView.state;
+      queueMicrotask(() => {
+        state.sourceEditorView?.scrollDOM.scrollTo({
+          top: session.scrollTop || 0,
+        });
+      });
+    }
     setMarkdownEditorEvaluation(state.sourceEditorView, {
       evaluation: state.evaluation,
       blocks: state.document.blocks,
@@ -1716,39 +2388,23 @@ function bindSourceObservationEvents(documentParent) {
 }
 
 async function createDocument() {
-  if (
-    state.dirty &&
-    !window.confirm("Discard the current unsaved changes and create a document?")
-  ) {
-    return;
-  }
-  const requested = window.prompt("New document path", "new.live.md");
-  if (!requested) return;
-  const path = requested.endsWith(".live.md") ? requested : `${requested}.live.md`;
-  const title =
-    path
-      .split("/")
-      .at(-1)
-      .replace(/\.live\.md$/, "")
-      .replace(/[-_]+/g, " ")
-      .replace(/\b\w/g, (letter) => letter.toUpperCase()) || "Untitled";
-  const source = `# ${title}\n\nStart writing here.\n\n    let () = Doc.text ~id:"main-view" "Hello from OCaml"\n`;
+  const modulePath = window.prompt("New module", "NewPage");
+  if (!modulePath) return;
   try {
-    const payload = await api("/api/document", {
+    const payload = await api("/api/page", {
       method: "POST",
       body: JSON.stringify({
-        path,
-        source,
+        module: modulePath,
         baseProjectVersion: state.projectVersion,
       }),
     });
     state.project = payload.project;
-    state.projectVersion = payload.project.version;
-    state.changes.unshift(payload.change);
-    await loadDocument(path, { force: true });
-    toast("Created a new live document.");
+    state.projectVersion = payload.projectVersion;
+    refreshOutlineModel({ force: true });
+    await loadDocument(modulePath, { force: true });
   } catch (error) {
-    toast(error.message);
+    state.workspaceError = error.message;
+    updateStatusOnly();
   }
 }
 
@@ -1803,7 +2459,13 @@ async function openTrace(trace) {
     const context = state.evaluation?.traces?.length
       ? state.evaluation
       : state.traceContext;
-    if (await loadDocument(trace.path, { preserveTrace: true })) {
+    const modulePath = state.project.documents.find(
+      (document) => document.path === trace.path,
+    )?.module;
+    if (
+      modulePath &&
+      (await loadDocument(modulePath, { preserveTrace: true }))
+    ) {
       state.traceContext = context;
       state.selectedTraceId = trace.occurrenceId;
       refreshInspector();
@@ -1816,6 +2478,14 @@ async function openTrace(trace) {
 }
 
 function bindInspectorEvents() {
+  document.querySelectorAll("[data-module-link]").forEach((button) => {
+    button.addEventListener("click", () =>
+      loadDocument(button.dataset.moduleLink, {
+        history: "push",
+        focus: "main",
+      }),
+    );
+  });
   document.querySelectorAll("[data-completion-index]").forEach((button) => {
     button.addEventListener("pointerdown", (event) => event.preventDefault());
     button.addEventListener("click", () =>
@@ -1859,6 +2529,7 @@ function bindInspectorEvents() {
 }
 
 function bindEvents() {
+  mountOutlineEditor();
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => {
       state.view = button.dataset.view;
@@ -1873,7 +2544,11 @@ function bindEvents() {
         state.view = "document";
         state.showBuild = false;
         render();
-      } else if (await loadDocument(path)) {
+      } else {
+        const modulePath = state.project.documents.find(
+          (document) => document.path === path,
+        )?.module;
+        if (!modulePath || !(await loadDocument(modulePath))) return;
         state.view = "document";
         state.showBuild = false;
         render();
@@ -1909,7 +2584,10 @@ function bindEvents() {
         render();
         return;
       }
-      if (await loadDocument(path)) {
+      const modulePath = state.project.documents.find(
+        (document) => document.path === path,
+      )?.module;
+      if (modulePath && (await loadDocument(modulePath))) {
         state.view = "document";
         state.showBuild = false;
         render();
@@ -1953,8 +2631,24 @@ function bindArtifactForm() {
 
 initialize();
 
-window.addEventListener("beforeunload", (event) => {
-  if (!state.dirty) return;
-  event.preventDefault();
-  event.returnValue = "";
+window.addEventListener("popstate", (event) => {
+  const modulePath =
+    event.state?.module ||
+    decodeURIComponent(window.location.pathname.match(/^\/page\/(.+)$/)?.[1] || "");
+  if (modulePath && modulePath !== state.module) {
+    void loadDocument(modulePath, {
+      force: true,
+      history: "none",
+      focus: "main",
+    });
+  }
+});
+
+window.addEventListener("pagehide", () => {
+  captureCurrentSession();
+  for (const session of state.sessions.values()) {
+    if (session.document?.source !== session.savedSource) {
+      void drainAutosave(session);
+    }
+  }
 });

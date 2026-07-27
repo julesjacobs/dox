@@ -22,7 +22,7 @@ let check path =
   | Ok snapshot -> (
       match Project.document snapshot path with
       | Ok document -> (
-          match Project.resolve_documents snapshot document with
+          match Project.resolve_documents project snapshot document with
           | Error error ->
               prerr_endline (Project.error_message error);
               exit 1

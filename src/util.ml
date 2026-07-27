@@ -46,7 +46,7 @@ let write_file_atomic path contents =
   | Sys_error message -> Error message
   | Unix.Unix_error (error, _, _) -> Error (Unix.error_message error)
 
-let write_file_atomic_if_digest path ~expected contents =
+let write_file_atomic_if_absent path contents =
   let directory = Filename.dirname path in
   let basename = Filename.basename path in
   try
@@ -60,21 +60,17 @@ let write_file_atomic_if_digest path ~expected contents =
       flush channel;
       Unix.fsync (Unix.descr_of_out_channel channel);
       close_out channel;
-      let current =
-        match read_file path with
-        | Ok source -> Ok (Digest.to_hex (Digest.string source))
-        | Error message -> Error (`Io message)
-      in
-      match current with
-      | Ok digest when String.equal digest expected ->
-          Unix.rename temporary path;
-          Ok ()
-      | Ok _ ->
+      try
+        Unix.link temporary path;
+        Sys.remove temporary;
+        Ok ()
+      with
+      | Unix.Unix_error (Unix.EEXIST, _, _) ->
           Sys.remove temporary;
           Error `Changed
-      | Error error ->
-          Sys.remove temporary;
-          Error error
+      | error ->
+          (try Sys.remove temporary with Sys_error _ -> ());
+          raise error
     with error ->
       close_out_noerr channel;
       (try Sys.remove temporary with Sys_error _ -> ());
@@ -256,9 +252,15 @@ let safe_existing_path ~root relative =
 let safe_new_path ~root relative =
   let* () = validate_relative_path relative in
   let candidate = Filename.concat root relative in
+  let rec existing_parent path =
+    if Sys.file_exists path then path
+    else
+      let parent = Filename.dirname path in
+      if String.equal parent path then path else existing_parent parent
+  in
   try
     let root = Unix.realpath root in
-    let parent = Unix.realpath (Filename.dirname candidate) in
+    let parent = Unix.realpath (existing_parent (Filename.dirname candidate)) in
     if not (path_is_inside ~root parent) then Error "path leaves the project"
     else Ok candidate
   with Unix.Unix_error (error, _, _) -> Error (Unix.error_message error)

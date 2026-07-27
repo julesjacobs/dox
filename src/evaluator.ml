@@ -542,15 +542,84 @@ let newline_count source =
       if Char.equal character '\n' then count + 1 else count)
     0 source
 
+let rec namespace_alias_source entries =
+  let groups =
+    entries
+    |> List.filter_map (fun (components, module_path) ->
+        match components with
+        | [] -> None
+        | component :: rest -> Some (component, rest, module_path))
+    |> List.fold_left
+         (fun groups (component, rest, module_path) ->
+           let current =
+             Option.value ~default:[] (List.assoc_opt component groups)
+           in
+           (component, (rest, module_path) :: current)
+           :: List.remove_assoc component groups)
+         []
+    |> List.sort (fun (left, _) (right, _) -> String.compare left right)
+  in
+  groups
+  |> List.map (fun (component, children) ->
+      match children with
+      | [ ([], module_path) ] ->
+          Printf.sprintf "module %s = %s" component
+            (Module_path.compiler_unit module_path)
+      | _ ->
+          Printf.sprintf "module %s = struct\n%s\nend" component
+            (namespace_alias_source children))
+  |> String.concat "\n"
+
 let merlin_source ~documents ~target =
-  let imported =
+  let module_paths =
+    documents
+    |> List.filter_map (fun (document : Document.t) ->
+        Result.to_option (Module_path.of_source_path document.path))
+  in
+  let opens (document : Document.t) =
+    document.imports
+    |> List.filter_map (fun path ->
+        Result.to_option (Module_path.of_source_path path))
+    |> List.map (fun module_path ->
+        "open " ^ Module_path.compiler_unit module_path)
+    |> String.concat "\n"
+  in
+  let wrapped document =
+    let module_path =
+      Result.to_option (Module_path.of_source_path document.Document.path)
+    in
+    let aliases =
+      module_paths
+      |> List.filter (fun candidate ->
+          not (Option.equal String.equal module_path (Some candidate)))
+      |> List.map (fun candidate -> (Module_path.split candidate, candidate))
+      |> namespace_alias_source
+    in
+    match Module_path.of_source_path document.Document.path with
+    | Ok module_path ->
+        Printf.sprintf "module %s = struct\n%s\n%s\n%s\nend\n"
+          (Module_path.compiler_unit module_path)
+          (opens document) aliases
+          (merlin_target_source document)
+    | Error _ -> merlin_target_source document
+  in
+  let imported_documents =
     documents
     |> List.filter (fun document ->
         not (String.equal document.Document.path target.Document.path))
-    |> List.map merlin_target_source
-    |> String.concat "\n"
   in
-  let prefix = prelude ^ "\n" ^ imported ^ "\n" in
+  let imported = imported_documents |> List.map wrapped |> String.concat "\n" in
+  let alias_source =
+    imported_documents
+    |> List.filter_map (fun document ->
+        Result.to_option (Module_path.of_source_path document.Document.path))
+    |> List.map (fun module_path ->
+        (Module_path.split module_path, module_path))
+    |> namespace_alias_source
+  in
+  let prefix =
+    prelude ^ "\n" ^ imported ^ "\n" ^ alias_source ^ "\n" ^ opens target ^ "\n"
+  in
   (prefix ^ merlin_target_source target, newline_count prefix)
 
 let type_at_with_cancel ~cancelled ~documents ~target ~line ~column =
@@ -561,8 +630,7 @@ let type_at_with_cancel ~cancelled ~documents ~target ~line ~column =
   in
   let result =
     run_process ~stdin:source ~timeout_seconds:3. ~output_limit:262_144
-      ~cancelled
-      (merlin ())
+      ~cancelled (merlin ())
       [
         "single";
         "type-enclosing";
@@ -587,15 +655,20 @@ let type_at_with_cancel ~cancelled ~documents ~target ~line ~column =
         Error ("Invalid Merlin response: " ^ message)
 
 let type_at ~documents ~target ~line ~column =
-  type_at_with_cancel ~cancelled:(fun () -> false) ~documents ~target ~line
-    ~column
+  type_at_with_cancel
+    ~cancelled:(fun () -> false)
+    ~documents ~target ~line ~column
 
 let completion_entry_of_json json =
   let open Yojson.Safe.Util in
-  match (json |> member "name", json |> member "kind", json |> member "desc") with
+  match
+    (json |> member "name", json |> member "kind", json |> member "desc")
+  with
   | `String name, `String kind, `String desc ->
       let deprecated =
-        match json |> member "deprecated" with `Bool value -> value | _ -> false
+        match json |> member "deprecated" with
+        | `Bool value -> value
+        | _ -> false
       in
       Some { name; kind; desc; deprecated }
   | _ -> None
@@ -615,8 +688,8 @@ let completion_entries_of_json json =
       in
       Error ("Merlin could not complete this expression: " ^ message)
 
-let complete_at_with_cancel ~cancelled ~documents ~target ~line ~column
-    ~context =
+let complete_at_with_cancel ~cancelled ~documents ~target ~line ~column ~context
+    =
   let source, line_offset = merlin_source ~documents ~target in
   let column =
     max 0 (column - source_indentation target line)
@@ -642,9 +715,7 @@ let complete_at_with_cancel ~cancelled ~documents ~target ~line ~column
          "Could not query OCaml completions."
        else String.trim result.stderr)
   else
-    try
-      Yojson.Safe.from_string result.stdout |> completion_entries_of_json
-    with
+    try Yojson.Safe.from_string result.stdout |> completion_entries_of_json with
     | Yojson.Json_error message -> Error ("Invalid Merlin response: " ^ message)
     | Yojson.Safe.Util.Type_error (message, _) ->
         Error ("Invalid Merlin response: " ^ message)
@@ -843,57 +914,257 @@ type inline_marker = {
 let block_marker evaluation_id index phase =
   Printf.sprintf "\030DOCLANG:%s:%d:%c\031" evaluation_id index phase
 
-let instrumented_compilation_source evaluation_id documents =
+let instrumented_compilation_source evaluation_id documents target =
   let next_index = ref 0 in
   let next_inline_index = ref 0 in
   let markers = ref [] in
   let inline_markers = ref [] in
-  let block_sources =
-    documents
-    |> List.concat_map (fun (document : Document.t) ->
-        document.blocks
-        |> List.filter_map (function
-          | Document.Code
-              { id; source; source_line; kind = Document.Program; _ } ->
-              let index = !next_index in
-              incr next_index;
-              markers :=
-                { index; path = document.path; block_id = id } :: !markers;
-              let start_marker = block_marker evaluation_id index 'S' in
-              let end_marker = block_marker evaluation_id index 'E' in
-              Some
-                (Printf.sprintf
-                   "# 1 %S\n\
-                    let () = output_string stdout %S; flush stdout; \
-                    output_string stderr %S; flush stderr\n\
-                    # %d %S\n\
-                    %s\n\
-                    # 1 %S\n\
-                    let () = flush stdout; output_string stdout %S; flush \
-                    stdout; flush stderr; output_string stderr %S; flush stderr\n"
-                   "<doclang-block-boundary>" start_marker start_marker
-                   source_line document.path source "<doclang-block-boundary>"
-                   end_marker end_marker)
-          | _ -> None))
+  let document_source (document : Document.t) =
+    let block_sources =
+      document.blocks
+      |> List.filter_map (function
+        | Document.Code { id; source; source_line; kind = Document.Program; _ }
+          ->
+            let index = !next_index in
+            incr next_index;
+            markers :=
+              { index; path = document.path; block_id = id } :: !markers;
+            let start_marker = block_marker evaluation_id index 'S' in
+            let end_marker = block_marker evaluation_id index 'E' in
+            Some
+              (Printf.sprintf
+                 "# 1 %S\n\
+                  let () = output_string stdout %S; flush stdout; \
+                  output_string stderr %S; flush stderr\n\
+                  # %d %S\n\
+                  %s\n\
+                  # 1 %S\n\
+                  let () = flush stdout; output_string stdout %S; flush \
+                  stdout; flush stderr; output_string stderr %S; flush stderr\n"
+                 "<doclang-block-boundary>" start_marker start_marker
+                 source_line document.path source "<doclang-block-boundary>"
+                 end_marker end_marker)
+        | _ -> None)
+    in
+    let inline_sources =
+      Document.inline_expressions document
+      |> List.map (fun inline_expression ->
+          let index = !next_inline_index in
+          incr next_inline_index;
+          let virtual_path =
+            Printf.sprintf "<doclang-inline:%s:%d>" evaluation_id index
+          in
+          inline_markers :=
+            { virtual_path; document_path = document.path; inline_expression }
+            :: !inline_markers;
+          Printf.sprintf "# 1 %S\nlet () = try ignore (@(%s)) with _ -> ()\n"
+            virtual_path inline_expression.expression)
+    in
+    let legacy_opens =
+      document.imports
+      |> List.filter_map (fun path ->
+          Result.to_option (Module_path.of_source_path path))
+      |> List.map (fun module_path ->
+          "open " ^ Module_path.compiler_unit module_path)
+      |> String.concat "\n"
+    in
+    ( document,
+      "open Doclang_prelude\n" ^ legacy_opens ^ "\n"
+      ^ String.concat "\n" (block_sources @ inline_sources) )
   in
-  let inline_sources =
-    documents
-    |> List.concat_map (fun (document : Document.t) ->
-        Document.inline_expressions document
-        |> List.map (fun inline_expression ->
-            let index = !next_inline_index in
-            incr next_inline_index;
-            let virtual_path =
-              Printf.sprintf "<doclang-inline:%s:%d>" evaluation_id index
+  ignore target;
+  let sources = List.map document_source documents in
+  (sources, List.rev !markers, List.rev !inline_markers)
+
+let compile_document_units ?(prelude_source = prelude) ?entry ~directory
+    ~sources ~target ~cancelled () =
+  let unit_name document =
+    match Module_path.of_source_path document.Document.path with
+    | Ok module_path -> Module_path.compiler_unit module_path
+    | Error _ -> "Doclang__Page_" ^ Util.digest document.path
+  in
+  let modules =
+    sources
+    |> List.filter_map (fun (document, _) ->
+        Result.to_option (Module_path.of_source_path document.Document.path))
+  in
+  let prepared =
+    sources
+    |> List.map (fun (document, source) ->
+        let path =
+          Filename.concat directory
+            (String.uncapitalize_ascii (unit_name document) ^ ".ml")
+        in
+        (document, path, source))
+  in
+  let aliases =
+    Module_path.alias_units modules
+    |> List.map (fun (unit_name, source) ->
+        ( Filename.concat directory (String.uncapitalize_ascii unit_name ^ ".ml"),
+          source ))
+  in
+  let write_result =
+    Result.bind
+      (Util.write_file
+         (Filename.concat directory "doclang_prelude.ml")
+         prelude_source)
+      (fun () ->
+        Result.bind
+          (prepared
+          |> List.fold_left
+               (fun result (_, path, source) ->
+                 Result.bind result (fun () -> Util.write_file path source))
+               (Ok ()))
+          (fun () ->
+            aliases
+            |> List.fold_left
+                 (fun result (path, source) ->
+                   Result.bind result (fun () -> Util.write_file path source))
+                 (Ok ())))
+  in
+  let compile arguments =
+    run_process ~cwd:directory ~timeout_seconds:12. ~cancelled
+      ~output_limit:1_000_000 (compiler ()) arguments
+  in
+  match write_result with
+  | Error message ->
+      Error (diagnostic ~stage:"prepare" ~severity:"error" message)
+  | Ok () -> (
+      let prelude_result = compile [ "-c"; "doclang_prelude.ml" ] in
+      if not (successful prelude_result.status) then
+        Error (process_failure ~stage:"compile" prelude_result)
+      else
+        let alias_error =
+          aliases
+          |> List.find_map (fun (path, _) ->
+              let result =
+                compile
+                  [
+                    "-w"; "-49"; "-no-alias-deps"; "-c"; Filename.basename path;
+                  ]
+              in
+              if successful result.status then None else Some result)
+        in
+        match alias_error with
+        | Some result -> Error (process_failure ~stage:"compile" result)
+        | None ->
+            let rec compile_pass compiled pending warnings =
+              match pending with
+              | [] -> Ok (compiled, warnings)
+              | _ ->
+                  let succeeded, failed, warnings =
+                    pending
+                    |> List.fold_left
+                         (fun (succeeded, failed, warnings) item ->
+                           let _, path, _ = item in
+                           let result =
+                             compile
+                               [
+                                 "-g";
+                                 "-I";
+                                 "+unix";
+                                 "-I";
+                                 directory;
+                                 "-open";
+                                 "Doclang";
+                                 "-c";
+                                 Filename.basename path;
+                               ]
+                           in
+                           if successful result.status then
+                             ( item :: succeeded,
+                               failed,
+                               result.stderr :: warnings )
+                           else (succeeded, (item, result) :: failed, warnings))
+                         ([], [], warnings)
+                  in
+                  if succeeded = [] then
+                    let _, result = List.hd failed in
+                    Error (process_failure ~stage:"compile" result)
+                  else
+                    compile_pass
+                      (compiled @ List.rev succeeded)
+                      (List.rev_map fst failed) warnings
             in
-            inline_markers :=
-              { virtual_path; document_path = document.path; inline_expression }
-              :: !inline_markers;
-            Printf.sprintf "# 1 %S\nlet () = try ignore (@(%s)) with _ -> ()\n"
-              virtual_path inline_expression.expression))
-  in
-  let source = String.concat "\n" (block_sources @ inline_sources) in
-  (source, List.rev !markers, List.rev !inline_markers)
+            Result.bind (compile_pass [] prepared [])
+              (fun (compiled, warnings) ->
+                let target_path =
+                  compiled
+                  |> List.find_map (fun (document, path, _) ->
+                      if
+                        String.equal document.Document.path target.Document.path
+                      then Some (Filename.basename path)
+                      else None)
+                  |> Option.get
+                in
+                let signature =
+                  compile
+                    [ "-I"; directory; "-open"; "Doclang"; "-i"; target_path ]
+                in
+                if not (successful signature.status) then
+                  Error (process_failure ~stage:"compile" signature)
+                else
+                  let executable = Filename.concat directory "document.byte" in
+                  let objects =
+                    compiled
+                    |> List.map (fun (_, path, _) ->
+                        Filename.chop_extension (Filename.basename path)
+                        ^ ".cmo")
+                  in
+                  let driver =
+                    match entry with
+                    | None -> Ok []
+                    | Some entry ->
+                        let source =
+                          Printf.sprintf "open %s\nlet () = %s ()\n"
+                            (unit_name target) entry
+                        in
+                        Result.bind
+                          (Util.write_file
+                             (Filename.concat directory "driver.ml")
+                             source
+                          |> Result.map_error (fun message ->
+                              diagnostic ~stage:"prepare" ~severity:"error"
+                                message))
+                          (fun () ->
+                            let result =
+                              compile
+                                [
+                                  "-I";
+                                  directory;
+                                  "-open";
+                                  "Doclang";
+                                  "-c";
+                                  "driver.ml";
+                                ]
+                            in
+                            if successful result.status then Ok [ "driver.cmo" ]
+                            else Error (process_failure ~stage:"compile" result))
+                  in
+                  Result.bind driver (fun driver ->
+                      let linked =
+                        compile
+                          ([
+                             "-g";
+                             "-I";
+                             "+unix";
+                             "-I";
+                             directory;
+                             "unix.cma";
+                             "doclang_prelude.cmo";
+                           ]
+                          @ objects @ driver @ [ "-o"; executable ])
+                      in
+                      if not (successful linked.status) then
+                        Error (process_failure ~stage:"compile" linked)
+                      else
+                        Ok
+                          ( signature.stdout,
+                            executable,
+                            signature.stderr :: linked.stderr :: warnings
+                            |> List.filter (fun value ->
+                                not (String.equal (String.trim value) ""))
+                            |> String.concat "\n" ))))
 
 let split_block_output evaluation_id markers output =
   let marker_prefix = Printf.sprintf "\030DOCLANG:%s:" evaluation_id in
@@ -1072,10 +1343,9 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
   in
   let directory = Filename.temp_dir "doclang-eval-" "" in
   let event_path = Filename.concat directory "events" in
-  let document_source, block_markers, inline_markers =
-    instrumented_compilation_source evaluation_id documents
+  let document_sources, block_markers, inline_markers =
+    instrumented_compilation_source evaluation_id documents target
   in
-  let source = prelude ^ "\n" ^ document_source in
   let parse_diagnostics =
     documents
     |> List.concat_map (fun (document : Document.t) ->
@@ -1103,13 +1373,15 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
             parse_diagnostics
         then ("invalid", "", "", "", [], [], parse_diagnostics)
         else
-          match compile_source ~directory ~source ~cancelled with
+          match
+            compile_document_units ~directory ~sources:document_sources ~target
+              ~cancelled ()
+          with
           | Error compilation ->
               ("compile-error", "", "", "", [], [], [ compilation ])
           | Ok (signature, executable, warnings) ->
               let runtime =
-                run_process ~timeout_seconds:5.
-                  ~cancelled
+                run_process ~timeout_seconds:5. ~cancelled
                   ~environment:[ ("DOCLANG_EVENT_PATH", event_path) ]
                   ~extra_output_paths:[ event_path ] executable []
               in
@@ -1302,26 +1574,65 @@ let to_json result =
 let build_artifact_documents ~documents ~entry ~output =
   let directory = Filename.dirname output in
   let source_path = output ^ ".ml" in
-  let source =
-    artifact_prelude ^ "\n"
-    ^ (documents |> List.map Document.compilation_source |> String.concat "\n")
-    ^ Printf.sprintf "\nlet () = %s ()\n" entry
+  let source_for (document : Document.t) =
+    let opens =
+      document.imports
+      |> List.filter_map (fun path ->
+          Result.to_option (Module_path.of_source_path path))
+      |> List.map (fun module_path ->
+          "open " ^ Module_path.compiler_unit module_path)
+      |> String.concat "\n"
+    in
+    "open Doclang_prelude\n" ^ opens ^ "\n"
+    ^ Document.compilation_source document
   in
   match Util.ensure_directory directory with
   | Error message -> Error message
-  | Ok () -> (
-      match Util.write_file source_path source with
-      | Error message -> Error message
-      | Ok () ->
-          let result =
-            run_process ~timeout_seconds:30. (compiler ())
-              [ "-I"; "+unix"; "-o"; output; "unix.cma"; source_path ]
+  | Ok () ->
+      let target = List.hd (List.rev documents) in
+      let build_directory =
+        Filename.temp_dir ~temp_dir:directory ".build-" ""
+      in
+      Fun.protect
+        ~finally:(fun () -> remove_temp_directory build_directory)
+        (fun () ->
+          let sources =
+            List.map (fun document -> (document, source_for document)) documents
           in
-          if successful result.status && not result.output_limited then
-            Ok (source_path, result.stderr)
-          else
-            let failure = process_failure ~stage:"artifact" result in
-            Error failure.message)
+          match
+            compile_document_units ~prelude_source:artifact_prelude ~entry
+              ~directory:build_directory ~sources ~target
+              ~cancelled:(fun () -> false)
+              ()
+          with
+          | Error diagnostic -> Error diagnostic.message
+          | Ok (_, executable, warnings) -> (
+              match Util.read_file executable with
+              | Error message -> Error message
+              | Ok bytes -> (
+                  match Util.write_file output bytes with
+                  | Error message -> Error message
+                  | Ok () ->
+                      Unix.chmod output 0o755;
+                      let generated =
+                        Printf.sprintf
+                          "(* Generated from %s and its qualified module \
+                           dependencies. *)\n\
+                           open %s\n\
+                           let () = %s ()\n"
+                          target.Document.path
+                          (match
+                             Module_path.of_source_path target.Document.path
+                           with
+                          | Ok module_path ->
+                              Module_path.compiler_unit module_path
+                          | Error _ ->
+                              "Doclang__Page_" ^ Util.digest target.path)
+                          entry
+                      in
+                      Result.map
+                        (fun () -> (source_path, warnings))
+                        (Util.write_file source_path generated))))
 
 let build_artifact ~document ~entry ~output =
   build_artifact_documents ~documents:[ document ] ~entry ~output

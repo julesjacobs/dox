@@ -1,0 +1,375 @@
+type t = string
+type error = string
+
+let component_re = Str.regexp "^[A-Z][a-z0-9_']*$"
+let split value = String.split_on_char '.' value
+
+let validate value =
+  let components = split value in
+  if String.equal value "" then Error "A module path cannot be empty."
+  else if List.exists (String.equal "") components then
+    Error "A module path cannot contain an empty component."
+  else
+    match
+      List.find_opt
+        (fun part -> not (Str.string_match component_re part 0))
+        components
+    with
+    | Some part ->
+        Error
+          (Printf.sprintf
+             "Invalid module component %S. Components use [A-Z][a-z0-9_']*."
+             part)
+    | None -> Ok value
+
+let capitalize_component value =
+  if String.equal value "" then value
+  else
+    String.make 1 (Char.uppercase_ascii value.[0])
+    ^ String.sub value 1 (String.length value - 1)
+
+let uncapitalize_component value =
+  String.make 1 (Char.lowercase_ascii value.[0])
+  ^ String.sub value 1 (String.length value - 1)
+
+let source_path value =
+  split value |> List.map uncapitalize_component |> String.concat "/"
+  |> fun path -> path ^ ".live.md"
+
+let of_source_path path =
+  if not (Util.ends_with ~suffix:".live.md" path) then
+    Error "Page source paths must end in .live.md."
+  else
+    let stem = String.sub path 0 (String.length path - 8) in
+    let components = String.split_on_char '/' stem in
+    if
+      List.exists
+        (fun part ->
+          String.equal part "" || String.equal part "."
+          || String.equal part "..")
+        components
+    then Error "Page source paths cannot contain empty, '.' or '..' components."
+    else
+      let module_path =
+        components |> List.map capitalize_component |> String.concat "."
+      in
+      validate module_path
+
+let namespace_prefixes value =
+  let rec loop prefix result = function
+    | [] | [ _ ] -> List.rev result
+    | component :: rest ->
+        let prefix =
+          if String.equal prefix "" then component else prefix ^ "." ^ component
+        in
+        loop prefix (prefix :: result) rest
+  in
+  loop "" [] (split value)
+
+let is_beneath ~namespace value =
+  String.equal namespace value
+  || Util.starts_with ~prefix:(namespace ^ ".") value
+
+let replace_prefix ~before ~after value =
+  if String.equal value before then Some after
+  else if Util.starts_with ~prefix:(before ^ ".") value then
+    Some
+      (after
+      ^ String.sub value (String.length before)
+          (String.length value - String.length before))
+  else None
+
+let compare = String.compare
+let compiler_unit value = "Doclang__" ^ (split value |> String.concat "__")
+let namespace_unit = function "" -> "Doclang" | value -> compiler_unit value
+
+let alias_units modules =
+  let rec take count = function
+    | _ when count <= 0 -> []
+    | [] -> []
+    | value :: rest -> value :: take (count - 1) rest
+  in
+  let namespaces =
+    "" :: (modules |> List.concat_map namespace_prefixes)
+    |> List.sort_uniq String.compare
+  in
+  namespaces
+  |> List.map (fun namespace ->
+      let prefix = if String.equal namespace "" then [] else split namespace in
+      let prefix_length = List.length prefix in
+      let members =
+        modules
+        |> List.filter_map (fun module_path ->
+            let components = split module_path in
+            if
+              List.length components <= prefix_length
+              || take prefix_length components <> prefix
+            then None
+            else
+              let component = List.nth components prefix_length in
+              let target =
+                components |> take (prefix_length + 1) |> String.concat "."
+              in
+              Some (component, target))
+        |> List.sort_uniq Stdlib.compare
+      in
+      let source =
+        members
+        |> List.map (fun (component, target) ->
+            Printf.sprintf "module %s = %s" component (namespace_unit target))
+        |> String.concat "\n"
+      in
+      (namespace_unit namespace, source ^ "\n"))
+
+type lexical_state = {
+  mutable comment_depth : int;
+  mutable in_string : bool;
+  mutable in_character : bool;
+  mutable escaped : bool;
+  mutable quoted_closing : string option;
+}
+
+let identifier_character = function
+  | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' | '\'' -> true
+  | _ -> false
+
+let code_mask source =
+  let masked = Bytes.of_string source in
+  let mask index = if source.[index] <> '\n' then Bytes.set masked index ' ' in
+  let mask_range index length =
+    for cursor = index to index + length - 1 do
+      mask cursor
+    done
+  in
+  let state =
+    {
+      comment_depth = 0;
+      in_string = false;
+      in_character = false;
+      escaped = false;
+      quoted_closing = None;
+    }
+  in
+  let rec loop index =
+    if index >= String.length source then ()
+    else if Option.is_some state.quoted_closing then
+      let closing = Option.get state.quoted_closing in
+      if
+        index + String.length closing <= String.length source
+        && String.sub source index (String.length closing) = closing
+      then (
+        mask_range index (String.length closing);
+        state.quoted_closing <- None;
+        loop (index + String.length closing))
+      else (
+        mask index;
+        loop (index + 1))
+    else if state.comment_depth > 0 then
+      if
+        index + 1 < String.length source
+        && source.[index] = '('
+        && source.[index + 1] = '*'
+      then (
+        mask_range index 2;
+        state.comment_depth <- state.comment_depth + 1;
+        loop (index + 2))
+      else if
+        index + 1 < String.length source
+        && source.[index] = '*'
+        && source.[index + 1] = ')'
+      then (
+        mask_range index 2;
+        state.comment_depth <- state.comment_depth - 1;
+        loop (index + 2))
+      else (
+        mask index;
+        loop (index + 1))
+    else if state.in_string || state.in_character then (
+      let character = source.[index] in
+      mask index;
+      if state.escaped then state.escaped <- false
+      else if character = '\\' then state.escaped <- true
+      else if state.in_string && character = '"' then state.in_string <- false
+      else if state.in_character && character = '\'' then
+        state.in_character <- false;
+      loop (index + 1))
+    else if
+      index + 1 < String.length source
+      && source.[index] = '('
+      && source.[index + 1] = '*'
+    then (
+      mask_range index 2;
+      state.comment_depth <- 1;
+      loop (index + 2))
+    else if source.[index] = '"' then (
+      mask index;
+      state.in_string <- true;
+      state.escaped <- false;
+      loop (index + 1))
+    else if source.[index] = '{' then
+      let rec quoted_opening cursor =
+        if cursor >= String.length source then None
+        else if source.[cursor] = '|' then
+          Some
+            ( cursor + 1,
+              "|" ^ String.sub source (index + 1) (cursor - index - 1) ^ "}" )
+        else
+          match source.[cursor] with
+          | 'a' .. 'z' | '_' -> quoted_opening (cursor + 1)
+          | _ -> None
+      in
+      match quoted_opening (index + 1) with
+      | Some (next, closing) ->
+          mask_range index (next - index);
+          state.quoted_closing <- Some closing;
+          loop next
+      | None -> loop (index + 1)
+    else if
+      source.[index] = '\''
+      && index + 2 < String.length source
+      && (source.[index + 2] = '\''
+         || source.[index + 1] = '\\'
+            && index + 3 < String.length source
+            && source.[index + 3] = '\'')
+    then (
+      mask index;
+      state.in_character <- true;
+      state.escaped <- false;
+      loop (index + 1))
+    else loop (index + 1)
+  in
+  loop 0;
+  Bytes.unsafe_to_string masked
+
+let rewrite_qualified_references ~modules source =
+  let modules =
+    List.sort
+      (fun left right ->
+        Stdlib.compare (String.length right) (String.length left))
+      modules
+  in
+  let state =
+    {
+      comment_depth = 0;
+      in_string = false;
+      in_character = false;
+      escaped = false;
+      quoted_closing = None;
+    }
+  in
+  let buffer = Buffer.create (String.length source + 32) in
+  let matching index =
+    List.find_opt
+      (fun module_path ->
+        let length = String.length module_path in
+        index + length <= String.length source
+        && String.sub source index length = module_path
+        && (index = 0
+           ||
+           let character = source.[index - 1] in
+           not (identifier_character character || character = '.'))
+        && (index + length = String.length source
+           ||
+           let character = source.[index + length] in
+           character = '.' || not (identifier_character character)))
+      modules
+  in
+  let rec loop index =
+    if index >= String.length source then ()
+    else if Option.is_some state.quoted_closing then
+      let closing = Option.get state.quoted_closing in
+      if
+        index + String.length closing <= String.length source
+        && String.sub source index (String.length closing) = closing
+      then (
+        Buffer.add_string buffer closing;
+        state.quoted_closing <- None;
+        loop (index + String.length closing))
+      else (
+        Buffer.add_char buffer source.[index];
+        loop (index + 1))
+    else if state.comment_depth > 0 then
+      if
+        index + 1 < String.length source
+        && source.[index] = '('
+        && source.[index + 1] = '*'
+      then (
+        Buffer.add_string buffer "(*";
+        state.comment_depth <- state.comment_depth + 1;
+        loop (index + 2))
+      else if
+        index + 1 < String.length source
+        && source.[index] = '*'
+        && source.[index + 1] = ')'
+      then (
+        Buffer.add_string buffer "*)";
+        state.comment_depth <- state.comment_depth - 1;
+        loop (index + 2))
+      else (
+        Buffer.add_char buffer source.[index];
+        loop (index + 1))
+    else if state.in_string || state.in_character then (
+      let character = source.[index] in
+      Buffer.add_char buffer character;
+      if state.escaped then state.escaped <- false
+      else if character = '\\' then state.escaped <- true
+      else if state.in_string && character = '"' then state.in_string <- false
+      else if state.in_character && character = '\'' then
+        state.in_character <- false;
+      loop (index + 1))
+    else if
+      index + 1 < String.length source
+      && source.[index] = '('
+      && source.[index + 1] = '*'
+    then (
+      Buffer.add_string buffer "(*";
+      state.comment_depth <- 1;
+      loop (index + 2))
+    else if source.[index] = '"' then (
+      Buffer.add_char buffer '"';
+      state.in_string <- true;
+      state.escaped <- false;
+      loop (index + 1))
+    else if source.[index] = '{' then (
+      let rec quoted_opening cursor =
+        if cursor >= String.length source then None
+        else if source.[cursor] = '|' then
+          Some
+            ( cursor + 1,
+              "|" ^ String.sub source (index + 1) (cursor - index - 1) ^ "}" )
+        else
+          match source.[cursor] with
+          | 'a' .. 'z' | '_' -> quoted_opening (cursor + 1)
+          | _ -> None
+      in
+      match quoted_opening (index + 1) with
+      | Some (next, closing) ->
+          Buffer.add_substring buffer source index (next - index);
+          state.quoted_closing <- Some closing;
+          loop next
+      | None ->
+          Buffer.add_char buffer source.[index];
+          loop (index + 1))
+    else if
+      source.[index] = '\''
+      && index + 2 < String.length source
+      && (source.[index + 2] = '\''
+         || source.[index + 1] = '\\'
+            && index + 3 < String.length source
+            && source.[index + 3] = '\'')
+    then (
+      Buffer.add_char buffer '\'';
+      state.in_character <- true;
+      state.escaped <- false;
+      loop (index + 1))
+    else
+      match matching index with
+      | Some module_path ->
+          Buffer.add_string buffer (compiler_unit module_path);
+          loop (index + String.length module_path)
+      | None ->
+          Buffer.add_char buffer source.[index];
+          loop (index + 1)
+  in
+  loop 0;
+  Buffer.contents buffer

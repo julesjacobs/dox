@@ -172,7 +172,8 @@ let () =
         false)
     "Merlin did not return the local variable type at the cursor";
   let local_completions =
-    Evaluator.complete_at_with_cancel ~cancelled:(fun () -> false)
+    Evaluator.complete_at_with_cancel
+      ~cancelled:(fun () -> false)
       ~documents:[ typed_document ] ~target:typed_document ~line:5 ~column:20
       ~context:""
   in
@@ -188,7 +189,8 @@ let () =
         false)
     "Merlin completions did not include identifiers from the live scope";
   let module_completions =
-    Evaluator.complete_at_with_cancel ~cancelled:(fun () -> false)
+    Evaluator.complete_at_with_cancel
+      ~cancelled:(fun () -> false)
       ~documents:[ typed_document ] ~target:typed_document ~line:4 ~column:31
       ~context:"List."
   in
@@ -207,12 +209,14 @@ let () =
   in
   let importing_document =
     Document.parse ~path:"consumer.live.md"
-      "# Consumer\n\n    let imported_count = List.length imported_values\n"
+      "# Consumer\n\n\
+       <!-- doclang: imports=library.live.md -->\n\n\
+      \    let imported_count = List.length imported_values\n"
   in
   let imported_type =
     Evaluator.type_at
       ~documents:[ imported_document; importing_document ]
-      ~target:importing_document ~line:3 ~column:44
+      ~target:importing_document ~line:5 ~column:44
   in
   expect
     (match imported_type with
@@ -220,9 +224,10 @@ let () =
     | _ -> false)
     "Merlin cursor query did not include imported live documents";
   let imported_completions =
-    Evaluator.complete_at_with_cancel ~cancelled:(fun () -> false)
+    Evaluator.complete_at_with_cancel
+      ~cancelled:(fun () -> false)
       ~documents:[ imported_document; importing_document ]
-      ~target:importing_document ~line:3 ~column:32 ~context:""
+      ~target:importing_document ~line:5 ~column:32 ~context:""
   in
   expect
     (match imported_completions with

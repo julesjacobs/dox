@@ -172,6 +172,11 @@ let int_member name json =
   | `Int value -> Ok value
   | _ -> Error (Printf.sprintf "Expected integer field %S." name)
 
+let list_member name json =
+  match Yojson.Safe.Util.member name json with
+  | `List values -> Ok values
+  | _ -> Error (Printf.sprintf "Expected list field %S." name)
+
 let is_json headers =
   match header headers "content-type" with
   | Some value ->
@@ -237,6 +242,187 @@ let document_response context parameters =
                      ("capturedAt", `String snapshot.captured_at);
                    ])))
 
+let page_response context parameters =
+  match List.assoc_opt "module" parameters with
+  | None -> error "Missing module query parameter."
+  | Some module_path -> (
+      match Module_path.validate module_path with
+      | Error message -> error message
+      | Ok module_path -> (
+          match Project.snapshot context.project with
+          | Error project_error_ -> project_error project_error_
+          | Ok snapshot -> (
+              match Project.page snapshot module_path with
+              | Error project_error_ -> project_error project_error_
+              | Ok document ->
+                  json
+                    (`Assoc
+                       [
+                         ("module", `String module_path);
+                         ("document", Document.to_json document);
+                         ( "project",
+                           Project.snapshot_to_json context.project snapshot );
+                         ("projectVersion", `String snapshot.version);
+                         ("capturedAt", `String snapshot.captured_at);
+                       ]))))
+
+let save_page_response context body =
+  let open Util in
+  let parsed =
+    let* request = json_body body in
+    let* module_path = string_member "module" request in
+    let* source = string_member "source" request in
+    let* expected_digest = string_member "expectedDigest" request in
+    let* edit_revision = int_member "editRevision" request in
+    Ok (module_path, source, expected_digest, edit_revision)
+  in
+  match parsed with
+  | Error message -> error message
+  | Ok (module_path, source, expected_digest, edit_revision) -> (
+      match
+        Project.save_page_source context.project ~module_path ~source
+          ~expected_digest ~edit_revision
+      with
+      | Error project_error_ -> project_error project_error_
+      | Ok (document, snapshot, acknowledged_revision) ->
+          json
+            (`Assoc
+               [
+                 ("module", `String module_path);
+                 ("document", Document.to_json document);
+                 ("digest", `String document.version);
+                 ("acknowledgedRevision", `Int acknowledged_revision);
+                 ("projectVersion", `String snapshot.version);
+                 ("project", Project.snapshot_to_json context.project snapshot);
+               ]))
+
+let create_page_response context body =
+  let open Util in
+  let parsed =
+    let* request = json_body body in
+    let* module_path = string_member "module" request in
+    let* base_project_version = string_member "baseProjectVersion" request in
+    Ok (module_path, base_project_version)
+  in
+  match parsed with
+  | Error message -> error message
+  | Ok (module_path, base_project_version) -> (
+      match
+        Project.create_page context.project ~module_path ~base_project_version
+          ~principal:"workspace-user"
+      with
+      | Error project_error_ -> project_error project_error_
+      | Ok (document, _, snapshot) ->
+          json ~status:201
+            (`Assoc
+               [
+                 ("module", `String module_path);
+                 ("document", Document.to_json document);
+                 ("project", Project.snapshot_to_json context.project snapshot);
+                 ("projectVersion", `String snapshot.version);
+               ]))
+
+let dependencies_response context parameters =
+  match List.assoc_opt "module" parameters with
+  | None -> error "Missing module query parameter."
+  | Some module_path -> (
+      match Project.snapshot context.project with
+      | Error project_error_ -> project_error project_error_
+      | Ok snapshot -> (
+          match Project.page snapshot module_path with
+          | Error project_error_ -> project_error project_error_
+          | Ok _ ->
+              let analysis =
+                Compiler_workspace.analyze ~root:context.project.root
+                  ~version:snapshot.version snapshot.page_index
+              in
+              json
+                (`Assoc
+                   [
+                     ("projectVersion", `String snapshot.version);
+                     ( "dependency",
+                       Compiler_workspace.module_json analysis module_path );
+                   ])))
+
+let module_renames request =
+  let open Util in
+  let* entries = list_member "renames" request in
+  let rec parse result = function
+    | [] -> Ok (List.rev result)
+    | entry :: rest ->
+        let* before = string_member "before" entry in
+        let* after = string_member "after" entry in
+        parse ({ Project.before; after } :: result) rest
+  in
+  parse [] entries
+
+let refactor_preview_response context body =
+  let open Util in
+  match
+    let* request = json_body body in
+    let* project_version = string_member "projectVersion" request in
+    let* renames = module_renames request in
+    Ok (project_version, renames)
+  with
+  | Error message -> error message
+  | Ok (project_version, renames) -> (
+      match Project.snapshot context.project with
+      | Error project_error_ -> project_error project_error_
+      | Ok snapshot -> (
+          if not (String.equal snapshot.version project_version) then
+            error ~status:409 "The project changed before the refactor preview."
+          else
+            match Project.refactor_preview snapshot renames with
+            | Error project_error_ -> project_error project_error_
+            | Ok preview -> json preview))
+
+let refactor_apply_response context body =
+  let open Util in
+  match
+    let* request = json_body body in
+    let* project_version = string_member "projectVersion" request in
+    let* preview_id = string_member "previewId" request in
+    let* renames = module_renames request in
+    Ok (project_version, preview_id, renames)
+  with
+  | Error message -> error message
+  | Ok (project_version, preview_id, renames) -> (
+      match
+        Project.apply_module_refactor context.project
+          ~expected_project_version:project_version
+          ~expected_preview_id:preview_id renames
+      with
+      | Error project_error_ -> project_error project_error_
+      | Ok (preview, snapshot, mapping) ->
+          json
+            (`Assoc
+               [
+                 ("preview", preview);
+                 ("mapping", mapping);
+                 ("project", Project.snapshot_to_json context.project snapshot);
+                 ("projectVersion", `String snapshot.version);
+               ]))
+
+let refactor_rewrite_response body =
+  let open Util in
+  match
+    let* request = json_body body in
+    let* path = string_member "path" request in
+    let* source = string_member "source" request in
+    let* renames = module_renames request in
+    Ok (path, source, renames)
+  with
+  | Error message -> error message
+  | Ok (path, source, renames) ->
+      let document = Document.parse ~path source in
+      json
+        (`Assoc
+           [
+             ( "source",
+               `String (Project.rewrite_document_module_paths renames document)
+             );
+           ])
+
 let evaluate_response context ~cancelled body =
   let open Util in
   match
@@ -251,7 +437,7 @@ let evaluate_response context ~cancelled body =
           Error "The project changed; reload before evaluating this draft."
         else
           let document = Document.parse ~path source in
-          match Project.resolve_documents snapshot document with
+          match Project.resolve_documents context.project snapshot document with
           | Error project_error_ -> Error (Project.error_message project_error_)
           | Ok documents ->
               let evaluation =
@@ -293,7 +479,7 @@ let type_at_response context ~cancelled body =
               "The project changed; reopen the document before querying types."
           else
             let target = Document.parse ~path source in
-            match Project.resolve_documents snapshot target with
+            match Project.resolve_documents context.project snapshot target with
             | Error project_error_ -> project_error project_error_
             | Ok documents -> (
                 match
@@ -324,23 +510,12 @@ let complete_response context ~cancelled body =
     else if String.length completion_context > 256 then
       Error "Completion context is too long."
     else
-      Ok
-        ( path,
-          source,
-          line,
-          column,
-          completion_context,
-          base_project_version )
+      Ok (path, source, line, column, completion_context, base_project_version)
   in
   match parsed with
   | Error message -> error message
-  | Ok
-      ( path,
-        source,
-        line,
-        column,
-        completion_context,
-        base_project_version ) -> (
+  | Ok (path, source, line, column, completion_context, base_project_version)
+    -> (
       match Project.snapshot context.project with
       | Error project_error_ -> project_error project_error_
       | Ok snapshot -> (
@@ -349,7 +524,7 @@ let complete_response context ~cancelled body =
               "The project changed; reopen the document before completing code."
           else
             let target = Document.parse ~path source in
-            match Project.resolve_documents snapshot target with
+            match Project.resolve_documents context.project snapshot target with
             | Error project_error_ -> project_error project_error_
             | Ok documents -> (
                 match
@@ -384,7 +559,7 @@ let save_response context body =
       | Error project_error_ -> project_error project_error_
       | Ok snapshot -> (
           let draft = Document.parse ~path source in
-          match Project.resolve_documents snapshot draft with
+          match Project.resolve_documents context.project snapshot draft with
           | Error project_error_ -> project_error project_error_
           | Ok documents -> (
               let validation =
@@ -478,7 +653,11 @@ let content_type path =
   else "application/octet-stream"
 
 let static_response context path =
-  let path = if String.equal path "/" then "/index.html" else path in
+  let path =
+    if String.equal path "/" || Util.starts_with ~prefix:"/page/" path then
+      "/index.html"
+    else path
+  in
   let relative =
     if String.length path > 0 && path.[0] = '/' then
       String.sub path 1 (String.length path - 1)
@@ -516,6 +695,8 @@ let route context ~cancelled method_ target headers body =
       | Ok project -> json project
       | Error project_error_ -> project_error project_error_)
   | "GET", "/api/document" -> document_response context parameters
+  | "GET", "/api/page" -> page_response context parameters
+  | "GET", "/api/dependencies" -> dependencies_response context parameters
   | "GET", "/api/changes" -> (
       match Project.changes context.project with
       | Ok changes -> json (`List changes)
@@ -533,9 +714,24 @@ let route context ~cancelled method_ target headers body =
   | "PUT", "/api/document" ->
       require_active_request context headers (fun () ->
           save_response context body)
+  | "PUT", "/api/page/source" ->
+      require_active_request context headers (fun () ->
+          save_page_response context body)
   | "POST", "/api/document" ->
       require_active_request context headers (fun () ->
           create_response context body)
+  | "POST", "/api/page" ->
+      require_active_request context headers (fun () ->
+          create_page_response context body)
+  | "POST", "/api/refactor/preview" ->
+      require_active_request context headers (fun () ->
+          refactor_preview_response context body)
+  | "POST", "/api/refactor/apply" ->
+      require_active_request context headers (fun () ->
+          refactor_apply_response context body)
+  | "POST", "/api/refactor/rewrite" ->
+      require_active_request context headers (fun () ->
+          refactor_rewrite_response body)
   | "POST", "/api/artifact" ->
       require_active_request context headers (fun () ->
           artifact_response context body)

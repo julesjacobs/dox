@@ -36,6 +36,14 @@ type inline_expression = {
   result_column : int;
 }
 
+type page_reference = {
+  module_path : string;
+  fragment : string option;
+  line : int;
+  column_start : int;
+  column_end : int;
+}
+
 type t = {
   path : string;
   source : string;
@@ -44,6 +52,7 @@ type t = {
   imports : string list;
   blocks : block list;
   definitions : definition list;
+  page_references : page_reference list;
   issues : issue list;
 }
 
@@ -350,6 +359,46 @@ let imports source =
     |> List.sort_uniq String.compare
   with Not_found -> []
 
+let page_references blocks =
+  let reference_re =
+    Str.regexp
+      "\\[\\[\\([A-Z][A-Za-z0-9_']*\\(\\.[A-Z][A-Za-z0-9_']*\\)*\\)\\(#[^]\n\
+       ]+\\)?\\]\\]"
+  in
+  let scan_line line_number line =
+    let rec scan offset result =
+      try
+        let start = Str.search_forward reference_re line offset in
+        let module_path = Str.matched_group 1 line in
+        let fragment =
+          try
+            let value = Str.matched_group 3 line in
+            Some (String.sub value 1 (String.length value - 1))
+          with Not_found -> None
+        in
+        let finish = Str.match_end () in
+        scan finish
+          ({
+             module_path;
+             fragment;
+             line = line_number;
+             column_start = start;
+             column_end = finish;
+           }
+          :: result)
+      with Not_found -> List.rev result
+    in
+    scan 0 []
+  in
+  blocks
+  |> List.concat_map (function
+    | Code _ -> []
+    | Prose { source; position; _ } ->
+        String.split_on_char '\n' source
+        |> List.mapi (fun offset line ->
+            scan_line (position.line_start + offset) line)
+        |> List.concat)
+
 let parse ~path source =
   let blocks, parse_issues = parse_blocks source in
   let named_blocks =
@@ -402,6 +451,7 @@ let parse ~path source =
     title = title blocks path;
     imports = imports source;
     definitions = definitions blocks;
+    page_references = page_references blocks;
     blocks;
     issues = parse_issues @ name_issues;
   }
@@ -585,6 +635,19 @@ let issue_to_json issue =
         Option.fold ~none:`Null ~some:(fun id -> `String id) issue.block_id );
     ]
 
+let page_reference_to_json reference =
+  `Assoc
+    [
+      ("module", `String reference.module_path);
+      ( "fragment",
+        Option.fold ~none:`Null
+          ~some:(fun value -> `String value)
+          reference.fragment );
+      ("line", `Int reference.line);
+      ("columnStart", `Int reference.column_start);
+      ("columnEnd", `Int reference.column_end);
+    ]
+
 let to_json document =
   `Assoc
     [
@@ -595,5 +658,7 @@ let to_json document =
       ("imports", `List (List.map (fun path -> `String path) document.imports));
       ("blocks", `List (List.map block_to_json document.blocks));
       ("definitions", `List (List.map definition_to_json document.definitions));
+      ( "pageReferences",
+        `List (List.map page_reference_to_json document.page_references) );
       ("issues", `List (List.map issue_to_json document.issues));
     ]

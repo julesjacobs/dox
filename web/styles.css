@@ -187,7 +187,9 @@ button {
 
 .sidebar {
   border-right: 1px solid var(--line);
-  padding: 16px 11px;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 8px 0;
 }
 
 .inspector {
@@ -214,6 +216,70 @@ button {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 8px;
+}
+
+.module-outline-host {
+  min-height: 0;
+  flex: 1;
+  margin: 0 -2px;
+}
+
+.module-outline-host .cm-editor,
+.module-outline-host .cm-scroller {
+  height: 100%;
+}
+
+.module-context {
+  display: grid;
+  gap: 11px;
+}
+
+.module-context h3 {
+  overflow-wrap: anywhere;
+}
+
+.module-relations {
+  display: grid;
+  gap: 3px;
+}
+
+.module-relations > span,
+.module-boundary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.module-compiler-error {
+  margin-top: 10px;
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.module-compiler-error p {
+  margin: 0 0 6px;
+}
+
+.module-relations button {
+  border: 0;
+  border-radius: 5px;
+  padding: 3px 5px;
+  background: transparent;
+  color: var(--green-dark);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: left;
+}
+
+.module-relations button:hover,
+.module-relations button:focus-visible {
+  background: var(--mint);
+  outline: none;
 }
 
 .pane-heading .pane-label {

@@ -1,20 +1,59 @@
 (executable
  (name main)
  (public_name doclang)
- (modules util observation document diff evaluator project server main)
+ (modules
+  util
+  module_path
+  observation
+  document
+  page_index
+  module_graph
+  diff
+  evaluator
+  compiler_workspace
+  project
+  server
+  main)
  (libraries unix str yojson))
 
 (test
  (name test_document)
- (modules test_document util document)
+ (modules test_document util module_path document)
  (libraries unix str yojson))
 
 (test
  (name test_project)
- (modules test_project util observation document diff evaluator project)
+ (modules
+  test_project
+  util
+  module_path
+  observation
+  document
+  page_index
+  module_graph
+  diff
+  evaluator
+  compiler_workspace
+  project)
  (libraries unix str yojson))
 
 (test
  (name test_evaluator)
- (modules test_evaluator util observation document evaluator)
+ (modules test_evaluator util module_path observation document evaluator)
+ (libraries unix str yojson))
+
+(test
+ (name test_workspace)
+ (modules
+  test_workspace
+  util
+  module_path
+  observation
+  document
+  page_index
+  module_graph
+  diff
+  evaluator
+  compiler_workspace
+  project)
  (libraries unix str yojson))

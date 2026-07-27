@@ -22,6 +22,7 @@ import {
   Prec,
   StateEffect,
   StateField,
+  Transaction,
 } from "@codemirror/state";
 import {
   Decoration,
@@ -158,6 +159,22 @@ const embeddedTheme = EditorView.theme({
   },
   ".cm-md-inline-marker.cm-md-inline-marker-visible": {
     opacity: "1",
+  },
+  ".cm-wiki-link": {
+    borderBottom: "1px solid rgba(19, 95, 75, 0.28)",
+    color: "#135f4b",
+    cursor: "text",
+  },
+  ".cm-wiki-missing": {
+    borderBottom: "1px wavy rgba(169, 68, 54, 0.7)",
+    color: "#7f5148",
+  },
+  ".cm-wiki-marker": {
+    visibility: "hidden",
+    color: "#9ca7a1",
+  },
+  ".cm-wiki-marker.cm-wiki-marker-visible": {
+    visibility: "visible",
   },
   ".cm-md-list-1": { paddingLeft: "2.4em" },
   ".cm-md-list-2": { paddingLeft: "3.6em" },
@@ -459,6 +476,85 @@ const completeHeadingSpace = EditorState.transactionFilter.of((transaction) => {
   ];
 });
 
+const setWikiConfig = StateEffect.define();
+const wikiConfigField = StateField.define({
+  create: () => ({ modules: new Set(), onNavigate: null }),
+  update(value, transaction) {
+    for (const effect of transaction.effects) {
+      if (effect.is(setWikiConfig)) return effect.value;
+    }
+    return value;
+  },
+});
+
+function wikiLinkSpans(text) {
+  const spans = [];
+  const expression = /\[\[([A-Z][A-Za-z0-9_']*(?:\.[A-Z][A-Za-z0-9_']*)*)(#[^\]\n]+)?\]\]/g;
+  for (const match of text.matchAll(expression)) {
+    const opening = match.index;
+    if (isEscaped(text, opening)) continue;
+    spans.push({
+      opening,
+      contentFrom: opening + 2,
+      contentTo: opening + 2 + match[1].length + (match[2]?.length || 0),
+      closingTo: opening + match[0].length,
+      module: match[1],
+    });
+  }
+  return spans;
+}
+
+function handleWikiInput(event, view) {
+  if (
+    event.defaultPrevented ||
+    event.isComposing ||
+    event.altKey ||
+    view.state.readOnly
+  ) {
+    return false;
+  }
+  const selection = view.state.selection.main;
+  if (!selection.empty || view.state.selection.ranges.length !== 1) return false;
+  if (event.key === "[") {
+    const before =
+      selection.head > 0 ? view.state.doc.sliceString(selection.head - 1, selection.head) : "";
+    if (before !== "[") return false;
+    view.dispatch({
+      changes: { from: selection.head, insert: "[]]" },
+      selection: { anchor: selection.head + 1 },
+      userEvent: "input.type",
+    });
+    return true;
+  }
+  if (event.key === "]") {
+    const after = view.state.doc.sliceString(
+      selection.head,
+      Math.min(view.state.doc.length, selection.head + 2),
+    );
+    if (!after.startsWith("]")) return false;
+    view.dispatch({
+      selection: { anchor: selection.head + 1 },
+      userEvent: "select",
+    });
+    return true;
+  }
+  if (
+    event.key === "Enter" &&
+    (event.metaKey || event.ctrlKey)
+  ) {
+    const line = view.state.doc.lineAt(selection.head);
+    const column = selection.head - line.from;
+    const span = wikiLinkSpans(line.text).find(
+      (candidate) =>
+        column >= candidate.opening && column <= candidate.closingTo,
+    );
+    if (!span) return false;
+    view.state.field(wikiConfigField).onNavigate?.(span.module);
+    return true;
+  }
+  return false;
+}
+
 function completeHeadingOnKeydown(event, view) {
   const character = event.key;
   if (
@@ -524,6 +620,7 @@ class HeadingDraftAnchor extends WidgetType {
 
 function markdownDecorations(view) {
   const decorations = [];
+  const wikiConfig = view.state.field(wikiConfigField);
   let parserState = null;
   let markdownFence = null;
   let inOcamlFence = false;
@@ -682,7 +779,48 @@ function markdownDecorations(view) {
       }
     }
 
-    for (const code of singleBacktickSpans(line.text)) {
+    const inlineSpans = singleBacktickSpans(line.text);
+    for (const wiki of wikiLinkSpans(line.text)) {
+      if (
+        inlineSpans.some(
+          (code) =>
+            wiki.opening >= code.opening && wiki.opening <= code.closing,
+        )
+      ) {
+        continue;
+      }
+      const opening = line.from + wiki.opening;
+      const contentFrom = line.from + wiki.contentFrom;
+      const contentTo = line.from + wiki.contentTo;
+      const closingTo = line.from + wiki.closingTo;
+      const markerVisible =
+        view.hasFocus &&
+        view.state.selection.ranges.some((range) =>
+          range.empty
+            ? range.head >= opening && range.head <= closingTo
+            : range.from <= closingTo && range.to >= opening,
+        );
+      const markerClass = `cm-wiki-marker${markerVisible ? " cm-wiki-marker-visible" : ""}`;
+      decorations.push(
+        Decoration.mark({
+          class: markerClass,
+        }).range(opening, contentFrom),
+        Decoration.mark({
+          class: `cm-wiki-link${wikiConfig.modules.has(wiki.module) ? "" : " cm-wiki-missing"}`,
+          attributes: {
+            "data-wiki-module": wiki.module,
+            title: wikiConfig.modules.has(wiki.module)
+              ? `Open ${wiki.module}`
+              : `Create ${wiki.module}`,
+          },
+        }).range(contentFrom, contentTo),
+        Decoration.mark({
+          class: markerClass,
+        }).range(contentTo, closingTo),
+      );
+    }
+
+    for (const code of inlineSpans) {
       const opening = line.from + code.opening;
       const contentFrom = opening + 1;
       const contentTo = line.from + code.closing;
@@ -733,7 +871,10 @@ const markdownPresentation = ViewPlugin.fromClass(
         update.docChanged ||
         update.viewportChanged ||
         update.selectionSet ||
-        update.focusChanged
+        update.focusChanged ||
+        update.transactions.some((transaction) =>
+          transaction.effects.some((effect) => effect.is(setWikiConfig)),
+        )
       ) {
         this.decorations = markdownDecorations(update.view);
       }
@@ -1284,13 +1425,27 @@ function mountEditor(
   parent,
   {
     doc,
+    editorState,
     onChange,
     onBlur,
     onSave,
+    onStateChange,
     onSelectionChange,
     onCompletionKey,
+    wikiModules = [],
+    onWikiNavigate,
   },
 ) {
+  if (editorState) {
+    const view = new EditorView({ state: editorState, parent });
+    view.dispatch({
+      effects: setWikiConfig.of({
+        modules: new Set(wikiModules),
+        onNavigate: onWikiNavigate,
+      }),
+    });
+    return view;
+  }
   const extensions = [
     history(),
     drawSelection(),
@@ -1301,6 +1456,7 @@ function mountEditor(
     inlineBacktickLanguageData,
     indentUnit.of("    "),
     blockResultsField,
+    wikiConfigField,
     Prec.highest(keymap.of([
       ...closeBracketsKeymap,
       {
@@ -1347,13 +1503,25 @@ function mountEditor(
     highlightStyle,
     EditorView.lineWrapping,
     EditorView.updateListener.of((update) => {
+      onStateChange?.(update.state);
       if (update.docChanged) onChange(update.state.doc.toString());
       if (update.selectionSet || update.docChanged) {
         onSelectionChange?.(update.state.selection.main.head);
       }
     }),
     EditorView.domEventHandlers({
-      keydown: completeHeadingOnKeydown,
+      keydown: (event, view) =>
+        handleWikiInput(event, view) || completeHeadingOnKeydown(event, view),
+      mousedown: (event, view) => {
+        if (!(event.metaKey || event.ctrlKey)) return false;
+        const link = event.target.closest?.("[data-wiki-module]");
+        if (!link || !view.dom.contains(link)) return false;
+        view.state
+          .field(wikiConfigField)
+          .onNavigate?.(link.dataset.wikiModule);
+        event.preventDefault();
+        return true;
+      },
       focusout: (_event, view) => {
         queueMicrotask(() => {
           if (!view.dom.contains(document.activeElement)) onBlur();
@@ -1364,13 +1532,258 @@ function mountEditor(
 
   extensions.push(completeHeadingSpace, markdown(), markdownPresentation);
 
-  return new EditorView({
+  const view = new EditorView({
     state: EditorState.create({ doc, extensions }),
     parent,
   });
+  view.dispatch({
+    effects: setWikiConfig.of({
+      modules: new Set(wikiModules),
+      onNavigate: onWikiNavigate,
+    }),
+  });
+  return view;
 }
 
 export function mountMarkdownEditor(parent, options) {
   parent.classList.add("cm-literate-editor");
   return mountEditor(parent, options);
+}
+
+export function replaceEditorStateDocument(editorState, source) {
+  if (!editorState || source === editorState.doc.toString()) return editorState;
+  return editorState.update({
+    changes: {
+      from: 0,
+      to: editorState.doc.length,
+      insert: source,
+    },
+    annotations: Transaction.addToHistory.of(false),
+    userEvent: "input.refactor",
+  }).state;
+}
+
+const outlineTheme = EditorView.theme({
+  "&": {
+    height: "100%",
+    backgroundColor: "transparent",
+    color: colors.ink,
+    fontSize: "13px",
+  },
+  "&.cm-focused": { outline: "none" },
+  ".cm-scroller": {
+    overflow: "auto",
+    fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+    lineHeight: "1.65",
+  },
+  ".cm-content": {
+    padding: "4px 2px 28px",
+    caretColor: colors.green,
+  },
+  ".cm-line": {
+    borderRadius: "5px",
+    padding: "0 6px",
+  },
+  ".cm-activeLine": {
+    backgroundColor: "rgba(19, 95, 75, 0.07)",
+  },
+  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
+    backgroundColor: "rgba(19, 95, 75, 0.14)",
+  },
+  ".cm-outline-active": {
+    color: "#0a3e31",
+    fontWeight: "650",
+  },
+  ".cm-outline-namespace": {
+    color: "#68746e",
+    fontWeight: "620",
+  },
+  ".cm-outline-invalid": {
+    textDecoration: "underline wavy #a94436",
+    textUnderlineOffset: "3px",
+  },
+});
+
+const setOutlineConfig = StateEffect.define();
+
+const outlineConfigField = StateField.define({
+  create() {
+    return { activeModule: null, lineMap: [] };
+  },
+  update(value, transaction) {
+    for (const effect of transaction.effects) {
+      if (effect.is(setOutlineConfig)) value = effect.value;
+    }
+    return value;
+  },
+});
+
+function outlineDepth(text) {
+  const spaces = text.match(/^ */)?.[0].length || 0;
+  return spaces / 2;
+}
+
+function outlineDecorations(view) {
+  const { activeModule, lineMap } = view.state.field(outlineConfigField);
+  const decorations = [];
+  for (let number = 1; number <= view.state.doc.lines; number += 1) {
+    const line = view.state.doc.line(number);
+    const entry = lineMap[number - 1];
+    const spaces = line.text.match(/^ */)?.[0].length || 0;
+    const component = line.text.slice(spaces);
+    const classes = [];
+    if (spaces % 2 !== 0 || (component && !/^[A-Z][a-z0-9_']*$/.test(component))) {
+      classes.push("cm-outline-invalid");
+    }
+    if (entry?.namespace) classes.push("cm-outline-namespace");
+    if (entry?.module === activeModule) classes.push("cm-outline-active");
+    if (classes.length) {
+      decorations.push(
+        Decoration.line({ attributes: { class: classes.join(" ") } }).range(
+          line.from,
+        ),
+      );
+    }
+  }
+  return Decoration.set(decorations, true);
+}
+
+function insertOutlineSibling(view) {
+  const selection = view.state.selection.main;
+  if (!selection.empty) return false;
+  const line = view.state.doc.lineAt(selection.head);
+  const indent = line.text.match(/^ */)?.[0] || "";
+  view.dispatch({
+    changes: { from: line.to, insert: `\n${indent}` },
+    selection: { anchor: line.to + 1 + indent.length },
+    scrollIntoView: true,
+    userEvent: "input",
+  });
+  return true;
+}
+
+function changeOutlineIndent(view, delta) {
+  const selection = view.state.selection.main;
+  const line = view.state.doc.lineAt(selection.head);
+  const spaces = line.text.match(/^ */)?.[0].length || 0;
+  if (delta < 0 && spaces < 2) return true;
+  const replacement = " ".repeat(Math.max(0, spaces + delta));
+  view.dispatch({
+    changes: { from: line.from, to: line.from + spaces, insert: replacement },
+    selection: {
+      anchor: Math.max(line.from, selection.anchor + delta),
+      head: Math.max(line.from, selection.head + delta),
+    },
+    scrollIntoView: true,
+    userEvent: "input",
+  });
+  return true;
+}
+
+export function mountModuleOutlineEditor(
+  parent,
+  {
+    doc,
+    selection = 0,
+    activeModule,
+    lineMap = [],
+    onChange,
+    onNavigate,
+    onCommit,
+    onCancel,
+  },
+) {
+  parent.classList.add("cm-module-outline");
+  const presentation = ViewPlugin.fromClass(
+    class {
+      constructor(view) {
+        this.decorations = outlineDecorations(view);
+      }
+
+      update(update) {
+        if (
+          update.docChanged ||
+          update.selectionSet ||
+          update.viewportChanged ||
+          update.transactions.some((transaction) =>
+            transaction.effects.some((effect) => effect.is(setOutlineConfig)),
+          )
+        ) {
+          this.decorations = outlineDecorations(update.view);
+        }
+      }
+    },
+    { decorations: (plugin) => plugin.decorations },
+  );
+  const extensions = [
+    history(),
+    drawSelection(),
+    highlightActiveLine(),
+    outlineTheme,
+    outlineConfigField,
+    presentation,
+    Prec.highest(
+      keymap.of([
+        { key: "Enter", run: insertOutlineSibling },
+        { key: "Tab", run: (view) => changeOutlineIndent(view, 2) },
+        { key: "Shift-Tab", run: (view) => changeOutlineIndent(view, -2) },
+        {
+          key: "Escape",
+          run: () => {
+            onCancel?.();
+            return true;
+          },
+        },
+        {
+          key: "Mod-Enter",
+          run: () => {
+            onCommit?.();
+            return true;
+          },
+        },
+      ]),
+    ),
+    keymap.of([...defaultKeymap, ...historyKeymap]),
+    EditorView.updateListener.of((update) => {
+      if (update.docChanged) onChange?.(update.state.doc.toString(), update);
+      if (update.selectionSet && !update.docChanged) {
+        onNavigate?.(update.state.selection.main, update);
+      }
+    }),
+    EditorView.domEventHandlers({
+      focusout: (_event, view) => {
+        queueMicrotask(() => {
+          if (!view.dom.contains(document.activeElement)) onCommit?.();
+        });
+      },
+    }),
+  ];
+  const maxSelection = Math.min(selection, doc.length);
+  const view = new EditorView({
+    state: EditorState.create({
+      doc,
+      selection: { anchor: maxSelection },
+      extensions,
+    }),
+    parent,
+  });
+  view.dispatch({
+    effects: setOutlineConfig.of({ activeModule, lineMap }),
+  });
+  return view;
+}
+
+export function updateModuleOutlineEditor(
+  view,
+  { doc, selection, activeModule, lineMap },
+) {
+  const current = view.state.doc.toString();
+  const changed = current !== doc;
+  const maxSelection = Math.min(selection, doc.length);
+  view.dispatch({
+    changes: changed ? { from: 0, to: current.length, insert: doc } : undefined,
+    selection: changed ? { anchor: maxSelection } : undefined,
+    effects: setOutlineConfig.of({ activeModule, lineMap }),
+    userEvent: changed ? "input.outline-sync" : undefined,
+  });
 }

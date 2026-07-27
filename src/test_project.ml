@@ -161,7 +161,7 @@ let () =
         | Error error -> fail (Project.error_message error)
       in
       let closure =
-        match Project.resolve_documents imported_snapshot importer with
+        match Project.resolve_documents project imported_snapshot importer with
         | Ok documents -> documents
         | Error error -> fail (Project.error_message error)
       in
@@ -202,4 +202,42 @@ let () =
               ~expected_document_version:failing_document.version
               ~principal:"test"))
         "artifact was published after failed validation";
+      let publication_path =
+        Filename.concat directory "publication-race.live.md"
+      in
+      let quarantine_path =
+        Filename.concat directory ".doclang/test-publication-quarantine"
+      in
+      (match Util.write_file publication_path "external edit" with
+      | Ok () -> ()
+      | Error message -> fail message);
+      expect
+        (Result.is_error
+           (Project.publish_refactor_target ~path:publication_path
+              ~quarantine:quarantine_path ~expected:(Some "old source")
+              ~source:"new source"))
+        "refactor publication accepted an external edit";
+      expect
+        (Util.read_file publication_path = Ok "external edit")
+        "refactor publication lost an external edit";
+      expect
+        (not (Sys.file_exists quarantine_path))
+        "a rejected publication left a restored quarantine behind";
+      (match Util.write_file publication_path "old source" with
+      | Ok () -> ()
+      | Error message -> fail message);
+      (match
+         Project.publish_refactor_target ~path:publication_path
+           ~quarantine:quarantine_path ~expected:(Some "old source")
+           ~source:"new source"
+       with
+      | Ok () -> ()
+      | Error error -> fail (Project.error_message error));
+      expect
+        (Util.read_file publication_path = Ok "new source"
+        && Util.read_file quarantine_path = Ok "old source")
+        "refactor publication did not preserve displaced contents";
+      (match Project.remove_checked quarantine_path with
+      | Ok () -> ()
+      | Error message -> fail message);
       print_endline "project tests passed")
