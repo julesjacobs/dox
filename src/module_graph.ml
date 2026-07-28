@@ -27,11 +27,6 @@ let referenced_module modules candidate =
   | first :: _ -> Some first
   | [] -> None
 
-let module_of_legacy_import index path =
-  Option.map
-    (fun page -> page.Page_index.module_path)
-    (Page_index.find_source index path)
-
 let build index =
   let modules = Page_index.modules index in
   let forward =
@@ -105,12 +100,8 @@ let build index =
                      Module_path.is_beneath ~namespace module_path)
                    namespaces)
         in
-        let legacy =
-          page.Page_index.document.imports
-          |> List.filter_map (module_of_legacy_import index)
-        in
         let dependencies =
-          typed @ legacy
+          typed
           |> List.filter (fun value ->
               not (String.equal value page.Page_index.module_path))
           |> List.sort_uniq String.compare

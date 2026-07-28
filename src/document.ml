@@ -49,7 +49,6 @@ type t = {
   source : string;
   version : string;
   title : string;
-  imports : string list;
   blocks : block list;
   definitions : definition list;
   page_references : page_reference list;
@@ -347,18 +346,6 @@ let title blocks path =
   in
   Option.value ~default:(Filename.basename path) heading
 
-let imports_re =
-  Str.regexp "<!--[ \t]*doclang:[ \t]*imports=\\([^>]*\\)[ \t]*-->"
-
-let imports source =
-  try
-    let _ = Str.search_forward imports_re source 0 in
-    Str.matched_group 1 source |> String.split_on_char ','
-    |> List.map String.trim
-    |> List.filter (fun path -> not (String.equal path ""))
-    |> List.sort_uniq String.compare
-  with Not_found -> []
-
 let page_references blocks =
   let reference_re =
     Str.regexp
@@ -449,7 +436,6 @@ let parse ~path source =
     source;
     version = Util.digest source;
     title = title blocks path;
-    imports = imports source;
     definitions = definitions blocks;
     page_references = page_references blocks;
     blocks;
@@ -655,7 +641,6 @@ let to_json document =
       ("title", `String document.title);
       ("source", `String document.source);
       ("version", `String document.version);
-      ("imports", `List (List.map (fun path -> `String path) document.imports));
       ("blocks", `List (List.map block_to_json document.blocks));
       ("definitions", `List (List.map definition_to_json document.definitions));
       ( "pageReferences",

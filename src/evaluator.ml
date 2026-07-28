@@ -576,14 +576,6 @@ let merlin_source ~documents ~target =
     |> List.filter_map (fun (document : Document.t) ->
         Result.to_option (Module_path.of_source_path document.path))
   in
-  let opens (document : Document.t) =
-    document.imports
-    |> List.filter_map (fun path ->
-        Result.to_option (Module_path.of_source_path path))
-    |> List.map (fun module_path ->
-        "open " ^ Module_path.compiler_unit module_path)
-    |> String.concat "\n"
-  in
   let wrapped document =
     let module_path =
       Result.to_option (Module_path.of_source_path document.Document.path)
@@ -599,7 +591,7 @@ let merlin_source ~documents ~target =
     | Ok module_path ->
         Printf.sprintf "module %s = struct\n%s\n%s\n%s\nend\n"
           (Module_path.compiler_unit module_path)
-          (opens document) aliases
+          "" aliases
           (merlin_target_source document)
     | Error _ -> merlin_target_source document
   in
@@ -617,8 +609,17 @@ let merlin_source ~documents ~target =
         (Module_path.split module_path, module_path))
     |> namespace_alias_source
   in
+  let local_namespace =
+    match Module_path.of_source_path target.Document.path with
+    | Error _ -> ""
+    | Ok module_path -> (
+        match List.rev (Module_path.split module_path) with
+        | _ :: namespace when namespace <> [] ->
+            "open " ^ (namespace |> List.rev |> String.concat ".") ^ "\n"
+        | _ -> "")
+  in
   let prefix =
-    prelude ^ "\n" ^ imported ^ "\n" ^ alias_source ^ "\n" ^ opens target ^ "\n"
+    prelude ^ "\n" ^ imported ^ "\n" ^ alias_source ^ "\n" ^ local_namespace
   in
   (prefix ^ merlin_target_source target, newline_count prefix)
 
@@ -960,16 +961,8 @@ let instrumented_compilation_source evaluation_id documents target =
           Printf.sprintf "# 1 %S\nlet () = try ignore (@(%s)) with _ -> ()\n"
             virtual_path inline_expression.expression)
     in
-    let legacy_opens =
-      document.imports
-      |> List.filter_map (fun path ->
-          Result.to_option (Module_path.of_source_path path))
-      |> List.map (fun module_path ->
-          "open " ^ Module_path.compiler_unit module_path)
-      |> String.concat "\n"
-    in
     ( document,
-      "open Doclang_prelude\n" ^ legacy_opens ^ "\n"
+      "open Doclang_prelude\n"
       ^ String.concat "\n" (block_sources @ inline_sources) )
   in
   ignore target;
@@ -991,6 +984,18 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
   let prepared =
     sources
     |> List.map (fun (document, source) ->
+        let source =
+          match Module_path.of_source_path document.Document.path with
+          | Error _ -> source
+          | Ok module_path -> (
+              match List.rev (Module_path.split module_path) with
+              | _ :: namespace when namespace <> [] ->
+                  "open "
+                  ^ Module_path.compiler_unit
+                      (namespace |> List.rev |> String.concat ".")
+                  ^ "\n" ^ source
+              | _ -> source)
+        in
         let path =
           Filename.concat directory
             (String.uncapitalize_ascii (unit_name document) ^ ".ml")
@@ -1575,16 +1580,7 @@ let build_artifact_documents ~documents ~entry ~output =
   let directory = Filename.dirname output in
   let source_path = output ^ ".ml" in
   let source_for (document : Document.t) =
-    let opens =
-      document.imports
-      |> List.filter_map (fun path ->
-          Result.to_option (Module_path.of_source_path path))
-      |> List.map (fun module_path ->
-          "open " ^ Module_path.compiler_unit module_path)
-      |> String.concat "\n"
-    in
-    "open Doclang_prelude\n" ^ opens ^ "\n"
-    ^ Document.compilation_source document
+    "open Doclang_prelude\n" ^ Document.compilation_source document
   in
   match Util.ensure_directory directory with
   | Error message -> Error message

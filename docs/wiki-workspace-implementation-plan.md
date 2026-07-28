@@ -18,9 +18,9 @@ compilation units.
 - Normal successful operation has no save, dirty, evaluation, or Git status
   indicator. Persistent UI appears only when something needs attention.
 
-This plan replaces the current explicit-save document list, path-declared
-shared-scope imports, and `.doclang` change history. Git becomes the history
-model. `.doclang` remains only for disposable caches and transaction recovery.
+This plan replaces the explicit-save document list and `.doclang` change
+history. Git becomes the history model. `.doclang` remains only for disposable
+caches and transaction recovery.
 
 ## 2. One identity
 
@@ -263,15 +263,9 @@ interface artifacts and instrumented runtime artifacts separately.
   go-to-definition, rename, and cross-page impact. The build dependency graph
   supplies ordering only.
 
-The existing `<!-- doclang: imports=... -->` directive becomes transitional.
-The current evaluator concatenates the complete transitive import closure, so
-compatibility must reproduce that exact closure and ordering. During migration,
-generate one implicit `open Imported_module` for every module in the legacy
-closure, in the same order that its source previously entered shared scope.
-This preserves transitive unqualified references and ordering-dependent
-shadowing as closely as named units allow. Cases that cannot be preserved are
-diagnosed before switching that page. The editor then offers a
-compiler-resolved qualification refactor. New pages do not emit the directive.
+OCaml references are the only dependency declarations. Dune compiles the
+requested page and its dependency closure; Doclang does not maintain a second
+path-based import system.
 
 ### 6.3 Incremental compilation and evaluation
 
@@ -668,8 +662,8 @@ models/statistics.live.md -> analysis/statistics.live.md
 ```
 
 - Obtain compiler-resolved references to the old qualified module.
-- Rewrite OCaml module paths, `[[...]]` page links, legacy imports, routes, and
-  cached project metadata.
+- Rewrite OCaml module paths, `[[...]]` page links, routes, and cached project
+  metadata.
 - Reject any page/namespace collision at the new module path.
 - Use a filesystem rename and let Git detect it. Do not use `git mv`, because
   that would modify the user's staging index.
@@ -775,13 +769,10 @@ CodeMirror instance.
 
 ## 11. Delivery stages
 
-### Stage 0: Characterization and migration fixtures
+### Stage 0: Characterization fixtures
 
-- Add fixtures for current shared-scope imports, invalid file stems, nested
-  paths, page/namespace collisions, links, traces, inline results, and external
-  edits.
-- Include transitive legacy imports and conflicting unqualified names whose
-  result depends on the current concatenation order.
+- Add fixtures for invalid file stems, nested paths, page/namespace collisions,
+  links, traces, inline results, and external edits.
 - Report how every existing `.live.md` path and internal Markdown link maps to
   a qualified module path and `[[Module.Path]]` reference.
 - Record current evaluation and source-location behavior.
@@ -801,8 +792,6 @@ module path or a precise actionable diagnostic.
 - Build the compiler dependency graph.
 - Populate direct/reverse adjacency and validate `Internal` namespace
   boundaries.
-- Preserve the full ordered legacy import closure through implicit
-  transitional opens.
 - Move evaluation, Merlin types, completion, diagnostics, and artifacts onto
   named units.
 - Add incremental interface-based invalidation.
@@ -857,8 +846,7 @@ externally without losing text; only conflicts or failures produce status UI.
 - Implement create, batch outline edit, qualified-module/namespace rename, and
   delete previews.
 - Use compiler references for module-path renames.
-- Migrate legacy import directives, invalid filenames, and path-based Markdown
-  page links.
+- Migrate invalid filenames and path-based Markdown page links.
 - Remove shared-scope evaluation and `.doclang` history compatibility code.
 
 Exit condition: all page operations are atomic, Git-visible, compiler-checked,
@@ -905,7 +893,6 @@ small workspace and a generated 1,000-page workspace.
 - Qualified compilation, interfaces, dependency order, cycles, and
   diagnostics.
 - Canonical interfaces exclude every instrumentation-only binding.
-- Legacy import compatibility.
 - Incremental invalidation after implementation-only and interface changes.
 - Merlin type, completion, and definition queries across pages.
 - Direct/reverse dependency edges and typed source evidence for each edge.
@@ -986,9 +973,9 @@ Test the sidebar outline separately:
 
 ### Compiler-unit migration
 
-The current shared scope permits unqualified names that named units reject.
-Keep the legacy import compatibility layer until references can be qualified
-with compiler evidence.
+Named units reject unqualified cross-page names. Compiler diagnostics and
+completion should guide qualification with the page module path; Doclang does
+not retain a second import mechanism.
 
 ### Module-path rename correctness
 
@@ -1031,7 +1018,7 @@ The first coding slice should be narrow but architectural:
 3. Generate one qualified OCaml module per page.
 4. Compile a two-page fixture using `Support.Library.value`.
 5. Make type-at and go-to-definition cross that page boundary.
-6. Retain legacy path imports as implicit opens.
+6. Use Dune's compiler-derived dependency closure for evaluation.
 
 Do not begin with the sidebar UI. Build it after qualified identity and
 navigation are real so its editable buffer remains a checked projection of

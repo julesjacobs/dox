@@ -322,7 +322,7 @@ let create_page_response context body =
                  ("projectVersion", `String snapshot.version);
                ]))
 
-let dependencies_response context parameters =
+let dependencies_response context ~cancelled parameters =
   match List.assoc_opt "module" parameters with
   | None -> error "Missing module query parameter."
   | Some module_path -> (
@@ -333,7 +333,7 @@ let dependencies_response context parameters =
           | Error project_error_ -> project_error project_error_
           | Ok _ ->
               let analysis =
-                Compiler_workspace.analyze ~root:context.project.root
+                Compiler_workspace.analyze ~cancelled ~root:context.project.root
                   ~version:snapshot.version snapshot.page_index
               in
               json
@@ -437,7 +437,10 @@ let evaluate_response context ~cancelled body =
           Error "The project changed; reload before evaluating this draft."
         else
           let document = Document.parse ~path source in
-          match Project.resolve_documents context.project snapshot document with
+          match
+            Project.resolve_documents ~cancelled context.project snapshot
+              document
+          with
           | Error project_error_ -> Error (Project.error_message project_error_)
           | Ok documents ->
               let evaluation =
@@ -479,7 +482,10 @@ let type_at_response context ~cancelled body =
               "The project changed; reopen the document before querying types."
           else
             let target = Document.parse ~path source in
-            match Project.resolve_documents context.project snapshot target with
+            match
+              Project.resolve_documents ~cancelled context.project snapshot
+                target
+            with
             | Error project_error_ -> project_error project_error_
             | Ok documents -> (
                 match
@@ -524,7 +530,10 @@ let complete_response context ~cancelled body =
               "The project changed; reopen the document before completing code."
           else
             let target = Document.parse ~path source in
-            match Project.resolve_documents context.project snapshot target with
+            match
+              Project.resolve_documents ~cancelled context.project snapshot
+                target
+            with
             | Error project_error_ -> project_error project_error_
             | Ok documents -> (
                 match
@@ -542,7 +551,7 @@ let complete_response context ~cancelled body =
                                   entries) );
                          ]))))
 
-let save_response context body =
+let save_response context ~cancelled body =
   let open Util in
   let parsed =
     let* request = json_body body in
@@ -559,13 +568,15 @@ let save_response context body =
       | Error project_error_ -> project_error project_error_
       | Ok snapshot -> (
           let draft = Document.parse ~path source in
-          match Project.resolve_documents context.project snapshot draft with
+          match
+            Project.resolve_documents ~cancelled context.project snapshot draft
+          with
           | Error project_error_ -> project_error project_error_
           | Ok documents -> (
               let validation =
                 Evaluator.evaluate_documents
-                  ~project_version:base_project_version ~documents ~target:draft
-                  ()
+                  ~project_version:base_project_version ~cancelled ~documents
+                  ~target:draft ()
               in
               match
                 Project.save_document context.project ~path ~source
@@ -696,7 +707,8 @@ let route context ~cancelled method_ target headers body =
       | Error project_error_ -> project_error project_error_)
   | "GET", "/api/document" -> document_response context parameters
   | "GET", "/api/page" -> page_response context parameters
-  | "GET", "/api/dependencies" -> dependencies_response context parameters
+  | "GET", "/api/dependencies" ->
+      dependencies_response context ~cancelled parameters
   | "GET", "/api/changes" -> (
       match Project.changes context.project with
       | Ok changes -> json (`List changes)
@@ -713,7 +725,7 @@ let route context ~cancelled method_ target headers body =
           complete_response context ~cancelled body)
   | "PUT", "/api/document" ->
       require_active_request context headers (fun () ->
-          save_response context body)
+          save_response context ~cancelled body)
   | "PUT", "/api/page/source" ->
       require_active_request context headers (fun () ->
           save_page_response context body)
@@ -786,47 +798,118 @@ let serve ~root ~assets ~port =
       failwith
         ("Could not recover an interrupted transaction: "
         ^ Project.error_message error));
+  let initial_snapshot =
+    match Project.snapshot project with
+    | Ok snapshot -> snapshot
+    | Error error ->
+        failwith
+          ("Could not initialize the compiler workspace: "
+          ^ Project.error_message error)
+  in
   let assets = try Unix.realpath assets with Unix.Unix_error _ -> assets in
   let context =
     { project; assets; port; session_token = Util.random_token () }
   in
-  let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-  Unix.setsockopt socket Unix.SO_REUSEADDR true;
-  Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, port));
-  Unix.listen socket 64;
+  let coordinator =
+    match
+      Compiler_workspace.start_coordinator ~root:project.root
+        initial_snapshot.page_index
+    with
+    | Ok coordinator -> coordinator
+    | Error message -> failwith ("Could not start the Dune watcher: " ^ message)
+  in
+  let coordinator_ref = ref coordinator in
+  let socket =
+    let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+    try
+      Unix.set_close_on_exec socket;
+      Unix.setsockopt socket Unix.SO_REUSEADDR true;
+      Unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_loopback, port));
+      Unix.listen socket 64;
+      socket
+    with error ->
+      Unix.close socket;
+      Compiler_workspace.stop_coordinator !coordinator_ref;
+      raise error
+  in
   Sys.set_signal Sys.sigchld Sys.Signal_default;
   Printf.printf "Doclang is running at http://127.0.0.1:%d\n%!" port;
   Printf.printf "Project: %s\n%!" project.root;
   let max_workers = 16 in
-  let rec reap_workers active =
-    match Unix.waitpid [ Unix.WNOHANG ] (-1) with
-    | 0, _ -> active
-    | _, _ -> reap_workers (max 0 (active - 1))
-    | exception Unix.Unix_error (Unix.ECHILD, _, _) -> 0
-    | exception Unix.Unix_error (Unix.EINTR, _, _) -> reap_workers active
+  let workers_ref = ref [] in
+  let reap_workers workers =
+    workers
+    |> List.filter (fun pid ->
+        match Unix.waitpid [ Unix.WNOHANG ] pid with
+        | 0, _ -> true
+        | _ -> false
+        | exception Unix.Unix_error (Unix.EINTR, _, _) -> true
+        | exception Unix.Unix_error _ -> false)
   in
-  let rec loop active =
-    let active = reap_workers active in
+  let rec loop workers =
+    let workers = reap_workers workers in
+    workers_ref := workers;
     let client, _ = Unix.accept socket in
     Unix.setsockopt_float client Unix.SO_RCVTIMEO 10.;
     Unix.setsockopt_float client Unix.SO_SNDTIMEO 10.;
-    if active >= max_workers then (
-      let output = Unix.out_channel_of_descr client in
-      send_response output
-        (error ~status:503
-           "The local workspace is busy; retry after an evaluation finishes.");
-      close_out_noerr output;
-      loop active)
-    else
-      match Unix.fork () with
-      | 0 ->
-          Unix.close socket;
-          (try handle_client context client
-           with exception_ ->
-             prerr_endline ("Request failed: " ^ Printexc.to_string exception_));
-          Unix._exit 0
-      | _ ->
-          Unix.close client;
-          loop (active + 1)
+    let coordinator_ready =
+      if Compiler_workspace.coordinator_alive !coordinator_ref then Ok ()
+      else (
+        Compiler_workspace.detach_coordinator_owner !coordinator_ref;
+        match Project.snapshot project with
+        | Error error -> Error (Project.error_message error)
+        | Ok snapshot -> (
+            match
+              Compiler_workspace.start_coordinator ~root:project.root
+                snapshot.page_index
+            with
+            | Ok coordinator ->
+                coordinator_ref := coordinator;
+                Ok ()
+            | Error message -> Error message))
+    in
+    match coordinator_ready with
+    | Error message ->
+        let output = Unix.out_channel_of_descr client in
+        send_response output
+          (error ~status:503
+             ("The local compiler coordinator could not restart: " ^ message));
+        close_out_noerr output;
+        loop workers
+    | Ok () when List.length workers >= max_workers ->
+        let output = Unix.out_channel_of_descr client in
+        send_response output
+          (error ~status:503
+             "The local workspace is busy; retry after an evaluation finishes.");
+        close_out_noerr output;
+        loop workers
+    | Ok () -> (
+        match Unix.fork () with
+        | 0 ->
+            Unix.close socket;
+            Compiler_workspace.detach_coordinator_owner !coordinator_ref;
+            (try handle_client context client
+             with exception_ ->
+               prerr_endline ("Request failed: " ^ Printexc.to_string exception_));
+            Unix._exit 0
+        | pid ->
+            Unix.close client;
+            workers_ref := pid :: workers;
+            loop (pid :: workers))
   in
-  Fun.protect ~finally:(fun () -> Unix.close socket) (fun () -> loop 0)
+  let stop _ = raise Exit in
+  Sys.set_signal Sys.sigint (Sys.Signal_handle stop);
+  Sys.set_signal Sys.sigterm (Sys.Signal_handle stop);
+  Fun.protect
+    ~finally:(fun () ->
+      Unix.close socket;
+      List.iter
+        (fun pid ->
+          try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ())
+        !workers_ref;
+      List.iter
+        (fun pid ->
+          try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ())
+        !workers_ref;
+      Compiler_workspace.stop_coordinator !coordinator_ref)
+    (fun () -> try loop [] with Exit -> ())

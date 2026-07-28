@@ -118,7 +118,7 @@ let page snapshot module_path =
       Error
         (Not_found (Printf.sprintf "Page module %S was not found." module_path))
 
-let resolve_documents project snapshot target =
+let resolve_documents ?(cancelled = fun () -> false) project snapshot target =
   let documents =
     snapshot.documents
     |> List.map (fun document ->
@@ -129,21 +129,25 @@ let resolve_documents project snapshot target =
     Page_index.build_migrating documents
     |> Result.map_error (fun message -> Invalid message)
   in
-  let fallback_graph = Module_graph.build page_index in
+  let target_module =
+    Result.to_option (Module_path.of_source_path target.path)
+  in
   let compiler_graph =
-    Compiler_workspace.analyze ~root:project.root
+    Compiler_workspace.analyze ?target:target_module ~cancelled
+      ~root:project.root
       ~version:(version_of_documents documents)
       page_index
   in
+  let compiler_entry module_path =
+    List.find_opt
+      (fun (entry : Compiler_workspace.module_info) ->
+        String.equal entry.Compiler_workspace.module_path module_path)
+      compiler_graph.modules
+  in
   let dependencies module_path =
-    match
-      List.find_opt
-        (fun entry ->
-          String.equal entry.Compiler_workspace.module_path module_path)
-        compiler_graph.modules
-    with
+    match compiler_entry module_path with
     | Some entry -> entry.uses
-    | None -> Module_graph.dependencies fallback_graph module_path
+    | None -> []
   in
   let find path =
     if String.equal path target.Document.path then Ok target
@@ -152,7 +156,9 @@ let resolve_documents project snapshot target =
   let rec visit visiting visited ordered path =
     if List.mem path visited then Ok (visited, ordered)
     else if List.mem path visiting then
-      Error (Invalid (Printf.sprintf "Document import cycle includes %S." path))
+      Error
+        (Invalid
+           (Printf.sprintf "The OCaml module dependency cycle includes %S." path))
     else
       let* document = find path in
       let qualified_imports =
@@ -165,9 +171,7 @@ let resolve_documents project snapshot target =
                   (fun page -> page.Page_index.source_path)
                   (Page_index.find page_index dependency))
       in
-      let imports =
-        document.imports @ qualified_imports |> List.sort_uniq String.compare
-      in
+      let imports = List.sort_uniq String.compare qualified_imports in
       let rec visit_imports visited ordered = function
         | [] -> Ok (visited, ordered)
         | imported :: rest ->
@@ -179,8 +183,18 @@ let resolve_documents project snapshot target =
       let* visited, ordered = visit_imports visited ordered imports in
       Ok (path :: visited, document :: ordered)
   in
-  let* _, reversed = visit [] [] [] target.path in
-  Ok (List.rev reversed)
+  match target_module with
+  | Some module_path when Option.is_none (compiler_entry module_path) ->
+      Ok
+        ( documents
+        |> List.filter (fun document ->
+            not (String.equal document.Document.path target.path))
+        |> List.sort (fun left right ->
+            String.compare left.Document.path right.Document.path)
+        |> fun dependencies -> dependencies @ [ target ] )
+  | _ ->
+      let* _, reversed = visit [] [] [] target.path in
+      Ok (List.rev reversed)
 
 let read_document project path =
   match snapshot project with
@@ -199,7 +213,6 @@ let file_summary document =
       ("module", `String module_path);
       ("title", `String document.title);
       ("version", `String document.version);
-      ("imports", `List (List.map (fun path -> `String path) document.imports));
       ("definitions", `Int (List.length document.definitions));
       ( "outline",
         `List
@@ -378,25 +391,33 @@ let affected_definition_names before after direct =
   |> List.filter (fun name -> not (List.mem name direct))
   |> List.sort_uniq String.compare
 
-let affected_document_paths documents changed_path =
-  let rec expand known =
-    let newly_affected =
-      documents
-      |> List.filter_map (fun document ->
-          if List.mem document.Document.path known then None
-          else if
-            List.exists
-              (fun imported -> List.mem imported known)
-              document.imports
-          then Some document.path
-          else None)
-      |> List.sort_uniq String.compare
-    in
-    if newly_affected = [] then known
-    else expand (List.sort_uniq String.compare (known @ newly_affected))
-  in
-  expand [ changed_path ]
-  |> List.filter (fun path -> not (String.equal path changed_path))
+let affected_document_paths project snapshot changed_path =
+  match Page_index.find_source snapshot.page_index changed_path with
+  | None -> []
+  | Some page ->
+      let analysis =
+        Compiler_workspace.analyze ~root:project.root ~version:snapshot.version
+          snapshot.page_index
+      in
+      let rec expand known pending =
+        match pending with
+        | [] -> known
+        | module_path :: rest ->
+            let dependents =
+              analysis.modules
+              |> List.find_opt (fun (entry : Compiler_workspace.module_info) ->
+                  String.equal entry.module_path module_path)
+              |> Option.map (fun (entry : Compiler_workspace.module_info) ->
+                  entry.used_by)
+              |> Option.value ~default:[]
+              |> List.filter (fun dependent -> not (List.mem dependent known))
+            in
+            expand (dependents @ known) (dependents @ rest)
+      in
+      expand [] [ page.module_path ]
+      |> List.filter_map (fun module_path ->
+          Page_index.find snapshot.page_index module_path
+          |> Option.map (fun page -> page.Page_index.source_path))
 
 let object_key source =
   Printf.sprintf "%s-%d" (Util.digest source) (String.length source)
@@ -866,7 +887,7 @@ let save_document project ~path ~source ~base_version ~base_project_version
               let direct = changed_definition_names before after in
               let affected = affected_definition_names before after direct in
               let affected_documents =
-                affected_document_paths before_snapshot.documents path
+                affected_document_paths project before_snapshot path
               in
               let changed_blocks = changed_blocks before after in
               let prose_changed =
@@ -1275,36 +1296,6 @@ let rewrite_ocaml_line renames state source =
   loop 0;
   Buffer.contents buffer
 
-let rewrite_import_paths renames source =
-  let paths =
-    renames
-    |> List.map (fun rename ->
-        ( Module_path.source_path rename.before,
-          Module_path.source_path rename.after ))
-    |> List.sort (fun (left, _) (right, _) ->
-        compare (String.length right) (String.length left))
-  in
-  let buffer = Buffer.create (String.length source) in
-  let rec loop index =
-    if index >= String.length source then ()
-    else
-      match
-        List.find_opt
-          (fun (before, _) ->
-            index + String.length before <= String.length source
-            && String.sub source index (String.length before) = before)
-          paths
-      with
-      | Some (before, after) ->
-          Buffer.add_string buffer after;
-          loop (index + String.length before)
-      | None ->
-          Buffer.add_char buffer source.[index];
-          loop (index + 1)
-  in
-  loop 0;
-  Buffer.contents buffer
-
 let rewrite_document_module_paths renames document =
   let lines = Document.lines_with_endings document.Document.source in
   let code_lines = Hashtbl.create 32 in
@@ -1360,14 +1351,7 @@ let rewrite_document_module_paths renames document =
                     (String.length result - start - String.length before))
             line references
         in
-        if
-          try
-            ignore
-              (Str.search_forward (Str.regexp "doclang:[ \t]*imports=") line 0);
-            true
-          with Not_found -> false
-        then rewrite_import_paths renames line
-        else line)
+        line)
   |> String.concat ""
 
 let validate_module_renames snapshot renames =

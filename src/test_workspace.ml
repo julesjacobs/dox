@@ -37,6 +37,37 @@ let () =
     (Result.is_error (Module_path.validate "Models.Bad-Name"))
     "invalid module component was accepted";
   expect
+    (Compiler_workspace.safe_generated_file "models/statistics.ml"
+    && not
+         (Compiler_workspace.safe_generated_file
+            "../../../../project-file.live.md"))
+    "generated source cleanup accepted a path outside its workspace";
+  expect
+    (Result.is_error
+       (Page_index.build
+          [
+            Document.parse ~path:"doclang_prelude.live.md"
+              "# Reserved support module\n";
+          ]))
+    "the generated Doclang_prelude module identity was not reserved";
+  let deep_description =
+    Compiler_workspace.manifest_description
+      [
+        {
+          Compiler_workspace.module_path = "A.B.C";
+          source_path = "a/b/c.live.md";
+          generated_path = "a/b/c.ml";
+          source = "";
+        };
+      ]
+  in
+  expect
+    (match deep_description with
+    | [ entry ] ->
+        Util.ends_with ~suffix:"/a__B__C.cmt" entry.Compiler_workspace.cmt
+    | _ -> false)
+    "the passive Dune target for a deep qualified module was incorrect";
+  expect
     (Compiler_workspace.internal_violations
        [
          {
@@ -47,6 +78,96 @@ let () =
        ]
     <> [])
     "an Internal namespace boundary violation was accepted";
+  let unsafe_root = Filename.temp_dir "doclang-workspace-symlink-test-" "" in
+  let outside = Filename.temp_dir "doclang-workspace-outside-test-" "" in
+  Fun.protect
+    ~finally:(fun () ->
+      remove_tree unsafe_root;
+      remove_tree outside)
+    (fun () ->
+      write unsafe_root "a/b.live.md" "# Unsafe\n\n    let value = 1\n";
+      result
+        (Util.ensure_directory
+           (Filename.concat unsafe_root ".doclang/dune-workspace/pages"));
+      Unix.symlink outside
+        (Filename.concat unsafe_root ".doclang/dune-workspace/pages/a");
+      let page =
+        {
+          Compiler_workspace.module_path = "A.B";
+          source_path = "a/b.live.md";
+          generated_path = "a/b.ml";
+          source = "open Doclang_prelude\nlet value = 1\n";
+        }
+      in
+      expect
+        (Result.is_error (Compiler_workspace.sync unsafe_root [ page ]))
+        "compiler source generation followed a symlinked parent";
+      expect
+        (Array.length (Sys.readdir outside) = 0)
+        "compiler source generation wrote outside its workspace");
+  let concurrent_root =
+    Filename.temp_dir "doclang-workspace-concurrent-test-" ""
+  in
+  Fun.protect
+    ~finally:(fun () -> remove_tree concurrent_root)
+    (fun () ->
+      write concurrent_root "index.live.md"
+        "# Concurrent start\n\n    let value = 1\n";
+      let concurrent_project = Project.create concurrent_root in
+      let concurrent_snapshot =
+        project_result (Project.snapshot concurrent_project)
+      in
+      let result_read, result_write = Unix.pipe ~cloexec:true () in
+      let release_read, release_write = Unix.pipe ~cloexec:true () in
+      let contenders =
+        List.init 2 (fun _ ->
+            match Unix.fork () with
+            | 0 ->
+                Unix.close result_read;
+                Unix.close release_write;
+                let result_channel = Unix.out_channel_of_descr result_write in
+                (match
+                   Compiler_workspace.start_coordinator ~root:concurrent_root
+                     concurrent_snapshot.page_index
+                 with
+                | Error _ ->
+                    output_string result_channel "loser\n";
+                    flush result_channel
+                | Ok coordinator ->
+                    output_string result_channel "winner\n";
+                    flush result_channel;
+                    let byte = Bytes.create 1 in
+                    ignore (Unix.read release_read byte 0 1);
+                    Compiler_workspace.stop_coordinator coordinator);
+                close_out_noerr result_channel;
+                Unix.close release_read;
+                Unix._exit 0
+            | pid -> pid)
+      in
+      Unix.close result_write;
+      Unix.close release_read;
+      let result_channel = Unix.in_channel_of_descr result_read in
+      let outcomes = [ input_line result_channel; input_line result_channel ] in
+      close_in_noerr result_channel;
+      expect
+        (List.sort String.compare outcomes = [ "loser"; "winner" ])
+        "concurrent coordinator starts did not select exactly one owner";
+      expect
+        (match
+           Compiler_workspace.connect
+             (Compiler_workspace.coordinator_socket concurrent_root)
+         with
+        | Ok socket ->
+            Unix.close socket;
+            true
+        | Error _ -> false)
+        "the losing coordinator start removed the winner's live socket";
+      ignore (Unix.write_substring release_write "x" 0 1);
+      Unix.close release_write;
+      List.iter
+        (fun pid ->
+          try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ())
+        contenders);
   let directory = Filename.temp_dir "doclang-workspace-test-" "" in
   Fun.protect
     ~finally:(fun () -> remove_tree directory)
@@ -217,13 +338,22 @@ let () =
       expect compiler_graph.ok "the compiler-backed workspace analysis failed";
       let forecast_dependencies =
         List.find
-          (fun entry ->
+          (fun (entry : Compiler_workspace.module_info) ->
             String.equal entry.Compiler_workspace.module_path "Reports.Forecast")
           compiler_graph.modules
       in
       expect
         (forecast_dependencies.uses = [ "Models.Statistics" ])
-        "ocamldep did not report the qualified page dependency";
+        "the compiler did not report the qualified page dependency";
+      let statistics_dependencies =
+        List.find
+          (fun (entry : Compiler_workspace.module_info) ->
+            String.equal entry.module_path "Models.Statistics")
+          compiler_graph.modules
+      in
+      expect
+        (statistics_dependencies.used_by = [ "Reports.Forecast" ])
+        "the compiler graph did not report a reverse page dependency";
       let statistics =
         project_result (Project.page snapshot "Models.Statistics")
       in
@@ -310,12 +440,6 @@ let () =
           { Project.before = "Bravo"; after = "Alpha" };
         ]
       in
-      expect
-        (String.equal
-           (Project.rewrite_import_paths swap
-              "<!-- doclang: imports=alpha.live.md,bravo.live.md -->")
-           "<!-- doclang: imports=bravo.live.md,alpha.live.md -->")
-        "a swap refactor rewrote legacy imports sequentially";
       let _, swapped_snapshot, _ =
         project_result
           (Project.apply_module_refactor project
@@ -353,4 +477,111 @@ let () =
         (Option.is_some
            (Page_index.find migration_snapshot.page_index "Analysis.Statistics"))
         "an invalid existing path made valid pages unavailable";
+      write directory "a/b/c.live.md" "# Deep page\n\n    let value = 1\n";
+      let passive_snapshot = project_result (Project.snapshot project) in
+      let coordinator =
+        result
+          (Compiler_workspace.start_coordinator ~root:directory
+             passive_snapshot.page_index)
+      in
+      Fun.protect
+        ~finally:(fun () -> Compiler_workspace.stop_coordinator coordinator)
+        (fun () ->
+          expect
+            (Result.is_error
+               (Compiler_workspace.start_coordinator ~root:directory
+                  passive_snapshot.page_index))
+            "a second server was allowed to share coordinator ownership";
+          let analyze () =
+            Compiler_workspace.analyze ~target:"A.B.C" ~root:directory
+              ~version:passive_snapshot.version passive_snapshot.page_index
+          in
+          let canceled_pages =
+            Compiler_workspace.generated_pages passive_snapshot.page_index
+            |> List.map (fun (page : Compiler_workspace.generated_page) ->
+                if String.equal page.module_path "A.B.C" then
+                  { page with source = "open Doclang_prelude\nlet value =\n" }
+                else page)
+          in
+          let children =
+            List.init 12 (fun _ ->
+                match Unix.fork () with
+                | 0 ->
+                    (try
+                       ignore
+                         (Compiler_workspace.analyze_via_coordinator
+                            ~cancelled:(fun () -> true)
+                            ~socket_path:coordinator.socket_path ~target:"A.B.C"
+                            canceled_pages)
+                     with Evaluator.Cancelled -> ());
+                    Unix._exit 0
+                | pid -> pid)
+          in
+          List.iter
+            (fun pid ->
+              try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ())
+            children;
+          let started = Unix.gettimeofday () in
+          let latest_analysis = analyze () in
+          expect latest_analysis.ok
+            ("a deep qualified module failed through passive Dune RPC: "
+            ^ String.concat "\n" latest_analysis.diagnostics);
+          expect
+            (Unix.gettimeofday () -. started < 8.)
+            "canceled compiler drafts backlogged ahead of the latest request";
+          let watcher_pid =
+            result
+              (Util.read_file (Compiler_workspace.watcher_pid_path directory))
+            |> String.trim |> int_of_string
+          in
+          Unix.kill (-watcher_pid) Sys.sigkill;
+          ignore (Unix.select [] [] [] 0.05);
+          expect (analyze ()).ok
+            "the build coordinator did not restart a failed Dune watcher";
+          let current_pid = Unix.getpid () in
+          result
+            (Util.write_file_atomic
+               (Compiler_workspace.watcher_pid_path directory)
+               (string_of_int current_pid));
+          Compiler_workspace.stop_recorded_watcher directory;
+          expect
+            (try
+               Unix.kill current_pid 0;
+               true
+             with Unix.Unix_error _ -> false)
+            "stale watcher cleanup signaled a process it did not own";
+          let malicious_page =
+            `Assoc
+              [
+                ("module", `String "A.B.C");
+                ("sourcePath", `String "a/b/c.live.md");
+                ("generatedPath", `String "../../outside.ml");
+                ("source", `String "let value = 2\n");
+              ]
+          in
+          expect
+            (Result.is_error
+               (Compiler_workspace.validate_pages ~root:directory
+                  [ malicious_page ]))
+            "the coordinator accepted an arbitrary generated path";
+          Compiler_workspace.detach_coordinator_owner coordinator;
+          let rec wait_for_owner_exit attempts =
+            if
+              attempts <= 0
+              || not (Compiler_workspace.coordinator_alive coordinator)
+            then ()
+            else (
+              ignore (Unix.select [] [] [] 0.02);
+              wait_for_owner_exit (attempts - 1))
+          in
+          wait_for_owner_exit 100;
+          expect
+            (not (Compiler_workspace.coordinator_alive coordinator))
+            "the coordinator survived the loss of its owning server";
+          let replacement =
+            result
+              (Compiler_workspace.start_coordinator ~root:directory
+                 passive_snapshot.page_index)
+          in
+          Compiler_workspace.stop_coordinator replacement);
       print_endline "workspace tests passed")

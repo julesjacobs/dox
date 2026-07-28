@@ -16,9 +16,9 @@ A live document is a UTF-8 file ending in `.live.md`.
 - `#line` directives map compiler locations back to the literate source.
 - A `name=` attribute is the stable identity of a source-backed code region.
   Names must be unique inside a document.
-- `<!-- doclang: imports=path.live.md,... -->` declares project-relative
-  document dependencies. Dependencies are evaluated in topological order and
-  cycles are rejected.
+- A page path determines its qualified OCaml module path. Ordinary module
+  references determine dependencies; no document-level import syntax is
+  required.
 
 The exact text file remains canonical. Rendered HTML and runtime output are
 projections, never replacement source formats.
@@ -178,8 +178,8 @@ The next large steps should be done in this order:
 
 1. Use OCaml compiler structures for entity IDs, definitions, resolved
    references, signatures, and diagnostics.
-2. Replace the current ordered shared-scope imports with one named OCaml
-   compilation unit per document and a typed project module graph.
+2. Extend the Dune-backed page module graph with compiler entity identities,
+   definitions, and resolved occurrences.
 3. Add retained last-good evaluations and cancellable draft jobs.
 4. Add rendered before/after document projections to stored change sets.
 5. Add managed services with explicit lifecycle and capability policies.

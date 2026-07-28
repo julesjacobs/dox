@@ -72,16 +72,16 @@ let this_is_only_an_example = true
 ```
 ````
 
-Documents can import other live documents through an explicit project-relative
-dependency:
+Every page is an OCaml module derived from its path. Cross-page dependencies use
+ordinary qualified OCaml references:
 
-```markdown
-<!-- doclang: imports=examples/library.live.md -->
+```ocaml
+let average =
+  Examples.Library.mean Examples.Library.observations
 ```
 
-Imported documents are evaluated first. Their OCaml definitions are in ordinary
-scope for the importing document. Cycles and missing imports are reported as
-project errors.
+Dune and the compiler-derived dependency graph determine build order,
+incremental rebuilds, cycles, and the transitive evaluation closure.
 
 ## Observed execution
 

@@ -232,6 +232,11 @@ button {
 .module-context {
   display: grid;
   gap: 11px;
+  transition: opacity 120ms ease;
+}
+
+.module-context.stale {
+  opacity: 0.48;
 }
 
 .module-context h3 {
@@ -1044,23 +1049,6 @@ button {
   color: var(--muted);
   font-family: var(--mono);
   font-size: 10px;
-}
-
-.project-imports {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  align-items: center;
-  margin: -6px 0 13px;
-  color: var(--muted);
-  font-size: 9px;
-}
-
-.project-imports code {
-  border-radius: 4px;
-  padding: 2px 5px;
-  background: var(--mint);
-  color: var(--green-dark);
 }
 
 .entity-row {

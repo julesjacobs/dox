@@ -135,9 +135,8 @@ let () =
       (match
          Util.write_file
            (Filename.concat directory "importer.live.md")
-           "<!-- doclang: imports=library.live.md -->\n\
-            ```ocaml name=result\n\
-            let answer = shared + 1\n\
+           "```ocaml name=result\n\
+            let answer = Library.shared + 1\n\
             let () = Doc.value ~id:\"result\" ~type_:\"int\" (string_of_int \
             answer)\n\
             ```\n"

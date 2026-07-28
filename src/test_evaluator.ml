@@ -204,19 +204,18 @@ let () =
     | Error _ -> false)
     "Merlin completions did not expand module paths";
   let imported_document =
-    Document.parse ~path:"library.live.md"
+    Document.parse ~path:"examples/library.live.md"
       "# Library\n\n    let @imported_values = [ 1.; 2. ]\n"
   in
   let importing_document =
-    Document.parse ~path:"consumer.live.md"
+    Document.parse ~path:"examples/consumer.live.md"
       "# Consumer\n\n\
-       <!-- doclang: imports=library.live.md -->\n\n\
-      \    let imported_count = List.length imported_values\n"
+      \    let imported_count = List.length Library.imported_values\n"
   in
   let imported_type =
     Evaluator.type_at
       ~documents:[ imported_document; importing_document ]
-      ~target:importing_document ~line:5 ~column:44
+      ~target:importing_document ~line:3 ~column:52
   in
   expect
     (match imported_type with
@@ -227,7 +226,7 @@ let () =
     Evaluator.complete_at_with_cancel
       ~cancelled:(fun () -> false)
       ~documents:[ imported_document; importing_document ]
-      ~target:importing_document ~line:5 ~column:32 ~context:""
+      ~target:importing_document ~line:3 ~column:46 ~context:"Library."
   in
   expect
     (match imported_completions with

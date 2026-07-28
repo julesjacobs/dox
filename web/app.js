@@ -63,6 +63,8 @@ const state = {
   refactorInFlight: false,
   workspaceError: null,
   dependency: null,
+  dependencyGeneration: 0,
+  dependencyController: null,
 };
 
 const escapeHtml = (value = "") =>
@@ -220,18 +222,48 @@ function updateRoute(modulePath, mode = "push") {
   else if (mode === "push") window.history.pushState(payload, "", url);
 }
 
+function invalidateDependencyContext({ clear = false, stale = true } = {}) {
+  state.dependencyGeneration += 1;
+  state.dependencyController?.abort();
+  state.dependencyController = null;
+  if (clear) {
+    state.dependency = null;
+  } else if (state.dependency) {
+    state.dependency = { ...state.dependency, stale };
+  }
+}
+
 async function loadDependencyContext(modulePath) {
+  const generation = ++state.dependencyGeneration;
+  state.dependencyController?.abort();
+  const controller = new AbortController();
+  state.dependencyController = controller;
   try {
     const payload = await api(
       `/api/dependencies?module=${encodeURIComponent(modulePath)}`,
+      { signal: controller.signal },
     );
-    if (state.module !== modulePath) return;
+    if (
+      generation !== state.dependencyGeneration ||
+      state.module !== modulePath ||
+      payload.projectVersion !== state.projectVersion
+    ) {
+      return;
+    }
     state.dependency = payload.dependency;
     refreshInspector();
-  } catch {
-    if (state.module === modulePath) {
+  } catch (error) {
+    if (
+      error.name !== "AbortError" &&
+      generation === state.dependencyGeneration &&
+      state.module === modulePath
+    ) {
       state.dependency = null;
       refreshInspector();
+    }
+  } finally {
+    if (state.dependencyController === controller) {
+      state.dependencyController = null;
     }
   }
 }
@@ -284,6 +316,7 @@ async function loadDocument(
   captureCurrentSession();
   const cached = state.sessions.get(modulePath);
   invalidateEvaluation();
+  invalidateDependencyContext({ clear: true });
   if (cached?.document) {
     restoreSession(cached);
     state.view = "document";
@@ -834,7 +867,9 @@ async function commitOutline({ navigateLine = null } = {}) {
       state.workspaceError =
         "The refactor finished. A newer outline edit was kept for review.";
     }
+    invalidateDependencyContext({ clear: true });
     render();
+    if (state.module) void loadDependencyContext(state.module);
     if (navigateLine !== null) {
       const modulePath = outlineModuleAtLine(
         state.outlineCommittedText,
@@ -950,11 +985,6 @@ function renderProject() {
               <article class="project-card" data-project-path="${escapeHtml(document.path)}" tabindex="0">
                 <h2>${escapeHtml(document.title)}</h2>
                 <div class="project-card-path">${escapeHtml(document.path)}</div>
-                ${
-                  document.imports?.length
-                    ? `<div class="project-imports"><span>imports</span>${document.imports.map((path) => `<code>${escapeHtml(path)}</code>`).join("")}</div>`
-                    : ""
-                }
                 ${(document.outline || [])
                   .map(
                     (entity) => `
@@ -1223,7 +1253,11 @@ function renderDependencyContext() {
           .join("")}</div>`
       : "";
   const boundary =
-    dependency.boundary === "cross-namespace"
+    !dependency.compilerBacked ||
+    dependency.boundary === "unknown" ||
+    dependency.diagnostics?.length
+      ? "Compiler dependency data is unavailable"
+      : dependency.boundary === "cross-namespace"
       ? "Used across namespaces"
       : dependency.boundary === "namespace-local"
         ? "Used within this namespace"
@@ -1234,7 +1268,7 @@ function renderDependencyContext() {
         .map((message) => `<p>${escapeHtml(message)}</p>`)
         .join("")}</div>`
     : "";
-  return `<section class="inspect-section module-context">
+  return `<section class="inspect-section module-context${dependency.stale ? " stale" : ""}">
     <h3>${escapeHtml(dependency.module)}</h3>
     ${section("Uses", dependency.uses)}
     ${section("Used by", dependency.usedBy)}
@@ -1606,6 +1640,10 @@ function updateSource(source, { evaluate = true } = {}) {
     issues: [],
   };
   state.dirty = source !== state.savedSource;
+  invalidateDependencyContext({ stale: state.dirty });
+  if (!state.dirty && !state.dependency && state.module) {
+    void loadDependencyContext(state.module);
+  }
   const session = currentSession();
   if (session) {
     session.document = state.document;
@@ -1630,6 +1668,7 @@ function updateSource(source, { evaluate = true } = {}) {
     );
   }
   updateStatusOnly();
+  refreshInspector();
   if (evaluate && invalidation) {
     scheduleEvaluation(source, { plan: nextPlan });
   }
@@ -2191,6 +2230,7 @@ async function drainAutosave(session) {
           ),
         });
       }
+      void loadDependencyContext(session.module);
     }
     succeeded = true;
     return true;

@@ -1,12 +1,11 @@
-<!-- doclang: imports=examples/library.live.md -->
-
 # A multi-file live view
 
-This document imports the OCaml program from `examples/library.live.md`.
-Evaluation and artifacts use the ordered dependency closure from one project
-snapshot.
+This document uses the sibling module `Library` (externally
+`Examples.Library`). The compiler dependency graph determines the evaluation
+and artifact closure.
 
-    let @average = mean observations
+    let @average =
+      Library.mean Library.observations
     
     let () =
       Doc.value ~id:"shared-result" ~type_:"float"
