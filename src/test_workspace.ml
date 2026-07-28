@@ -40,6 +40,10 @@ let () =
        "models/statistics.live.md")
     "qualified module did not encode reversibly";
   expect
+    (Module_path.of_source_path "httpServer/clientAPI.live.md"
+    = Ok "HttpServer.ClientAPI")
+    "CamelCase module components did not encode reversibly";
+  expect
     (Result.is_error (Module_path.validate "Models.Bad-Name"))
     "invalid module component was accepted";
   expect
@@ -476,6 +480,26 @@ let () =
       expect
         (String.equal created.path "models/linear.live.md")
         "nested module creation used the wrong source path";
+      let batch_created, batch_snapshot =
+        project_result
+          (Project.create_pages project ~module_paths:[ "Batch"; "Batch.Child" ]
+             ~base_project_version:created_snapshot.version ~principal:"test")
+      in
+      expect
+        (List.map (fun document -> document.Document.path) batch_created
+         = [ "batch.live.md"; "batch/child.live.md" ]
+        && Option.is_some (Page_index.find batch_snapshot.page_index "Batch")
+        && Option.is_some
+             (Page_index.find batch_snapshot.page_index "Batch.Child"))
+        "batch page creation did not publish a parent and child together";
+      expect
+        (Result.is_error
+           (Project.create_pages project
+              ~module_paths:[ "Batch.New"; "Models.Linear" ]
+              ~base_project_version:batch_snapshot.version ~principal:"test")
+        && not (Sys.file_exists (Filename.concat directory "batch/new.live.md"))
+        )
+        "a conflicting batch creation published only part of the batch";
       let renames =
         [
           {
@@ -485,10 +509,10 @@ let () =
         ]
       in
       let _, renamed_snapshot, _ =
-        let preview_id = Project.refactor_preview_id created_snapshot renames in
+        let preview_id = Project.refactor_preview_id batch_snapshot renames in
         project_result
           (Project.apply_module_refactor project
-             ~expected_project_version:created_snapshot.version
+             ~expected_project_version:batch_snapshot.version
              ~expected_preview_id:preview_id renames)
       in
       expect

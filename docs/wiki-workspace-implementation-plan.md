@@ -45,7 +45,7 @@ Models.Statistics  <->  models/statistics.live.md
 ```
 
 Each module component must use a restricted conventional OCaml form,
-`[A-Z][a-z0-9_']*`. Encoding uncapitalizes the first ASCII character of every
+`[A-Z][A-Za-z0-9_']*`. Encoding uncapitalizes the first ASCII character of every
 component; decoding capitalizes it. The mapping is therefore reversible and
 does not need a manifest, UUID, title registry, or alias database.
 
@@ -545,8 +545,8 @@ operations against the real modules and files.
 - Two spaces represent one namespace level.
 - Indentation supplies qualification, so descendants do not repeat their
   namespace.
-- Namespace-only lines are derived from their descendants. A parent line can
-  also be a page with the same module path.
+- Namespace-only lines are derived from their descendants. Entering one creates
+  its direct page on demand, after which the same line is both page and parent.
 - Sibling order is canonical alphabetical order. Moving a line without
   changing its indentation has no project meaning and normalizes back to that
   order.
@@ -562,7 +562,8 @@ operations against the real modules and files.
 - When a collapsed caret enters a stable page-leaf line, open that page
   immediately while leaving focus and the caret in the sidebar.
 - Do not navigate for a nonempty selection, IME composition, temporary blank
-  row, invalid structural edit, or namespace line.
+  row, or invalid structural edit. Entering a namespace-only line creates and
+  opens its direct page.
 - Moving through pages with Arrow-Up and Arrow-Down replaces the current
   transient browser-history entry; it does not add one history entry per row.
 - Following an explicit document link or focusing the main editor commits the
@@ -577,9 +578,10 @@ operations against the real modules and files.
 Normal text operations create a pending structural edit:
 
 - Typing on an existing component proposes a leaf or namespace rename.
-- Enter on a stable line inserts a temporary sibling row.
+- Enter on a stable line inserts a temporary sibling after its complete
+  subtree.
 - Typing in that row proposes a new module.
-- Tab and Shift-Tab change indentation and therefore propose reparenting.
+- Tab and Shift-Tab reparent the selected row together with its descendants.
 - Pasting several valid lines proposes a batch create or subtree move.
 - Editing a namespace component proposes renaming every descendant path.
 

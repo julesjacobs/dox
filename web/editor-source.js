@@ -1664,7 +1664,7 @@ function outlineDecorations(view) {
     if (
       entry?.invalid ||
       spaces % 2 !== 0 ||
-      (component && !/^[A-Z][a-z0-9_']*$/.test(component))
+      (component && !/^[A-Z][A-Za-z0-9_']*$/.test(component))
     ) {
       classes.push("cm-outline-invalid");
     }
@@ -1689,14 +1689,22 @@ function outlineDecorations(view) {
   return Decoration.set(decorations, true);
 }
 
-function insertOutlineSibling(view) {
+function insertOutlineSibling(view, onCommit) {
   const selection = view.state.selection.main;
   if (!selection.empty) return false;
   const line = view.state.doc.lineAt(selection.head);
   const indent = line.text.match(/^ */)?.[0] || "";
+  let insertionPoint = line.to;
+  for (let number = line.number + 1; number <= view.state.doc.lines; number += 1) {
+    const candidate = view.state.doc.line(number);
+    const candidateIndent = candidate.text.match(/^ */)?.[0].length || 0;
+    if (candidate.text.trim() && candidateIndent <= indent.length) break;
+    insertionPoint = candidate.to;
+  }
+  if (line.text.trim()) onCommit?.("enter");
   view.dispatch({
-    changes: { from: line.to, insert: `\n${indent}` },
-    selection: { anchor: line.to + 1 + indent.length },
+    changes: { from: insertionPoint, insert: `\n${indent}` },
+    selection: { anchor: insertionPoint + 1 + indent.length },
     scrollIntoView: true,
     userEvent: "input",
   });
@@ -1708,9 +1716,23 @@ function changeOutlineIndent(view, delta) {
   const line = view.state.doc.lineAt(selection.head);
   const spaces = line.text.match(/^ */)?.[0].length || 0;
   if (delta < 0 && spaces < 2) return true;
-  const replacement = " ".repeat(Math.max(0, spaces + delta));
+  const lines = [line];
+  for (let number = line.number + 1; number <= view.state.doc.lines; number += 1) {
+    const candidate = view.state.doc.line(number);
+    const candidateSpaces = candidate.text.match(/^ */)?.[0].length || 0;
+    if (candidate.text.trim() && candidateSpaces <= spaces) break;
+    lines.push(candidate);
+  }
+  const changes = lines.map((candidate) => {
+    const candidateSpaces = candidate.text.match(/^ */)?.[0].length || 0;
+    return {
+      from: candidate.from,
+      to: candidate.from + candidateSpaces,
+      insert: " ".repeat(Math.max(0, candidateSpaces + delta)),
+    };
+  });
   view.dispatch({
-    changes: { from: line.from, to: line.from + spaces, insert: replacement },
+    changes,
     selection: {
       anchor: Math.max(line.from, selection.anchor + delta),
       head: Math.max(line.from, selection.head + delta),
@@ -1769,7 +1791,10 @@ export function mountModuleOutlineEditor(
     presentation,
     Prec.highest(
       keymap.of([
-        { key: "Enter", run: insertOutlineSibling },
+        {
+          key: "Enter",
+          run: (view) => insertOutlineSibling(view, onCommit),
+        },
         { key: "Tab", run: (view) => changeOutlineIndent(view, 2) },
         { key: "Shift-Tab", run: (view) => changeOutlineIndent(view, -2) },
         {

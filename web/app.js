@@ -82,6 +82,7 @@ const state = {
   outlineSelection: 0,
   outlineCommitController: null,
   outlineCommitting: false,
+  outlineCommitPromise: null,
   refactorInFlight: false,
   refactorSessionRefresh: null,
   refactorModuleMapping: null,
@@ -1122,7 +1123,7 @@ function parseOutlineDraft(source, { previousRows = [], update = null } = {}) {
     }
     const depth = spaces / 2;
     const component = text.slice(spaces);
-    if (!/^[A-Z][a-z0-9_']*$/.test(component)) {
+    if (!/^[A-Z][A-Za-z0-9_']*$/.test(component)) {
       throw new Error(
         `Line ${index + 1} is not an OCaml module component.`,
       );
@@ -1203,19 +1204,6 @@ function parseOutlineDraft(source, { previousRows = [], update = null } = {}) {
 
 function outlineRowAtLine(lineNumber) {
   return state.outlineLineMap[lineNumber - 1] || null;
-}
-
-function outlineModuleAtLine(source, lineNumber, { committed = false } = {}) {
-  try {
-    const row = committed
-      ? state.outlineBase?.committedRowsWithOrigins?.[lineNumber - 1]
-      : outlineRowAtLine(lineNumber);
-    return committed
-      ? row?.pageModule || null
-      : row?.originTarget || null;
-  } catch {
-    return null;
-  }
 }
 
 function rewriteModulePaths(source, mapping) {
@@ -1476,18 +1464,16 @@ function scheduleOutlineCommit() {
   if (
     state.outlineDraftError ||
     state.outlineConflict ||
-    state.outlineText === state.outlineCommittedText ||
-    state.outlineText.split("\n").some((line) => !line.trim())
+    state.outlineText === state.outlineCommittedText
   ) {
     return;
   }
   const cursorLine =
     state.outlineView?.state.doc.lineAt(state.outlineSelection).number || 1;
-  if (
-    state.outlineDraftRows.some(
-      (row) => row.changed && row.sourceLine === cursorLine,
-    )
-  ) {
+  const activeRow = state.outlineDraftRows.find(
+    (row) => row.sourceLine === cursorLine,
+  );
+  if (activeRow?.changed && activeRow.originTarget) {
     return;
   }
   const generation = state.outlineDraftGeneration;
@@ -1498,7 +1484,29 @@ function scheduleOutlineCommit() {
   }, 900);
 }
 
-async function commitOutline({ reason = "explicit" } = {}) {
+function commitOutline(options = {}) {
+  if (state.outlineCommitPromise) {
+    state.outlineCommitQueued = true;
+    return state.outlineCommitPromise;
+  }
+  const promise = performOutlineCommit(options);
+  state.outlineCommitPromise = promise;
+  void promise.then(
+    () => {
+      if (state.outlineCommitPromise === promise) {
+        state.outlineCommitPromise = null;
+      }
+    },
+    () => {
+      if (state.outlineCommitPromise === promise) {
+        state.outlineCommitPromise = null;
+      }
+    },
+  );
+  return promise;
+}
+
+async function performOutlineCommit({ reason = "explicit" } = {}) {
   clearTimeout(state.outlineCommitTimer);
   state.outlineCommitTimer = null;
   if (state.outlineCommitting) {
@@ -1521,6 +1529,8 @@ async function commitOutline({ reason = "explicit" } = {}) {
 
   const submittedDraft = state.outlineText;
   const submittedGeneration = state.outlineDraftGeneration;
+  const submittedCursorLine =
+    state.outlineView?.state.doc.lineAt(state.outlineSelection).number || 1;
   const draft = parseOutlineDraft(submittedDraft, {
     previousRows: state.outlineDraftRows,
   });
@@ -1552,6 +1562,9 @@ async function commitOutline({ reason = "explicit" } = {}) {
     !added.length &&
     state.outlineText !== state.outlineCommittedText
   ) {
+    if (!submittedDraft.split("\n").some((line) => !line.trim())) {
+      installProjectSnapshot(state.project, { forceOutline: true });
+    }
     return true;
   }
   state.outlineCommitting = true;
@@ -1567,9 +1580,6 @@ async function commitOutline({ reason = "explicit" } = {}) {
       throw new Error(
         "Removing a module requires an explicit delete confirmation.",
       );
-    }
-    if (created.length > 1) {
-      throw new Error("Create one module at a time before reorganizing it.");
     }
     if (renames.length || created.length) {
       if (new Set(renames.map(({ after }) => after)).size !== renames.length) {
@@ -1619,11 +1629,11 @@ async function commitOutline({ reason = "explicit" } = {}) {
         }
       }
       if (created.length) {
-        const payload = await api("/api/page", {
+        const payload = await api("/api/pages", {
           method: "POST",
           signal: controller.signal,
           body: JSON.stringify({
-            module: created[0],
+            modules: created,
             baseProjectVersion: authoritativeProject.version,
           }),
         });
@@ -1633,11 +1643,24 @@ async function commitOutline({ reason = "explicit" } = {}) {
       authoritativeProject = state.project;
     }
 
-    const newerDraft =
-      state.outlineDraftGeneration > submittedGeneration
-        ? state.outlineText
+    const draftAdvanced = state.outlineDraftGeneration > submittedGeneration;
+    const retainsInsertionRow = submittedDraft
+      .split("\n")
+      .some((line) => !line.trim());
+    const retainsActiveDraft = draft.rows.some(
+      (row) => row.changed && row.sourceLine === submittedCursorLine,
+    );
+    const newerDraft = draftAdvanced
+      ? state.outlineText
+      : retainsInsertionRow || retainsActiveDraft
+        ? submittedDraft
         : null;
-    const newerRows = newerDraft !== null ? state.outlineDraftRows : null;
+    const newerRows =
+      newerDraft !== null
+        ? draftAdvanced
+          ? state.outlineDraftRows
+          : draft.rows
+        : null;
     installAuthoritativeProject(authoritativeProject, { forceOutline: true });
     if (newerDraft !== null) {
       state.outlineText = newerDraft;
@@ -1722,10 +1745,9 @@ async function commitOutline({ reason = "explicit" } = {}) {
       state.outlineCommitController = null;
     }
     state.outlineCommitting = false;
-    if (
-      state.outlineCommitQueued &&
-      state.outlineDraftGeneration > submittedGeneration
-    ) {
+    const queued = state.outlineCommitQueued;
+    state.outlineCommitQueued = false;
+    if (queued && state.outlineDraftGeneration > submittedGeneration) {
       scheduleOutlineCommit();
     }
   }
@@ -1741,6 +1763,43 @@ function syncOutlineEditor() {
     pendingModule: state.pendingModule,
     pendingVisible: state.pendingVisible,
     lineMap: state.outlineLineMap,
+  });
+}
+
+async function openOutlineModule(row, kind) {
+  const modulePath =
+    row?.originTarget ||
+    row?.targetModule ||
+    (row?.originPath && !row?.originModule ? row.proposedPath || row.path : null);
+  if (!modulePath) return;
+  if (row.originTarget) {
+    if (modulePath !== state.module) {
+      await loadDocument(modulePath, {
+        history: outlineHistoryMode(kind),
+        focus: "outline",
+      });
+    }
+    return;
+  }
+  const committed = await commitOutline({ reason: "navigate" });
+  if (!committed) return;
+  if (!state.project?.pageIndex?.modules?.includes(modulePath)) {
+    if (state.outlineConflict || state.outlineDraftError) return;
+    await withProjectMutation(async () => {
+      const payload = await api("/api/pages", {
+        method: "POST",
+        body: JSON.stringify({
+          modules: [modulePath],
+          baseProjectVersion: state.projectVersion,
+        }),
+      });
+      installAuthoritativeProject(payload.project, { forceOutline: true });
+    });
+    render();
+  }
+  await loadDocument(modulePath, {
+    history: outlineHistoryMode(kind),
+    focus: "outline",
   });
 }
 
@@ -1820,13 +1879,11 @@ function mountOutlineEditor() {
       state.outlineSelection = selection.head;
       const line = update.state.doc.lineAt(selection.head);
       scheduleOutlineCommit();
-      const modulePath = outlineModuleAtLine(state.outlineText, line.number);
-      if (modulePath && modulePath !== state.module) {
-        void loadDocument(modulePath, {
-          history: outlineHistoryMode(kind),
-          focus: "outline",
-        });
-      }
+      const row = outlineRowAtLine(line.number);
+      void openOutlineModule(row, kind).catch((error) => {
+        state.workspaceError = error.message;
+        updateStatusOnly();
+      });
     },
     onCommit: (reason) => void commitOutline({ reason }),
     onCancel: cancelOutlineDraft,
@@ -1838,8 +1895,7 @@ function mountOutlineEditor() {
       state.outlineNavigationRun = false;
       if (
         state.outlineText !== state.outlineCommittedText &&
-        !state.outlineDraftError &&
-        !state.outlineText.split("\n").some((line) => !line.trim())
+        !state.outlineDraftError
       ) {
         void commitOutline({ reason: "focusout" });
       }

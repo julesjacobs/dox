@@ -3,7 +3,8 @@ type t = {
   reverse : (string * string list) list;
 }
 
-let qualified_re = Str.regexp "\\b[A-Z][a-z0-9_']*\\(\\.[A-Z][a-z0-9_']*\\)+"
+let qualified_re =
+  Str.regexp "\\b[A-Z][A-Za-z0-9_']*\\(\\.[A-Z][A-Za-z0-9_']*\\)+"
 
 let qualified_paths source =
   let rec loop offset result =

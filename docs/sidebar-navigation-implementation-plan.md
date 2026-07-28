@@ -10,8 +10,8 @@ This change addresses four problems:
 
 1. Active-page font weight changes alter glyph widths.
 2. A first visit waits on a project-wide snapshot with no immediate feedback.
-3. Namespace rows are inert and cannot have landing pages.
-4. Cursor navigation can implicitly commit structural edits.
+3. Namespace-only rows need direct create-on-demand behavior.
+4. Structural edits must publish without disrupting continued typing.
 
 Collapsing, filtering, and recent-page UI are intentionally deferred. They add
 controls before the basic cursor and namespace model is stable.
@@ -48,9 +48,9 @@ logical row:
 6. Starts evaluation and dependency inspection independently in the
    background.
 
-Only `Page(module)` enters this loading protocol. `Namespace(path)` is
-selection and create-command context; it never sets a page-loading indicator
-or calls `/api/page`.
+`Page(module)` enters this loading protocol directly. Entering a
+`Namespace(path)` first creates its direct page with the same module path, then
+continues through the same loading protocol.
 
 Horizontal cursor movement within the same row does not navigate again.
 Programmatic selection restoration, document reconfiguration, typing,
@@ -67,13 +67,14 @@ mapping:
 ```
 
 An unchanged path can reclaim its unique origin after cut/paste or reorder.
-New or ambiguous rows have no navigation target until commit.
+New rows use their proposed module path as a pending navigation target.
 
 While a structural draft is dirty or invalid, a row with one unambiguous
 committed page can still navigate immediately with `Page(originModule)`.
-Namespace-only rows, new rows, and ambiguous rows only move the cursor. Cursor
-movement never requests a structural commit, so one invalid row cannot trap
-navigation elsewhere.
+Selecting a valid new row commits it before opening it. Selecting a
+namespace-only row creates its direct page before opening it. Invalid and
+ambiguous rows only move the cursor, so one invalid row cannot trap navigation
+elsewhere.
 
 ## Fast page reads
 
@@ -207,8 +208,8 @@ Page(module) | Namespace(path)
 ```
 
 Selecting a row with `pageModule` targets that page whether or not the row has
-children. Selecting a namespace-only row only moves the outline cursor. A new
-typed row creates its direct module path even when child rows are indented
+children. Selecting a namespace-only row creates and opens its direct page. A
+new typed row creates its direct module path even when child rows are indented
 beneath it.
 
 Committed rows carry hidden `originPath` and `originModule` metadata. Editing a
@@ -252,9 +253,10 @@ version.
 
 `onChange` parses and decorates locally and marks the structural draft dirty.
 It never issues a refactor during composition. Structural commits occur on
-`Mod-Enter`, outline focus exit, or after at least 900 ms of valid idle time
-when the cursor has left every changed row. A temporarily valid component
-prefix therefore does not refactor while it is still being edited.
+`Mod-Enter`, Enter after a completed component, outline focus exit, or after at
+least 900 ms of valid idle time. A new row may publish while active and retains
+its local position; an existing module rename waits until the cursor leaves its
+changed row. Temporary blank insertion rows do not block completed changes.
 
 Only one structural commit runs at a time. It captures a generation, drains
 dirty page sessions through the existing refactor boundary, and preserves any
@@ -299,7 +301,11 @@ Automated:
   direct new module paths.
 - Parent-page, namespace-only, nested-parent, last-child, and child-reorder
   cases round-trip without losing or inventing pages.
-- Moving the outline cursor does not commit a dirty structural draft.
+- Selecting a valid new row commits it before navigation.
+- Batch parent/child creation publishes atomically or leaves every target
+  absent.
+- Enter inserts a sibling after the complete current subtree, and Tab or
+  Shift-Tab moves the complete subtree.
 - Rapid navigation cancels obsolete page requests.
 - Unchanged cache revalidation, external clean edits, typing during
   revalidation, dirty conflicts, and deleted/renamed cached pages, including
@@ -321,7 +327,8 @@ Browser:
 - Cached visits switch synchronously.
 - The current-page marker does not change text width.
 - `Examples` opens `Examples`.
-- Arrowing through several pages does not refactor the outline.
+- Arrowing through existing pages does not refactor them; entering a
+  namespace-only row creates its direct page on demand.
 - Typing a valid rename does not commit while the cursor remains on its changed
   row; leaving it commits after idle. An invalid draft stays local.
 - A→B→C rapid navigation followed by Back cannot apply a stale completion or

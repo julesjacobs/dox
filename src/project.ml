@@ -657,7 +657,7 @@ let changes_contain project id =
         (fun change -> Yojson.Safe.Util.member "id" change = `String id)
         changes
 
-let recover_refactor_intent project intent intent_path =
+let recover_file_set_intent project intent intent_path =
   let open Yojson.Safe.Util in
   let entries = intent |> member "entries" |> to_list in
   let target_paths =
@@ -809,8 +809,11 @@ let recover_transactions project =
             | Ok contents -> (
                 try
                   let intent = Yojson.Safe.from_string contents in
-                  if Yojson.Safe.Util.member "kind" intent = `String "refactor"
-                  then recover_refactor_intent project intent path
+                  if
+                    List.mem
+                      (Yojson.Safe.Util.member "kind" intent)
+                      [ `String "refactor"; `String "create-pages" ]
+                  then recover_file_set_intent project intent path
                   else if
                     Yojson.Safe.Util.member "kind" intent = `String "page-save"
                     || Yojson.Safe.Util.member "kind" intent = `String "save"
@@ -1692,7 +1695,7 @@ let apply_module_refactor project ~expected_project_version ~expected_preview_id
             let intent =
               `Assoc
                 [
-                  ("kind", `String "refactor");
+                  ("kind", `String "create-pages");
                   ("id", `String intent_id);
                   ( "entries",
                     `List
@@ -1842,6 +1845,133 @@ let apply_module_refactor project ~expected_project_version ~expected_preview_id
                                ("after", `String rename.after);
                              ])
                          renames) ))
+
+let create_pages project ~module_paths ~base_project_version ~principal =
+  let rec validate validated = function
+    | [] -> Ok (List.rev validated)
+    | module_path :: rest ->
+        let* module_path =
+          Module_path.validate module_path
+          |> Result.map_error (fun message -> Invalid message)
+        in
+        if List.mem module_path validated then
+          Error (Invalid ("Duplicate module creation: " ^ module_path))
+        else validate (module_path :: validated) rest
+  in
+  let* module_paths =
+    match module_paths with
+    | [] -> Error (Invalid "Create at least one module.")
+    | module_paths -> validate [] module_paths
+  in
+  match Util.ensure_directory (metadata_directory project) with
+  | Error message -> Error (Io message)
+  | Ok () ->
+      Util.with_file_lock (lock_path project) (fun () ->
+          let* () = recover_transactions project in
+          let* before_snapshot = snapshot_unlocked project in
+          if not (String.equal before_snapshot.version base_project_version)
+          then Error (Conflict "The project changed before creation.")
+          else
+            let pages =
+              module_paths
+              |> List.map (fun module_path ->
+                  let path = Module_path.source_path module_path in
+                  let source = Printf.sprintf "# %s\n\n" module_path in
+                  (module_path, path, source, Document.parse ~path source))
+            in
+            let rec verify = function
+              | [] -> Ok ()
+              | (_, path, _, _) :: rest ->
+                  let* absolute =
+                    Util.safe_new_path ~root:project.root path
+                    |> Result.map_error (fun message -> Invalid message)
+                  in
+                  if Sys.file_exists absolute then
+                    Error
+                      (Conflict
+                         (Printf.sprintf "A document already exists at %s." path))
+                  else verify rest
+            in
+            let* () = verify pages in
+            let documents =
+              List.map (fun (_, _, _, document) -> document) pages
+              @ before_snapshot.documents
+            in
+            let* page_index =
+              Page_index.build documents
+              |> Result.map_error (fun message -> Invalid message)
+            in
+            let intent_id =
+              "create-pages-"
+              ^ String.sub (Util.digest (principal ^ Util.random_token ())) 0 24
+            in
+            let intent_path = transaction_path project intent_id in
+            let quarantine_directory =
+              Filename.concat
+                (transaction_directory project)
+                (intent_id ^ ".files")
+            in
+            let entries =
+              pages
+              |> List.mapi (fun index (_, path, source, _) ->
+                  `Assoc
+                    [
+                      ("oldPath", `String path);
+                      ("targetPath", `String path);
+                      ("beforeSource", `String "");
+                      ("afterSource", `String source);
+                      ( "targetQuarantine",
+                        `String
+                          (Filename.concat quarantine_directory
+                             (Printf.sprintf "%04d-target" index)) );
+                      ( "oldQuarantine",
+                        `String
+                          (Filename.concat quarantine_directory
+                             (Printf.sprintf "%04d-old" index)) );
+                      ("targetBeforeSource", `Null);
+                    ])
+            in
+            let intent =
+              `Assoc
+                [
+                  ("kind", `String "refactor");
+                  ("id", `String intent_id);
+                  ("entries", `List entries);
+                ]
+            in
+            let* () =
+              Util.ensure_directory quarantine_directory
+              |> Result.map_error (fun message -> Io message)
+            in
+            let* () =
+              Util.write_file_atomic intent_path (Yojson.Safe.to_string intent)
+              |> Result.map_error (fun message -> Io message)
+            in
+            let preserve_intent error =
+              let message =
+                error_message error
+                ^ " The page-creation recovery intent was preserved."
+              in
+              match error with
+              | Conflict _ -> Conflict message
+              | Invalid _ -> Invalid message
+              | Not_found _ -> Not_found message
+              | Io _ -> Io message
+            in
+            let* () =
+              recover_file_set_intent project intent intent_path
+              |> Result.map_error preserve_intent
+            in
+            let snapshot =
+              {
+                version = version_of_documents documents;
+                captured_at = Util.timestamp ();
+                documents;
+                page_index;
+                module_graph = Module_graph.build page_index;
+              }
+            in
+            Ok (List.map (fun (_, _, _, document) -> document) pages, snapshot))
 
 let create_page project ~module_path ~base_project_version ~principal =
   let* module_path =

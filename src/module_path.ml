@@ -1,7 +1,7 @@
 type t = string
 type error = string
 
-let component_re = Str.regexp "^[A-Z][a-z0-9_']*$"
+let component_re = Str.regexp "^[A-Z][A-Za-z0-9_']*$"
 let split value = String.split_on_char '.' value
 
 let validate value =
@@ -18,7 +18,7 @@ let validate value =
     | Some part ->
         Error
           (Printf.sprintf
-             "Invalid module component %S. Components use [A-Z][a-z0-9_']*."
+             "Invalid module component %S. Components use [A-Z][A-Za-z0-9_']*."
              part)
     | None -> Ok value
 

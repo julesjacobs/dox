@@ -327,6 +327,37 @@ let create_page_response context body =
                  ("projectVersion", `String snapshot.version);
                ]))
 
+let create_pages_response context body =
+  let open Util in
+  let parsed =
+    let* request = json_body body in
+    let* values = list_member "modules" request in
+    let* base_project_version = string_member "baseProjectVersion" request in
+    let rec strings result = function
+      | [] -> Ok (List.rev result)
+      | `String value :: rest -> strings (value :: result) rest
+      | _ -> Error "Expected modules to contain only strings."
+    in
+    let* module_paths = strings [] values in
+    Ok (module_paths, base_project_version)
+  in
+  match parsed with
+  | Error message -> error message
+  | Ok (module_paths, base_project_version) -> (
+      match
+        Project.create_pages context.project ~module_paths ~base_project_version
+          ~principal:"workspace-user"
+      with
+      | Error project_error_ -> project_error project_error_
+      | Ok (documents, snapshot) ->
+          json ~status:201
+            (`Assoc
+               [
+                 ("documents", `List (List.map Document.to_json documents));
+                 ("project", Project.snapshot_to_json context.project snapshot);
+                 ("projectVersion", `String snapshot.version);
+               ]))
+
 let dependencies_response context ~cancelled parameters =
   match List.assoc_opt "module" parameters with
   | None -> error "Missing module query parameter."
@@ -740,6 +771,9 @@ let route context ~cancelled method_ target headers body =
   | "POST", "/api/page" ->
       require_active_request context headers (fun () ->
           create_page_response context body)
+  | "POST", "/api/pages" ->
+      require_active_request context headers (fun () ->
+          create_pages_response context body)
   | "POST", "/api/refactor/preview" ->
       require_active_request context headers (fun () ->
           refactor_preview_response context body)
