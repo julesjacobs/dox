@@ -1176,18 +1176,15 @@ function parseOutlineDraft(source, { previousRows = [], update = null } = {}) {
         `${origin.originPath} cannot implicitly become a page when its last child moves.`,
       );
     }
-    if (origin && !originNamespace && row.hasChildren) {
-      throw new Error(
-        `${origin.originPath} cannot implicitly become a namespace. Move the page to ${origin.originPath}.Index first.`,
-      );
-    }
     const namespace = row.hasChildren || Boolean(origin?.originLandingModule);
     const originModule = origin?.originModule || null;
     const originLandingModule = origin?.originLandingModule || null;
     const targetModule = namespace
       ? originLandingModule
         ? `${row.proposedPath}.Index`
-        : null
+        : originModule
+          ? `${row.proposedPath}.Index`
+          : null
       : row.proposedPath;
     Object.assign(row, {
       rowId: origin?.rowId || `draft:${state.outlineDraftGeneration}:${row.sourceLine}`,
@@ -1511,29 +1508,14 @@ function rebaseOutlineRowsThroughMapping(rows, mapping, authoritativeRows) {
   });
 }
 
-function commonModulePrefix(modulePaths) {
-  if (!modulePaths.length) return [];
-  const components = modulePaths.map((modulePath) => modulePath.split("."));
-  const prefix = [];
-  for (let index = 0; ; index += 1) {
-    const component = components[0][index];
-    if (
-      component === undefined ||
-      !components.every((parts) => parts[index] === component)
-    ) {
-      return prefix;
-    }
-    prefix.push(component);
-  }
-}
-
 function scheduleOutlineCommit() {
   clearTimeout(state.outlineCommitTimer);
   state.outlineCommitTimer = null;
   if (
     state.outlineDraftError ||
     state.outlineConflict ||
-    state.outlineText === state.outlineCommittedText
+    state.outlineText === state.outlineCommittedText ||
+    state.outlineText.split("\n").some((line) => !line.trim())
   ) {
     return;
   }
@@ -1644,6 +1626,28 @@ async function commitOutline({ reason = "explicit" } = {}) {
   const nextSet = new Set(next);
   const removed = previous.filter((modulePath) => !nextSet.has(modulePath));
   const added = next.filter((modulePath) => !previousSet.has(modulePath));
+  const renames = draft.rows
+    .filter(
+      (row) =>
+        row.originTarget &&
+        row.targetModule &&
+        row.originTarget !== row.targetModule,
+    )
+    .map((row) => ({
+      before: row.originTarget,
+      after: row.targetModule,
+    }));
+  const renamedFrom = new Set(renames.map(({ before }) => before));
+  const renamedTo = new Set(renames.map(({ after }) => after));
+  const deleted = removed.filter((modulePath) => !renamedFrom.has(modulePath));
+  const created = added.filter((modulePath) => !renamedTo.has(modulePath));
+  if (
+    !removed.length &&
+    !added.length &&
+    state.outlineText !== state.outlineCommittedText
+  ) {
+    return true;
+  }
   state.outlineCommitting = true;
   state.outlineSubmittedGeneration = submittedGeneration;
   state.outlineCommitQueued = false;
@@ -1653,49 +1657,15 @@ async function commitOutline({ reason = "explicit" } = {}) {
   let appliedMapping = [];
   let releaseProjectMutation = null;
   try {
-    if (!removed.length && !added.length) {
-      authoritativeProject = state.project;
-    } else if (!removed.length && added.length === 1) {
-      if (next.length !== previous.length + 1) {
-        throw new Error("Create one module at a time before reorganizing it.");
-      }
-      state.refactorInFlight = true;
-      await drainDirtySessions();
-      if (state.outlineConflict) throw new Error(state.outlineConflict);
-      releaseProjectMutation = await acquireProjectMutation();
-      const payload = await api("/api/page", {
-        method: "POST",
-        signal: controller.signal,
-        body: JSON.stringify({
-          module: added[0],
-          baseProjectVersion: state.outlineBase.projectVersion,
-        }),
-      });
-      authoritativeProject = payload.project;
-    } else if (removed.length === added.length) {
-      const renames =
-        removed.length === 1
-          ? [{ before: removed[0], after: added[0] }]
-          : (() => {
-              const beforePrefix = commonModulePrefix(removed);
-              const afterPrefix = commonModulePrefix(added);
-              if (!beforePrefix.length || !afterPrefix.length) {
-                throw new Error(
-                  "Move or rename one namespace subtree at a time.",
-                );
-              }
-              const addedSet = new Set(added);
-              return removed.map((before) => {
-                const suffix = before.split(".").slice(beforePrefix.length);
-                const after = [...afterPrefix, ...suffix].join(".");
-                if (!addedSet.has(after)) {
-                  throw new Error(
-                    "Move or rename one namespace subtree at a time.",
-                  );
-                }
-                return { before, after };
-              });
-            })();
+    if (deleted.length) {
+      throw new Error(
+        "Removing a module requires an explicit delete confirmation.",
+      );
+    }
+    if (created.length > 1) {
+      throw new Error("Create one module at a time before reorganizing it.");
+    }
+    if (renames.length || created.length) {
       if (new Set(renames.map(({ after }) => after)).size !== renames.length) {
         throw new Error(
           "This outline edit is ambiguous. Rename or move one module at a time.",
@@ -1705,44 +1675,56 @@ async function commitOutline({ reason = "explicit" } = {}) {
       const refactorBases = await drainDirtySessions();
       if (state.outlineConflict) throw new Error(state.outlineConflict);
       releaseProjectMutation = await acquireProjectMutation();
-      const projectVersion = state.outlineBase.projectVersion;
-      const preview = await api("/api/refactor/preview", {
-        method: "POST",
-        signal: controller.signal,
-        body: JSON.stringify({ projectVersion, renames }),
-      });
-      const payload = await api("/api/refactor/apply", {
-        method: "POST",
-        signal: controller.signal,
-        body: JSON.stringify({
-          projectVersion,
-          previewId: preview.previewId,
-          renames,
-        }),
-      });
-      appliedMapping = payload.mapping || [];
-      authoritativeProject = payload.project;
-      migrateRecoveryDraftKeys(appliedMapping);
-      state.refactorModuleMapping = new Map(
-        appliedMapping.map(({ before, after }) => [before, after]),
-      );
-      const sessionRefresh = refreshSessionsAfterRefactor(
-        payload.mapping,
-        payload.project,
-        refactorBases,
-      );
-      state.refactorSessionRefresh = sessionRefresh;
-      try {
-        await sessionRefresh;
-      } finally {
-        if (state.refactorSessionRefresh === sessionRefresh) {
-          state.refactorSessionRefresh = null;
+      authoritativeProject = state.project;
+      if (renames.length) {
+        const projectVersion = state.outlineBase.projectVersion;
+        const preview = await api("/api/refactor/preview", {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({ projectVersion, renames }),
+        });
+        const payload = await api("/api/refactor/apply", {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            projectVersion,
+            previewId: preview.previewId,
+            renames,
+          }),
+        });
+        appliedMapping = payload.mapping || [];
+        authoritativeProject = payload.project;
+        migrateRecoveryDraftKeys(appliedMapping);
+        state.refactorModuleMapping = new Map(
+          appliedMapping.map(({ before, after }) => [before, after]),
+        );
+        const sessionRefresh = refreshSessionsAfterRefactor(
+          payload.mapping,
+          payload.project,
+          refactorBases,
+        );
+        state.refactorSessionRefresh = sessionRefresh;
+        try {
+          await sessionRefresh;
+        } finally {
+          if (state.refactorSessionRefresh === sessionRefresh) {
+            state.refactorSessionRefresh = null;
+          }
         }
       }
+      if (created.length) {
+        const payload = await api("/api/page", {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            module: created[0],
+            baseProjectVersion: authoritativeProject.version,
+          }),
+        });
+        authoritativeProject = payload.project;
+      }
     } else {
-      throw new Error(
-        "Removing a module requires an explicit delete confirmation.",
-      );
+      authoritativeProject = state.project;
     }
 
     const newerDraft =
@@ -1952,7 +1934,8 @@ function mountOutlineEditor() {
       state.outlineNavigationRun = false;
       if (
         state.outlineText !== state.outlineCommittedText &&
-        !state.outlineDraftError
+        !state.outlineDraftError &&
+        !state.outlineText.split("\n").some((line) => !line.trim())
       ) {
         void commitOutline({ reason: "focusout" });
       }
