@@ -1671,9 +1671,8 @@ function outlineDecorations(view) {
     if (entry?.namespace) classes.push("cm-outline-namespace");
     const modulePath =
       entry?.originTarget ||
-      entry?.landingModule ||
       entry?.pageModule ||
-      entry?.module;
+      null;
     if (modulePath === activeModule) classes.push("cm-outline-active");
     if (pendingModule && modulePath === pendingModule) {
       classes.push("cm-outline-pending");

@@ -63,18 +63,17 @@ stale line number. Rows retain hidden origin metadata through CodeMirror change
 mapping:
 
 ```text
-{ rowId, originPath, originModule, originLandingModule, proposedPath }
+{ rowId, originPath, originModule, proposedPath }
 ```
 
 An unchanged path can reclaim its unique origin after cut/paste or reorder.
 New or ambiguous rows have no navigation target until commit.
 
 While a structural draft is dirty or invalid, a row with one unambiguous
-committed target can still navigate immediately:
-`Page(originModule)` for a leaf or `Page(originLandingModule)` for a folded
-namespace. New or ambiguous rows only move the cursor. Cursor movement never
-requests a structural commit, so one invalid row cannot trap navigation
-elsewhere.
+committed page can still navigate immediately with `Page(originModule)`.
+Namespace-only rows, new rows, and ambiguous rows only move the cursor. Cursor
+movement never requests a structural commit, so one invalid row cannot trap
+navigation elsewhere.
 
 ## Fast page reads
 
@@ -180,29 +179,26 @@ Serializing an uncommitted outline draft, outline scroll, and inspector
 selection into browser history is explicitly deferred; they remain intact in
 the live workspace session.
 
-## Namespace landing pages
+## Parent pages
 
-Use the conventional `Index` child as the landing page for a namespace:
+A module path may be both a page and the parent of child modules:
 
 ```text
-Models                 opens Models.Index
+Models                 opens Models
   Regression           opens Models.Regression
   Statistics           opens Models.Statistics
 ```
 
-The canonical file remains `models/index.live.md`, and OCaml code continues to
-refer to `Models.Index`. The sidebar folds the `Index` component into its
-parent row; the document header and URL show `Models.Index`, so compiler
-identity is not hidden after navigation.
+The canonical files are `models.live.md`, `models/regression.live.md`, and
+`models/statistics.live.md`. The page, URL, link target, and OCaml module use
+the same identity. `Index` has no special meaning.
 
 The page-index outline entry gains:
 
 - `path`: the structural namespace or leaf path represented by the row.
-- `pageModule`: the directly represented leaf page, if one exists.
-- `namespace`: whether the row represents a structural namespace. This is true
-  when it has visible children or an attached landing module.
+- `pageModule`: the page represented by the row, if one exists.
+- `namespace`: whether the row has a structural namespace.
 - `hasChildren`: whether it has visible child rows.
-- `landingModule`: the folded `Index` page, if one exists.
 
 Navigation uses a discriminated target:
 
@@ -210,32 +206,15 @@ Navigation uses a discriminated target:
 Page(module) | Namespace(path)
 ```
 
-For a namespace with an index, selecting the row targets
-`Page(landingModule)`. The physical `Index` row is not emitted separately. A
-namespace containing only `Index` still emits its folded parent row.
+Selecting a row with `pageModule` targets that page whether or not the row has
+children. Selecting a namespace-only row only moves the outline cursor. A new
+typed row creates its direct module path even when child rows are indented
+beneath it.
 
-For a namespace without an index, selecting the row only moves the outline
-cursor. When the authoritative outline is clean, `Mod-Enter` on that row
-explicitly creates `<Namespace>.Index`, then opens it with ordinary
-`pushState`. When the outline is dirty, `Mod-Enter` only commits; a second press
-can create the landing page. Generated namespace overviews and
-`/namespace/...` routes are deferred; they would introduce a second non-module
-document identity.
-
-Only `P.Index` with a non-empty parent `P` is folded. A root `Index` remains an
-ordinary page row. An Index-only namespace is still emitted with
-`namespace=true` and `hasChildren=false`.
-
-Committed rows carry hidden `originPath` and `originLandingModule` metadata.
-Editing a surviving namespace row means renaming or moving the whole subtree.
-Its landing page follows explicitly as `Old.Index -> New.Index`. Reordering
-children preserves the landing attachment. Adding or removing the last child
-does not implicitly convert between `P` and `P.Index`: such conversion is
-rejected as ambiguous and remains an explicit future refactoring operation.
-Creating or deleting an Index page is also explicit.
-
-Add `examples/index.live.md` so the existing `Examples` parent demonstrates
-the landing-page convention.
+Committed rows carry hidden `originPath` and `originModule` metadata. Editing a
+surviving parent row renames or moves its page, while descendant rows carry
+their own explicit mappings. Adding or removing the last child changes only
+the structural `namespace` flag; the parent page identity is unchanged.
 
 ## Outline editing boundary
 
@@ -255,8 +234,8 @@ outlineBase = { projectVersion, committedText, committedRowsWithOrigins }
 ```
 
 The base also carries a structural fingerprint over canonical row paths,
-`pageModule`, `landingModule`, and origin identity. An authoritative project
-refresh installs all fields together when the outline is clean.
+`pageModule`, and origin identity. An authoritative project refresh installs
+all fields together when the outline is clean.
 
 When the outline is dirty and a page-content save or other authoritative
 mutation returns a new full project version, derive fresh rows and compare the
@@ -314,10 +293,12 @@ Automated:
   release.
 - An abandoned page quarantine/refactor intent is recovered before direct-read
   digest or deletion behavior is applied.
-- Page-index output folds `Namespace.Index` into the namespace row.
-- Namespace rename/reparent maps its attached `Old.Index` to `New.Index`.
-- Index-only, no-Index, nested-Index, last-child, and child-reorder cases
-  round-trip without losing or inventing pages.
+- Page-index output represents a direct parent page and its children on one
+  row.
+- Namespace rename/reparent maps the parent page and each descendant to their
+  direct new module paths.
+- Parent-page, namespace-only, nested-parent, last-child, and child-reorder
+  cases round-trip without losing or inventing pages.
 - Moving the outline cursor does not commit a dirty structural draft.
 - Rapid navigation cancels obsolete page requests.
 - Unchanged cache revalidation, external clean edits, typing during
@@ -331,15 +312,15 @@ Automated:
   generation's exact mapping.
 - External create/rename/delete and semantic-triggered project refreshes never
   mix a dirty draft with a new outline base.
-- Clean versus dirty `Mod-Enter`, Index creation conflict, and Back after Index
-  creation preserve the previous page.
+- Clean versus dirty `Mod-Enter` and Back after parent-page creation preserve
+  the previous page.
 
 Browser:
 
 - First visits immediately mark the pending row and then switch.
 - Cached visits switch synchronously.
 - The current-page marker does not change text width.
-- `Examples` opens `Examples.Index`.
+- `Examples` opens `Examples`.
 - Arrowing through several pages does not refactor the outline.
 - Typing a valid rename does not commit while the cursor remains on its changed
   row; leaving it commits after idle. An invalid draft stays local.

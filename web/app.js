@@ -966,28 +966,23 @@ function normalizeOutlineEntries(project) {
     stack.length = depth;
     stack.push(component);
     const path = entry.path || stack.join(".");
-    const pageModule = entry.pageModule ?? entry.module ?? null;
-    const landingModule = entry.landingModule ?? null;
-    const namespace = Boolean(
-      entry.namespace || entry.hasChildren || landingModule,
-    );
+    const pageModule = entry.pageModule ?? null;
+    const namespace = Boolean(entry.namespace || entry.hasChildren);
     return {
       ...entry,
-      rowId: entry.rowId || `${path}\u0000${pageModule || ""}\u0000${landingModule || ""}`,
+      rowId: entry.rowId || `${path}\u0000${pageModule || ""}`,
       sourceLine: index + 1,
       text,
       depth,
       component,
       path,
       pageModule,
-      landingModule,
       namespace,
       hasChildren: entry.hasChildren ?? Boolean(entry.namespace),
       originPath: path,
       originModule: pageModule,
-      originLandingModule: landingModule,
       originNamespace: namespace,
-      originTarget: landingModule || pageModule,
+      originTarget: pageModule,
       proposedPath: path,
       changed: false,
     };
@@ -1001,7 +996,6 @@ function outlineFingerprint(entries) {
         entry.rowId,
         entry.path,
         entry.pageModule || "",
-        entry.landingModule || "",
         entry.namespace ? "n" : "p",
       ].join("\u0001"),
     )
@@ -1171,31 +1165,21 @@ function parseOutlineDraft(source, { previousRows = [], update = null } = {}) {
     const originNamespace = Boolean(
       origin?.originNamespace ?? origin?.namespace,
     );
-    if (origin && originNamespace && !row.hasChildren && !origin.originLandingModule) {
-      throw new Error(
-        `${origin.originPath} cannot implicitly become a page when its last child moves.`,
-      );
-    }
-    const namespace = row.hasChildren || Boolean(origin?.originLandingModule);
+    const namespace = row.hasChildren;
     const originModule = origin?.originModule || null;
-    const originLandingModule = origin?.originLandingModule || null;
-    const targetModule = namespace
-      ? originLandingModule
-        ? `${row.proposedPath}.Index`
-        : originModule
-          ? `${row.proposedPath}.Index`
-          : null
+    const targetModule = origin?.originPath
+      ? originModule
+        ? row.proposedPath
+        : null
       : row.proposedPath;
     Object.assign(row, {
       rowId: origin?.rowId || `draft:${state.outlineDraftGeneration}:${row.sourceLine}`,
       originPath: origin?.originPath || null,
       originModule,
-      originLandingModule,
       originNamespace,
-      originTarget: originLandingModule || originModule,
+      originTarget: originModule,
       path: row.proposedPath,
-      pageModule: namespace ? null : targetModule,
-      landingModule: namespace ? targetModule : null,
+      pageModule: targetModule,
       namespace,
       targetModule,
       changed:
@@ -1210,18 +1194,6 @@ function parseOutlineDraft(source, { previousRows = [], update = null } = {}) {
   );
   if (new Set(modules).size !== modules.length) {
     throw new Error("The outline contains a duplicate page module.");
-  }
-  const moduleSet = new Set(modules);
-  for (const modulePath of modules) {
-    const parts = modulePath.split(".");
-    for (let length = 1; length < parts.length; length += 1) {
-      const prefix = parts.slice(0, length).join(".");
-      if (moduleSet.has(prefix)) {
-        throw new Error(
-          `${prefix} cannot be both a page and a namespace.`,
-        );
-      }
-    }
   }
   const lineMap = raw.map((_, index) =>
     rows.find((row) => row.sourceLine === index + 1) || null,
@@ -1239,7 +1211,7 @@ function outlineModuleAtLine(source, lineNumber, { committed = false } = {}) {
       ? state.outlineBase?.committedRowsWithOrigins?.[lineNumber - 1]
       : outlineRowAtLine(lineNumber);
     return committed
-      ? row?.landingModule || row?.pageModule || row?.module || null
+      ? row?.pageModule || null
       : row?.originTarget || null;
   } catch {
     return null;
@@ -1441,11 +1413,7 @@ async function drainDirtySessions() {
 
 function outlineModules(entries) {
   return entries.flatMap((entry) => {
-    const modulePath =
-      entry.targetModule ||
-      entry.landingModule ||
-      entry.pageModule ||
-      entry.module;
+    const modulePath = entry.targetModule || entry.pageModule;
     return modulePath ? [modulePath] : [];
   });
 }
@@ -1476,19 +1444,14 @@ function rebaseOutlineRowsThroughMapping(rows, mapping, authoritativeRows) {
     byPath.set(row.path, matches);
   }
   return rows.map((row) => {
-    if (!row.originPath && !row.originModule && !row.originLandingModule) {
+    if (!row.originPath && !row.originModule) {
       return row;
     }
     const mappedModule = row.originModule
       ? renamed.get(row.originModule) || row.originModule
       : null;
-    const mappedLanding = row.originLandingModule
-      ? renamed.get(row.originLandingModule) || row.originLandingModule
-      : null;
-    const mappedPath = mappedLanding
-      ? mappedLanding.replace(/\.Index$/, "")
-      : mappedModule ||
-        mappedNamespacePath(row.originPath, renamed);
+    const mappedPath =
+      mappedModule || mappedNamespacePath(row.originPath, renamed);
     const candidates = byPath.get(mappedPath) || [];
     if (candidates.length !== 1) {
       throw new Error(
@@ -1501,7 +1464,6 @@ function rebaseOutlineRowsThroughMapping(rows, mapping, authoritativeRows) {
       rowId: origin.rowId,
       originPath: origin.originPath,
       originModule: origin.originModule,
-      originLandingModule: origin.originLandingModule,
       originNamespace: origin.originNamespace,
       originTarget: origin.originTarget,
     };
@@ -1536,52 +1498,6 @@ function scheduleOutlineCommit() {
   }, 900);
 }
 
-async function createNamespaceLanding(row) {
-  if (
-    !row?.namespace ||
-    row.landingModule ||
-    row.originLandingModule ||
-    state.outlineText !== state.outlineCommittedText ||
-    state.outlineConflict
-  ) {
-    return false;
-  }
-  if (state.refactorInFlight || state.outlineCommitting) return false;
-  state.outlineCommitting = true;
-  state.refactorInFlight = true;
-  const modulePath = `${row.path}.Index`;
-  try {
-    await drainDirtySessions();
-    if (state.outlineConflict) throw new Error(state.outlineConflict);
-    const payload = await withProjectMutation(async () => {
-      const result = await api("/api/page", {
-        method: "POST",
-        body: JSON.stringify({
-          module: modulePath,
-          baseProjectVersion: state.outlineBase.projectVersion,
-        }),
-      });
-      installAuthoritativeProject(result.project, { forceOutline: true });
-      return result;
-    });
-    state.workspaceError = null;
-    render();
-    await loadDocument(modulePath, {
-      history: "push",
-      focus: "outline",
-    });
-    return true;
-  } finally {
-    state.refactorInFlight = false;
-    state.outlineCommitting = false;
-    for (const session of state.sessions.values()) {
-      if (session.autosaveQueued) {
-        scheduleAutosave(session, { immediate: true });
-      }
-    }
-  }
-}
-
 async function commitOutline({ reason = "explicit" } = {}) {
   clearTimeout(state.outlineCommitTimer);
   state.outlineCommitTimer = null;
@@ -1600,16 +1516,6 @@ async function commitOutline({ reason = "explicit" } = {}) {
     return false;
   }
   if (state.outlineText === state.outlineCommittedText) {
-    if (reason === "mod-enter") {
-      const line =
-        state.outlineView?.state.doc.lineAt(state.outlineSelection).number || 1;
-      try {
-        return await createNamespaceLanding(outlineRowAtLine(line));
-      } catch (error) {
-        state.workspaceError = error.message;
-        updateStatusOnly();
-      }
-    }
     return true;
   }
 
@@ -1752,7 +1658,6 @@ async function commitOutline({ reason = "explicit" } = {}) {
           rowId: `unmapped:${row.sourceLine}`,
           originPath: null,
           originModule: null,
-          originLandingModule: null,
           originTarget: null,
         }));
         state.outlineLineMap = newerDraft.split("\n").map((text, index) => ({
@@ -1786,7 +1691,6 @@ async function commitOutline({ reason = "explicit" } = {}) {
         rowId: `unmapped:${row.sourceLine}`,
         originPath: null,
         originModule: null,
-        originLandingModule: null,
         originTarget: null,
       }));
       state.outlineLineMap = outlineText.split("\n").map((text, index) => ({

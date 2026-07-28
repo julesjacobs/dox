@@ -83,43 +83,41 @@ let compare = String.compare
 let compiler_unit value = "Doclang__" ^ (split value |> String.concat "__")
 let namespace_unit = function "" -> "Doclang" | value -> compiler_unit value
 
+let rec take count = function
+  | _ when count <= 0 -> []
+  | [] -> []
+  | value :: rest -> value :: take (count - 1) rest
+
+let alias_source modules namespace =
+  let prefix = if String.equal namespace "" then [] else split namespace in
+  let prefix_length = List.length prefix in
+  modules
+  |> List.filter_map (fun module_path ->
+      let components = split module_path in
+      if
+        List.length components <= prefix_length
+        || take prefix_length components <> prefix
+      then None
+      else
+        let component = List.nth components prefix_length in
+        let target =
+          components |> take (prefix_length + 1) |> String.concat "."
+        in
+        Some (component, target))
+  |> List.sort_uniq Stdlib.compare
+  |> List.map (fun (component, target) ->
+      Printf.sprintf "module %s = %s" component (namespace_unit target))
+  |> String.concat "\n"
+  |> fun source -> if String.equal source "" then "" else source ^ "\n"
+
 let alias_units modules =
-  let rec take count = function
-    | _ when count <= 0 -> []
-    | [] -> []
-    | value :: rest -> value :: take (count - 1) rest
-  in
   let namespaces =
     "" :: (modules |> List.concat_map namespace_prefixes)
     |> List.sort_uniq String.compare
   in
   namespaces
   |> List.map (fun namespace ->
-      let prefix = if String.equal namespace "" then [] else split namespace in
-      let prefix_length = List.length prefix in
-      let members =
-        modules
-        |> List.filter_map (fun module_path ->
-            let components = split module_path in
-            if
-              List.length components <= prefix_length
-              || take prefix_length components <> prefix
-            then None
-            else
-              let component = List.nth components prefix_length in
-              let target =
-                components |> take (prefix_length + 1) |> String.concat "."
-              in
-              Some (component, target))
-        |> List.sort_uniq Stdlib.compare
-      in
-      let source =
-        members
-        |> List.map (fun (component, target) ->
-            Printf.sprintf "module %s = %s" component (namespace_unit target))
-        |> String.concat "\n"
-      in
-      (namespace_unit namespace, source ^ "\n"))
+      (namespace_unit namespace, alias_source modules namespace))
 
 type lexical_state = {
   mutable comment_depth : int;

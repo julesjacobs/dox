@@ -61,11 +61,12 @@ retained as a second identity; Git history records the rename. An explicit
 OCaml compatibility module can be created separately when an API genuinely
 needs one.
 
-A namespace prefix is not itself a page. `Models.Statistics` may exist beneath
-the namespace `Models`, but a separate page/module `Models` may not coexist
-with that namespace. Use `Models.Index` when a namespace needs an overview
-page. This matches qualified OCaml directory semantics and avoids synthesizing
-a module from both a page body and child pages.
+A module path may be both a page and the parent of child modules.
+`Models.Statistics` may exist beneath the page/module `Models`. The canonical
+files are `models.live.md` and `models/statistics.live.md`; links, URLs, and
+OCaml code use those exact module paths. The compiler workspace uses private
+generated unit names to implement this hierarchy without exposing a second
+identity.
 
 ## 3. Durable link representation
 
@@ -544,13 +545,14 @@ operations against the real modules and files.
 - Two spaces represent one namespace level.
 - Indentation supplies qualification, so descendants do not repeat their
   namespace.
-- Namespace lines are derived from their descendants and are not pages.
+- Namespace-only lines are derived from their descendants. A parent line can
+  also be a page with the same module path.
 - Sibling order is canonical alphabetical order. Moving a line without
   changing its indentation has no project meaning and normalizes back to that
   order.
 - Blank lines exist only as temporary insertion rows.
 - Prose, headings, code, and arbitrary list markers are invalid in this
-  projection. Put overview content in `Index` or `Models.Index`.
+  projection. Put overview content in the direct parent page.
 - The structural parser maps every stable line to a full module path and a
   stable `sessionPageId`. The `Statistics` line above maps to
   `Models.Statistics`.

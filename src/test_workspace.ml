@@ -56,49 +56,47 @@ let () =
               "# Reserved support module\n";
           ]))
     "the generated Doclang_prelude module identity was not reserved";
-  let folded_index =
+  let parent_pages =
     result
       (Page_index.build
          [
-           Document.parse ~path:"index.live.md" "# Root index\n";
-           Document.parse ~path:"models/index.live.md" "# Models\n";
+           Document.parse ~path:"models.live.md" "# Models\n";
            Document.parse ~path:"models/regression.live.md" "# Regression\n";
-           Document.parse ~path:"models/nested/index.live.md" "# Nested\n";
-           Document.parse ~path:"solo/index.live.md" "# Solo\n";
+           Document.parse ~path:"models/nested.live.md" "# Nested\n";
+           Document.parse ~path:"models/nested/child.live.md" "# Child\n";
+           Document.parse ~path:"solo.live.md" "# Solo\n";
          ])
   in
-  let models = outline_entry folded_index "Models" in
+  let models = outline_entry parent_pages "Models" in
   expect
-    (Yojson.Safe.Util.member "pageModule" models = `Null
-    && Yojson.Safe.Util.member "landingModule" models = `String "Models.Index"
+    (Yojson.Safe.Util.member "pageModule" models = `String "Models"
     && Yojson.Safe.Util.member "namespace" models = `Bool true
     && Yojson.Safe.Util.member "hasChildren" models = `Bool true)
-    "namespace landing page was not attached to its parent row";
+    "a page could not also represent its child namespace";
+  let nested = outline_entry parent_pages "Models.Nested" in
   expect
-    (not
-       (List.exists
-          (fun entry ->
-            Yojson.Safe.Util.member "path" entry = `String "Models.Index")
-          (Page_index.line_entries folded_index)))
-    "a folded namespace Index page was emitted as a physical row";
-  let solo = outline_entry folded_index "Solo" in
+    (Yojson.Safe.Util.member "pageModule" nested = `String "Models.Nested"
+    && Yojson.Safe.Util.member "namespace" nested = `Bool true
+    && Yojson.Safe.Util.member "hasChildren" nested = `Bool true)
+    "a nested page could not also represent its child namespace";
+  let solo = outline_entry parent_pages "Solo" in
   expect
-    (Yojson.Safe.Util.member "landingModule" solo = `String "Solo.Index"
-    && Yojson.Safe.Util.member "namespace" solo = `Bool true
-    && Yojson.Safe.Util.member "hasChildren" solo = `Bool false)
-    "an Index-only namespace lost its namespace identity";
-  let root_index = outline_entry folded_index "Index" in
+    (Yojson.Safe.Util.member "pageModule" solo = `String "Solo"
+    && Yojson.Safe.Util.member "namespace" solo = `Bool false)
+    "a leaf page was incorrectly treated as a namespace";
+  let literal_index =
+    result
+      (Page_index.build
+         [
+           Document.parse ~path:"models.live.md" "# Models\n";
+           Document.parse ~path:"models/index.live.md" "# Literal child\n";
+         ])
+  in
+  let literal_index_child = outline_entry literal_index "Models.Index" in
   expect
-    (Yojson.Safe.Util.member "pageModule" root_index = `String "Index"
-    && Yojson.Safe.Util.member "landingModule" root_index = `Null
-    && Yojson.Safe.Util.member "namespace" root_index = `Bool false)
-    "the root Index page was incorrectly folded";
-  let nested = outline_entry folded_index "Models.Nested" in
-  expect
-    (Yojson.Safe.Util.member "landingModule" nested
-     = `String "Models.Nested.Index"
-    && Yojson.Safe.Util.member "hasChildren" nested = `Bool false)
-    "a nested Index-only namespace was not folded losslessly";
+    (Yojson.Safe.Util.member "pageModule" literal_index_child
+    = `String "Models.Index")
+    "the Index component retained special compatibility behavior";
   let no_index_documents =
     [
       Document.parse ~path:"catalog/zeta.live.md" "# Zeta\n";
@@ -108,11 +106,10 @@ let () =
   let no_index = result (Page_index.build no_index_documents) in
   let catalog = outline_entry no_index "Catalog" in
   expect
-    (Yojson.Safe.Util.member "landingModule" catalog = `Null
-    && Yojson.Safe.Util.member "namespace" catalog = `Bool true
+    (Yojson.Safe.Util.member "namespace" catalog = `Bool true
     && Yojson.Safe.Util.member "hasChildren" catalog = `Bool true
     && Page_index.modules no_index = [ "Catalog.Alpha"; "Catalog.Zeta" ])
-    "a namespace without Index lost or invented a landing page";
+    "a namespace-only row lost its children or invented a page";
   let reordered = result (Page_index.build (List.rev no_index_documents)) in
   expect
     (Page_index.line_entries reordered = Page_index.line_entries no_index)
@@ -121,33 +118,31 @@ let () =
     result
       (Page_index.build
          [
-           Document.parse ~path:"archive/index.live.md" "# Archive\n";
+           Document.parse ~path:"archive.live.md" "# Archive\n";
            Document.parse ~path:"archive/only.live.md" "# Only\n";
          ])
   in
   let last_child_after =
     result
       (Page_index.build
-         [ Document.parse ~path:"archive/index.live.md" "# Archive\n" ])
+         [ Document.parse ~path:"archive.live.md" "# Archive\n" ])
   in
   let archive_before = outline_entry last_child_before "Archive" in
   let archive_after = outline_entry last_child_after "Archive" in
   expect
-    (Yojson.Safe.Util.member "landingModule" archive_before
-     = `String "Archive.Index"
+    (Yojson.Safe.Util.member "pageModule" archive_before = `String "Archive"
     && Yojson.Safe.Util.member "hasChildren" archive_before = `Bool true
-    && Yojson.Safe.Util.member "landingModule" archive_after
-       = `String "Archive.Index"
+    && Yojson.Safe.Util.member "pageModule" archive_after = `String "Archive"
     && Yojson.Safe.Util.member "hasChildren" archive_after = `Bool false
-    && Page_index.modules last_child_after = [ "Archive.Index" ])
-    "removing the last visible child lost or converted the Index landing page";
+    && Page_index.modules last_child_after = [ "Archive" ])
+    "removing the last child lost or converted its parent page";
   let deep_description =
     Compiler_workspace.manifest_description
       [
         {
           Compiler_workspace.module_path = "A.B.C";
           source_path = "a/b/c.live.md";
-          generated_path = "a/b/c.ml";
+          generated_path = Compiler_workspace.generated_path "A.B.C";
           source = "";
         };
       ]
@@ -155,7 +150,8 @@ let () =
   expect
     (match deep_description with
     | [ entry ] ->
-        Util.ends_with ~suffix:"/a__B__C.cmt" entry.Compiler_workspace.cmt
+        Util.ends_with ~suffix:"/doclang__A__B__C.cmt"
+          entry.Compiler_workspace.cmt
     | _ -> false)
     "the passive Dune target for a deep qualified module was incorrect";
   expect
@@ -181,12 +177,13 @@ let () =
         (Util.ensure_directory
            (Filename.concat unsafe_root ".doclang/dune-workspace/pages"));
       Unix.symlink outside
-        (Filename.concat unsafe_root ".doclang/dune-workspace/pages/a");
+        (Filename.concat unsafe_root
+           ".doclang/dune-workspace/pages/doclang__A__B.ml");
       let page =
         {
           Compiler_workspace.module_path = "A.B";
           source_path = "a/b.live.md";
-          generated_path = "a/b.ml";
+          generated_path = Compiler_workspace.generated_path "A.B";
           source = "open Doclang_prelude\nlet value = 1\n";
         }
       in
@@ -263,6 +260,8 @@ let () =
   Fun.protect
     ~finally:(fun () -> remove_tree directory)
     (fun () ->
+      write directory "models.live.md"
+        "# Models\n\n    let description = \"Statistical models\"\n";
       write directory "models/statistics.live.md"
         "# Statistics\n\n    let mean values = List.length values\n";
       write directory "reports/forecast.live.md"
@@ -272,17 +271,21 @@ let () =
         \    let label = \"Models.Statistics\"\n\
         \    let quoted = {tag|Models.Statistics|tag}\n\
         \    (* Models.Statistics in a comment *)\n\
+        \    let model_description = Models.description\n\
         \    let result = Models.Statistics.mean [1; 2]\n";
       let project = Project.create directory in
       let snapshot = project_result (Project.snapshot project) in
       expect
         (Page_index.modules snapshot.page_index
-        = [ "Models.Statistics"; "Reports.Forecast" ])
-        "page index did not use qualified module identity";
+        = [ "Models"; "Models.Statistics"; "Reports.Forecast" ])
+        "page index did not allow a page to own child modules";
+      let forecast_module_dependencies =
+        Module_graph.dependencies snapshot.module_graph "Reports.Forecast"
+      in
       expect
-        (Module_graph.dependencies snapshot.module_graph "Reports.Forecast"
-        = [ "Models.Statistics" ])
-        "module graph missed a qualified reference";
+        (forecast_module_dependencies = [ "Models"; "Models.Statistics" ])
+        ("module graph missed a qualified reference: "
+        ^ String.concat ", " forecast_module_dependencies);
       expect
         (Module_graph.dependents snapshot.module_graph "Models.Statistics"
         = [ "Reports.Forecast" ])
@@ -398,7 +401,12 @@ let () =
           ~target:nested_shadow ()
       in
       expect nested_shadow_with_broken_page.ok
-        "an unrelated broken page discarded valid compiler dependencies";
+        ("an unrelated broken page discarded valid compiler dependencies: "
+       ^ nested_shadow_with_broken_page.stderr
+        ^ String.concat "\n"
+            (List.map
+               (fun diagnostic -> diagnostic.Evaluator.message)
+               nested_shadow_with_broken_page.diagnostics));
       Sys.remove (Filename.concat directory "broken.live.md");
       write directory "reports/opened.live.md"
         "# Opened\n\n\
@@ -410,7 +418,7 @@ let () =
       in
       expect
         (Module_graph.dependencies opened_snapshot.module_graph "Reports.Opened"
-        = [ "Models.Statistics" ])
+        = [ "Models"; "Models.Statistics" ])
         "an opened workspace namespace did not create a dependency";
       let opened_evaluation =
         Evaluator.evaluate_documents ~project_version:opened_snapshot.version
@@ -434,7 +442,7 @@ let () =
           compiler_graph.modules
       in
       expect
-        (forecast_dependencies.uses = [ "Models.Statistics" ])
+        (forecast_dependencies.uses = [ "Models"; "Models.Statistics" ])
         "the compiler did not report the qualified page dependency";
       let statistics_dependencies =
         List.find
@@ -559,57 +567,51 @@ let () =
            true
          with Not_found -> false)
         "a swap refactor clobbered the second module";
-      write directory "manual/index.live.md"
+      write directory "manual.live.md"
         "# Manual\n\n    let title = \"Manual\"\n";
       write directory "manual/start.live.md"
         "# Start\n\n    let summary = \"Start\"\n";
-      let landing_snapshot = project_result (Project.snapshot project) in
-      let landing_renames =
+      let parent_snapshot = project_result (Project.snapshot project) in
+      let parent_renames =
         [
-          { Project.before = "Manual.Index"; after = "Guides.Index" };
+          { Project.before = "Manual"; after = "Guides" };
           { Project.before = "Manual.Start"; after = "Guides.Start" };
         ]
       in
-      let _, landing_renamed_snapshot, _ =
+      let _, parent_renamed_snapshot, _ =
         project_result
           (Project.apply_module_refactor project
-             ~expected_project_version:landing_snapshot.version
+             ~expected_project_version:parent_snapshot.version
              ~expected_preview_id:
-               (Project.refactor_preview_id landing_snapshot landing_renames)
-             landing_renames)
+               (Project.refactor_preview_id parent_snapshot parent_renames)
+             parent_renames)
       in
       expect
         (Option.is_some
-           (Page_index.find landing_renamed_snapshot.page_index "Guides.Index")
+           (Page_index.find parent_renamed_snapshot.page_index "Guides")
         && Option.is_some
-             (Page_index.find landing_renamed_snapshot.page_index "Guides.Start")
+             (Page_index.find parent_renamed_snapshot.page_index "Guides.Start")
         && Option.is_none
-             (Page_index.find landing_renamed_snapshot.page_index "Manual.Index")
-        )
-        "namespace refactor did not carry its attached landing page";
-      let guides = outline_entry landing_renamed_snapshot.page_index "Guides" in
+             (Page_index.find parent_renamed_snapshot.page_index "Manual"))
+        "namespace refactor did not carry its parent page";
+      let guides = outline_entry parent_renamed_snapshot.page_index "Guides" in
       expect
-        (Yojson.Safe.Util.member "landingModule" guides = `String "Guides.Index"
+        (Yojson.Safe.Util.member "pageModule" guides = `String "Guides"
         && Yojson.Safe.Util.member "hasChildren" guides = `Bool true)
-        "renamed namespace lost its landing attachment";
-      let handbook_index_source =
-        "# Handbook\n\n    let title = \"Handbook\"\n"
-      in
+        "renamed parent page lost its children";
+      let handbook_source = "# Handbook\n\n    let title = \"Handbook\"\n" in
       let handbook_start_source =
         "# Start\n\n    let introduction = \"Start\"\n"
       in
       let handbook_advanced_source = "# Advanced\n\n    let level = 2\n" in
-      write directory "handbook/index.live.md" handbook_index_source;
+      write directory "handbook.live.md" handbook_source;
       write directory "handbook/start.live.md" handbook_start_source;
       write directory "handbook/topics/advanced.live.md"
         handbook_advanced_source;
       let reparent_snapshot = project_result (Project.snapshot project) in
       let reparent_renames =
         [
-          {
-            Project.before = "Handbook.Index";
-            after = "Reference.Handbook.Index";
-          };
+          { Project.before = "Handbook"; after = "Reference.Handbook" };
           {
             Project.before = "Handbook.Start";
             after = "Reference.Handbook.Start";
@@ -635,28 +637,26 @@ let () =
         (List.for_all
            (fun module_path -> List.mem module_path reparented_modules)
            [
-             "Reference.Handbook.Index";
+             "Reference.Handbook";
              "Reference.Handbook.Start";
              "Reference.Handbook.Topics.Advanced";
            ]
         && List.for_all
              (fun module_path -> not (List.mem module_path reparented_modules))
-             [ "Handbook.Index"; "Handbook.Start"; "Handbook.Topics.Advanced" ]
-        )
+             [ "Handbook"; "Handbook.Start"; "Handbook.Topics.Advanced" ])
         "namespace reparent lost pages or retained old module identities";
       let reparented_handbook =
         outline_entry reparented_snapshot.page_index "Reference.Handbook"
       in
       expect
-        (Yojson.Safe.Util.member "landingModule" reparented_handbook
-         = `String "Reference.Handbook.Index"
+        (Yojson.Safe.Util.member "pageModule" reparented_handbook
+         = `String "Reference.Handbook"
         && Yojson.Safe.Util.member "namespace" reparented_handbook = `Bool true
         && Yojson.Safe.Util.member "hasChildren" reparented_handbook
            = `Bool true)
-        "namespace reparent detached its Index landing page";
-      let reparented_index =
-        project_result
-          (Project.page reparented_snapshot "Reference.Handbook.Index")
+        "namespace reparent detached its parent page";
+      let reparented_handbook_page =
+        project_result (Project.page reparented_snapshot "Reference.Handbook")
       in
       let reparented_start =
         project_result
@@ -667,7 +667,7 @@ let () =
           (Project.page reparented_snapshot "Reference.Handbook.Topics.Advanced")
       in
       expect
-        (String.equal reparented_index.source handbook_index_source
+        (String.equal reparented_handbook_page.source handbook_source
         && String.equal reparented_start.source handbook_start_source
         && String.equal reparented_advanced.source handbook_advanced_source)
         "namespace reparent did not preserve page contents";

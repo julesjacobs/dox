@@ -90,8 +90,10 @@ let build index =
               (try
                  ignore
                    (Str.search_forward
-                      (Str.regexp_string
-                         (Module_path.compiler_unit module_path))
+                      (Str.regexp
+                         ("\\b"
+                         ^ Str.quote (Module_path.compiler_unit module_path)
+                         ^ "\\b"))
                       rewritten 0);
                  true
                with Not_found -> false)

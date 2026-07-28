@@ -32,7 +32,7 @@ let build_internal ~strict documents =
         match Module_path.of_source_path document.Document.path with
         | Error message ->
             reject (Printf.sprintf "%s: %s" document.Document.path message)
-        | Ok module_path -> (
+        | Ok module_path ->
             if Module_path.is_beneath ~namespace:"Doclang_prelude" module_path
             then
               reject
@@ -40,33 +40,15 @@ let build_internal ~strict documents =
                  module."
             else if List.mem module_path seen_pages then
               reject (Printf.sprintf "Duplicate page module %s." module_path)
-            else if List.mem module_path seen_namespaces then
-              reject
-                (Printf.sprintf
-                   "%s is both a page and a namespace. Use %s.Index for the \
-                    overview page."
-                   module_path module_path)
             else
               let prefixes = Module_path.namespace_prefixes module_path in
-              match
-                List.find_opt
-                  (fun prefix -> List.mem prefix seen_pages)
-                  prefixes
-              with
-              | Some prefix ->
-                  reject
-                    (Printf.sprintf
-                       "%s is both a page and a namespace. Move the page to \
-                        %s.Index."
-                       prefix prefix)
-              | None ->
-                  let page =
-                    { module_path; source_path = document.path; document }
-                  in
-                  add
-                    (module_path :: seen_pages)
-                    (prefixes @ seen_namespaces)
-                    (page :: pages) diagnostics rest))
+              let page =
+                { module_path; source_path = document.path; document }
+              in
+              add
+                (module_path :: seen_pages)
+                (prefixes @ seen_namespaces)
+                (page :: pages) diagnostics rest)
   in
   add [] [] [] [] documents
 
@@ -106,20 +88,10 @@ let line_entries t =
             (function [], _ -> None | rest, page -> Some (rest, page))
             members
         in
-        let landing =
-          descendants
-          |> List.find_map (function
-            | [ "Index" ], page -> Some page
-            | _ -> None)
-        in
-        let visible_descendants =
-          descendants
-          |> List.filter (function [ "Index" ], _ -> false | _ -> true)
-        in
         let path =
           if String.equal prefix "" then component else prefix ^ "." ^ component
         in
-        let has_children = visible_descendants <> [] in
+        let has_children = descendants <> [] in
         let namespace = descendants <> [] in
         let line =
           `Assoc
@@ -130,16 +102,12 @@ let line_entries t =
                 Option.fold ~none:`Null
                   ~some:(fun page -> `String page.module_path)
                   here );
-              ( "landingModule",
-                Option.fold ~none:`Null
-                  ~some:(fun page -> `String page.module_path)
-                  landing );
               ("namespace", `Bool namespace);
               ("hasChildren", `Bool has_children);
               ("depth", `Int depth);
             ]
         in
-        line :: emit (depth + 1) path visible_descendants)
+        line :: emit (depth + 1) path descendants)
   in
   t.pages
   |> List.map (fun page -> (Module_path.split page.module_path, page))

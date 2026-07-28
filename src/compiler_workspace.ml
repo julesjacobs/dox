@@ -29,25 +29,52 @@ let tool next_to_compiler fallback =
   in
   if Sys.file_exists candidate then candidate else fallback
 
-let source_for page =
-  "open Doclang_prelude\n"
-  ^ Document.compilation_source page.Page_index.document
+let generated_unit_path unit_name = String.uncapitalize_ascii unit_name ^ ".ml"
 
 let generated_path module_path =
-  Module_path.split module_path
-  |> List.map Module_path.uncapitalize_component
-  |> String.concat "/"
-  |> fun path -> path ^ ".ml"
+  generated_unit_path (Module_path.compiler_unit module_path)
 
 let generated_pages index =
-  index.Page_index.pages
+  let modules = Page_index.modules index in
+  index.pages
   |> List.map (fun page ->
       {
         module_path = page.Page_index.module_path;
         source_path = page.source_path;
         generated_path = generated_path page.module_path;
-        source = source_for page;
+        source =
+          "open Doclang_prelude\n"
+          ^ Document.compilation_source page.document
+          ^ "\n"
+          ^ Module_path.alias_source modules page.module_path;
       })
+
+let generated_aliases pages =
+  let modules = List.map (fun page -> page.module_path) pages in
+  let internal =
+    Module_path.alias_units modules
+    |> List.filter (fun (unit_name, _) ->
+        (not (String.equal unit_name "Doclang"))
+        && not
+             (List.exists
+                (fun module_path ->
+                  String.equal unit_name (Module_path.compiler_unit module_path))
+                modules))
+    |> List.map (fun (unit_name, source) ->
+        (generated_unit_path unit_name, source))
+  in
+  let public =
+    modules
+    |> List.filter_map (fun module_path ->
+        match Module_path.split module_path with
+        | component :: _ -> Some component
+        | [] -> None)
+    |> List.sort_uniq String.compare
+    |> List.map (fun component ->
+        ( Module_path.uncapitalize_component component ^ ".ml",
+          "include " ^ Module_path.namespace_unit component ^ "\n" ))
+  in
+  internal @ public
 
 let reverse modules =
   modules
@@ -100,13 +127,11 @@ let dune_project =
   "(lang dune 3.12)\n(name doclang_workspace)\n(generate_opam_files false)\n"
 
 let pages_dune =
-  {|(include_subdirs qualified)
-
-(library
+  {|(library
  (name doclang_pages)
  (wrapped false)
  (modes byte)
- (flags (:standard -w -33))
+ (flags (:standard -w -33 -no-alias-deps))
  (libraries doclang_support))
 |}
 
@@ -260,7 +285,10 @@ let sync root pages =
       (Filename.concat support "doclang_prelude.ml")
       Evaluator.prelude
   in
-  let current_files = List.map (fun page -> page.generated_path) pages in
+  let aliases = generated_aliases pages in
+  let current_files =
+    List.map (fun page -> page.generated_path) pages @ List.map fst aliases
+  in
   let stale =
     old_generated_files root
     |> List.filter (fun path -> not (List.mem path current_files))
@@ -285,6 +313,15 @@ let sync root pages =
            let path = Filename.concat pages_root page.generated_path in
            let* () = ensure_generated_parent root page.generated_path in
            write_generated_file path page.source)
+         (Ok ())
+  in
+  let* () =
+    aliases
+    |> List.fold_left
+         (fun result (relative, source) ->
+           let* () = result in
+           let path = Filename.concat pages_root relative in
+           write_generated_file path source)
          (Ok ())
   in
   let program_digest =
@@ -467,21 +504,7 @@ let describe root pages =
 let manifest_description pages =
   pages
   |> List.map (fun page ->
-      let components = Module_path.split page.module_path in
-      let cmt_name =
-        match List.rev components with
-        | [] -> assert false
-        | leaf :: [] -> Module_path.uncapitalize_component leaf ^ ".cmt"
-        | leaf :: reversed_namespace ->
-            let namespace =
-              match List.rev reversed_namespace with
-              | [] -> assert false
-              | first :: rest ->
-                  Module_path.uncapitalize_component first :: rest
-                  |> String.concat "__"
-            in
-            namespace ^ "__" ^ leaf ^ ".cmt"
-      in
+      let cmt_name = Filename.chop_extension page.generated_path ^ ".cmt" in
       {
         page;
         cmt = "_build/default/pages/.doclang_pages.objs/byte/" ^ cmt_name;
@@ -953,21 +976,7 @@ let validate_pages ~root json_pages =
   let* () = unique (fun page -> page.module_path) "module path" in
   let* () = unique (fun page -> page.source_path) "source path" in
   let* () = unique (fun page -> page.generated_path) "generated path" in
-  match
-    List.find_map
-      (fun page ->
-        pages
-        |> List.find_opt (fun candidate ->
-            (not (String.equal page.module_path candidate.module_path))
-            && Module_path.is_beneath ~namespace:page.module_path
-                 candidate.module_path)
-        |> Option.map (fun candidate ->
-            Printf.sprintf "%s is both a page and a namespace for %s."
-              page.module_path candidate.module_path))
-      pages
-  with
-  | Some message -> Error message
-  | None -> Ok pages
+  Ok pages
 
 let failed message =
   {

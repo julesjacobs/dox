@@ -984,17 +984,31 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
   let prepared =
     sources
     |> List.map (fun (document, source) ->
+        let module_path =
+          Result.to_option (Module_path.of_source_path document.Document.path)
+        in
         let source =
-          match Module_path.of_source_path document.Document.path with
-          | Error _ -> source
-          | Ok module_path -> (
+          match module_path with
+          | None -> source
+          | Some module_path -> (
               match List.rev (Module_path.split module_path) with
-              | _ :: namespace when namespace <> [] ->
+              | _ :: namespace
+                when namespace <> []
+                     && not
+                          (List.mem
+                             (namespace |> List.rev |> String.concat ".")
+                             modules) ->
                   "open "
                   ^ Module_path.compiler_unit
                       (namespace |> List.rev |> String.concat ".")
                   ^ "\n" ^ source
               | _ -> source)
+        in
+        let source =
+          match module_path with
+          | None -> source
+          | Some module_path ->
+              source ^ "\n" ^ Module_path.alias_source modules module_path
         in
         let path =
           Filename.concat directory
@@ -1004,6 +1018,12 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
   in
   let aliases =
     Module_path.alias_units modules
+    |> List.filter (fun (unit_name, _) ->
+        not
+          (List.exists
+             (fun module_path ->
+               String.equal unit_name (Module_path.compiler_unit module_path))
+             modules))
     |> List.map (fun (unit_name, source) ->
         ( Filename.concat directory (String.uncapitalize_ascii unit_name ^ ".ml"),
           source ))
