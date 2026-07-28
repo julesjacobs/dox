@@ -276,3 +276,29 @@ let with_file_lock path operation =
     (fun () ->
       Unix.lockf descriptor Unix.F_LOCK 0;
       operation ())
+
+let with_file_lock_cancelled path ~cancelled operation =
+  let descriptor =
+    Unix.openfile path [ Unix.O_CREAT; Unix.O_RDWR; Unix.O_CLOEXEC ] 0o600
+  in
+  let locked = ref false in
+  Fun.protect
+    ~finally:(fun () ->
+      (if !locked then
+         try Unix.lockf descriptor Unix.F_ULOCK 0 with Unix.Unix_error _ -> ());
+      Unix.close descriptor)
+    (fun () ->
+      let rec acquire () =
+        if cancelled () then None
+        else
+          try
+            Unix.lockf descriptor Unix.F_TLOCK 0;
+            locked := true;
+            Some ()
+          with
+          | Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) ->
+              ignore (Unix.select [] [] [] 0.01);
+              acquire ()
+          | Unix.Unix_error (Unix.EINTR, _, _) -> acquire ()
+      in
+      match acquire () with None -> None | Some () -> Some (operation ()))

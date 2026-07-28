@@ -106,22 +106,40 @@ let line_entries t =
             (function [], _ -> None | rest, page -> Some (rest, page))
             members
         in
+        let landing =
+          descendants
+          |> List.find_map (function
+            | [ "Index" ], page -> Some page
+            | _ -> None)
+        in
+        let visible_descendants =
+          descendants
+          |> List.filter (function [ "Index" ], _ -> false | _ -> true)
+        in
         let path =
           if String.equal prefix "" then component else prefix ^ "." ^ component
         in
+        let has_children = visible_descendants <> [] in
+        let namespace = descendants <> [] in
         let line =
           `Assoc
             [
               ("text", `String (String.make (depth * 2) ' ' ^ component));
-              ( "module",
+              ("path", `String path);
+              ( "pageModule",
                 Option.fold ~none:`Null
                   ~some:(fun page -> `String page.module_path)
                   here );
-              ("namespace", `Bool (descendants <> []));
+              ( "landingModule",
+                Option.fold ~none:`Null
+                  ~some:(fun page -> `String page.module_path)
+                  landing );
+              ("namespace", `Bool namespace);
+              ("hasChildren", `Bool has_children);
               ("depth", `Int depth);
             ]
         in
-        line :: emit (depth + 1) path descendants)
+        line :: emit (depth + 1) path visible_descendants)
   in
   t.pages
   |> List.map (fun page -> (Module_path.split page.module_path, page))

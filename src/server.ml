@@ -242,29 +242,34 @@ let document_response context parameters =
                      ("capturedAt", `String snapshot.captured_at);
                    ])))
 
-let page_response context parameters =
+let page_response context ~cancelled parameters =
   match List.assoc_opt "module" parameters with
   | None -> error "Missing module query parameter."
   | Some module_path -> (
-      match Module_path.validate module_path with
-      | Error message -> error message
-      | Ok module_path -> (
-          match Project.snapshot context.project with
-          | Error project_error_ -> project_error project_error_
-          | Ok snapshot -> (
-              match Project.page snapshot module_path with
-              | Error project_error_ -> project_error project_error_
-              | Ok document ->
-                  json
-                    (`Assoc
-                       [
-                         ("module", `String module_path);
-                         ("document", Document.to_json document);
-                         ( "project",
-                           Project.snapshot_to_json context.project snapshot );
-                         ("projectVersion", `String snapshot.version);
-                         ("capturedAt", `String snapshot.captured_at);
-                       ]))))
+      match Project.direct_page ~cancelled context.project module_path with
+      | Error project_error_ -> project_error project_error_
+      | Ok page ->
+          if cancelled () then raise Evaluator.Cancelled;
+          let digest = page.document.version in
+          let not_modified =
+            match List.assoc_opt "ifDigest" parameters with
+            | Some expected -> String.equal expected digest
+            | None -> false
+          in
+          let fields =
+            [
+              ("module", `String page.module_path);
+              ("path", `String page.path);
+              ("digest", `String digest);
+              ("notModified", `Bool not_modified);
+            ]
+          in
+          let fields =
+            if not_modified then fields
+            else fields @ [ ("document", Document.to_json page.document) ]
+          in
+          if cancelled () then raise Evaluator.Cancelled;
+          json (`Assoc fields))
 
 let save_page_response context body =
   let open Util in
@@ -706,7 +711,7 @@ let route context ~cancelled method_ target headers body =
       | Ok project -> json project
       | Error project_error_ -> project_error project_error_)
   | "GET", "/api/document" -> document_response context parameters
-  | "GET", "/api/page" -> page_response context parameters
+  | "GET", "/api/page" -> page_response context ~cancelled parameters
   | "GET", "/api/dependencies" ->
       dependencies_response context ~cancelled parameters
   | "GET", "/api/changes" -> (
@@ -790,6 +795,19 @@ let handle_client context descriptor =
           in
           send_response output response)
 
+let reap_workers workers =
+  workers
+  |> List.filter (fun pid ->
+      match Unix.waitpid [ Unix.WNOHANG ] pid with
+      | 0, _ -> true
+      | _ -> false
+      | exception Unix.Unix_error (Unix.EINTR, _, _) -> true
+      | exception Unix.Unix_error _ -> false)
+
+let accept_and_reap_workers socket workers =
+  let client, address = Unix.accept socket in
+  (client, address, reap_workers workers)
+
 let serve ~root ~assets ~port =
   let project = Project.create root in
   (match Project.recover_transactions project with
@@ -837,19 +855,11 @@ let serve ~root ~assets ~port =
   Printf.printf "Project: %s\n%!" project.root;
   let max_workers = 16 in
   let workers_ref = ref [] in
-  let reap_workers workers =
-    workers
-    |> List.filter (fun pid ->
-        match Unix.waitpid [ Unix.WNOHANG ] pid with
-        | 0, _ -> true
-        | _ -> false
-        | exception Unix.Unix_error (Unix.EINTR, _, _) -> true
-        | exception Unix.Unix_error _ -> false)
-  in
   let rec loop workers =
     let workers = reap_workers workers in
     workers_ref := workers;
-    let client, _ = Unix.accept socket in
+    let client, _, workers = accept_and_reap_workers socket workers in
+    workers_ref := workers;
     Unix.setsockopt_float client Unix.SO_RCVTIMEO 10.;
     Unix.setsockopt_float client Unix.SO_SNDTIMEO 10.;
     let coordinator_ready =

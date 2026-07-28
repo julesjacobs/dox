@@ -12,6 +12,10 @@ const app = document.querySelector("#app");
 const state = {
   project: null,
   projectVersion: null,
+  projectRequestEpoch: 0,
+  projectInstallEpoch: 0,
+  projectRefreshPromise: null,
+  projectMutationTail: Promise.resolve(),
   sessionToken: null,
   module: null,
   path: null,
@@ -30,6 +34,13 @@ const state = {
   saving: false,
   evalGeneration: 0,
   loadGeneration: 0,
+  navigationGeneration: 0,
+  navigationController: null,
+  pendingModule: null,
+  pendingVisible: false,
+  pendingTimer: null,
+  provisionalNavigation: null,
+  pageRevalidations: new Map(),
   evalFrame: null,
   pendingEvaluation: null,
   requestController: null,
@@ -57,10 +68,23 @@ const state = {
   outlineText: "",
   outlineCommittedText: "",
   outlineLineMap: [],
+  outlineBase: null,
+  outlineDraftRows: [],
+  outlineDraftError: null,
+  outlineDraftGeneration: 0,
+  outlineSubmittedGeneration: 0,
+  outlineFailedGeneration: null,
+  outlineCommitTimer: null,
+  outlineCommitQueued: false,
+  outlineConflict: null,
+  outlineNavigationRun: false,
+  outlineFocusTransfer: false,
   outlineSelection: 0,
   outlineCommitController: null,
   outlineCommitting: false,
   refactorInFlight: false,
+  refactorSessionRefresh: null,
+  refactorModuleMapping: null,
   workspaceError: null,
   dependency: null,
   dependencyGeneration: 0,
@@ -117,6 +141,28 @@ function clearRecoveryDraft(modulePath) {
   }
 }
 
+function migrateRecoveryDraftKeys(mapping) {
+  if (!mapping?.length) return;
+  try {
+    const captured = mapping.map(({ before, after }) => ({
+      before,
+      after,
+      raw: localStorage.getItem(recoveryKey(before)),
+    }));
+    const destinations = new Set(mapping.map(({ after }) => after));
+    for (const { after, raw } of captured) {
+      if (raw !== null) localStorage.setItem(recoveryKey(after), raw);
+    }
+    for (const { before } of captured) {
+      if (!destinations.has(before)) {
+        localStorage.removeItem(recoveryKey(before));
+      }
+    }
+  } catch {
+    // Active sessions keep the draft when browser storage is unavailable.
+  }
+}
+
 async function api(url, options = {}) {
   const response = await fetch(url, {
     ...options,
@@ -127,8 +173,34 @@ async function api(url, options = {}) {
     },
   });
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(
+      payload.error || `Request failed (${response.status})`,
+    );
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
+  }
   return payload;
+}
+
+async function acquireProjectMutation() {
+  const previous = state.projectMutationTail;
+  let release;
+  state.projectMutationTail = new Promise((resolve) => {
+    release = resolve;
+  });
+  await previous.catch(() => {});
+  return release;
+}
+
+async function withProjectMutation(operation) {
+  const release = await acquireProjectMutation();
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
 }
 
 function toast(message) {
@@ -147,9 +219,7 @@ async function initialize() {
   try {
     const session = await api("/api/session");
     state.sessionToken = session.token;
-    const project = await api("/api/project");
-    state.project = project;
-    state.projectVersion = project.version;
+    const project = await refreshProjectIndex({ forceOutline: true });
     const routeModule = decodeURIComponent(
       window.location.pathname.match(/^\/page\/(.+)$/)?.[1] || "",
     );
@@ -217,9 +287,38 @@ function restoreSession(session) {
 
 function updateRoute(modulePath, mode = "push") {
   const url = `/page/${encodeURIComponent(modulePath)}`;
-  const payload = { module: modulePath };
+  const payload = {
+    module: modulePath,
+    outlineSelection: state.outlineSelection,
+  };
   if (mode === "replace") window.history.replaceState(payload, "", url);
   else if (mode === "push") window.history.pushState(payload, "", url);
+}
+
+function outlineHistoryMode(kind) {
+  if (kind === "vertical" && state.outlineNavigationRun) return "replace";
+  state.outlineNavigationRun = true;
+  return "push";
+}
+
+function clearPendingNavigation() {
+  clearTimeout(state.pendingTimer);
+  state.pendingTimer = null;
+  state.pendingModule = null;
+  state.pendingVisible = false;
+  syncOutlineEditor();
+}
+
+function beginPendingNavigation(modulePath) {
+  clearTimeout(state.pendingTimer);
+  state.pendingModule = modulePath;
+  state.pendingVisible = false;
+  syncOutlineEditor();
+  state.pendingTimer = setTimeout(() => {
+    if (state.pendingModule !== modulePath) return;
+    state.pendingVisible = true;
+    syncOutlineEditor();
+  }, 120);
 }
 
 function invalidateDependencyContext({ clear = false, stale = true } = {}) {
@@ -233,7 +332,7 @@ function invalidateDependencyContext({ clear = false, stale = true } = {}) {
   }
 }
 
-async function loadDependencyContext(modulePath) {
+async function loadDependencyContext(modulePath, { retry = true } = {}) {
   const generation = ++state.dependencyGeneration;
   state.dependencyController?.abort();
   const controller = new AbortController();
@@ -245,9 +344,20 @@ async function loadDependencyContext(modulePath) {
     );
     if (
       generation !== state.dependencyGeneration ||
-      state.module !== modulePath ||
-      payload.projectVersion !== state.projectVersion
+      state.module !== modulePath
     ) {
+      return;
+    }
+    if (payload.projectVersion !== state.projectVersion) {
+      if (retry) {
+        await refreshProjectIndex();
+        if (
+          generation === state.dependencyGeneration &&
+          state.module === modulePath
+        ) {
+          void loadDependencyContext(modulePath, { retry: false });
+        }
+      }
       return;
     }
     state.dependency = payload.dependency;
@@ -310,42 +420,119 @@ async function loadDocument(
     preserveTrace = false,
     history = "push",
     focus = "main",
+    projectRetry = 0,
   } = {},
 ) {
+  if (state.refactorSessionRefresh) {
+    const barrier = state.refactorSessionRefresh;
+    const mapping = state.refactorModuleMapping;
+    try {
+      await barrier;
+    } catch {
+      return false;
+    }
+    modulePath = mapping?.get(modulePath) || modulePath;
+  }
   if (!force && modulePath === state.module) return true;
   captureCurrentSession();
+  const inheritedProvisional = state.provisionalNavigation;
+  const previousModule =
+    inheritedProvisional?.previousModule ?? state.module;
+  const previousHistoryState =
+    inheritedProvisional?.previousHistoryState ?? window.history.state;
+  const previousUrl =
+    inheritedProvisional?.previousUrl ??
+    window.location.pathname + window.location.search + window.location.hash;
   const cached = state.sessions.get(modulePath);
   invalidateEvaluation();
   invalidateDependencyContext({ clear: true });
+  state.navigationController?.abort();
+  const generation = ++state.navigationGeneration;
+  const controller = new AbortController();
+  state.navigationController = controller;
+  beginPendingNavigation(modulePath);
   if (cached?.document) {
     restoreSession(cached);
     state.view = "document";
     state.showBuild = false;
     if (!preserveTrace) state.traceContext = cached.traceContext || null;
     updateRoute(modulePath, history);
+    state.provisionalNavigation = {
+      generation,
+      module: modulePath,
+      previousModule,
+      previousHistoryState,
+      previousUrl,
+    };
+    clearPendingNavigation();
+    if (focus === "outline") state.outlineFocusTransfer = true;
     render();
     void loadDependencyContext(modulePath);
     if (!cached.evaluation) {
       scheduleEvaluation(cached.document.source, { immediate: true });
     }
+    void revalidateCachedSession(cached, state.provisionalNavigation);
     if (focus === "main") {
       queueMicrotask(() => state.sourceEditorView?.focus());
     } else if (focus === "outline") {
-      queueMicrotask(() => state.outlineView?.focus());
+      queueMicrotask(() => {
+        state.outlineView?.focus();
+        queueMicrotask(() => {
+          state.outlineFocusTransfer = false;
+        });
+      });
+    }
+    if (state.navigationController === controller) {
+      state.navigationController = null;
     }
     return true;
   }
-  const generation = state.loadGeneration;
-  const controller = new AbortController();
   state.requestController = controller;
   try {
     const payload = await api(
       `/api/page?module=${encodeURIComponent(modulePath)}`,
       { signal: controller.signal },
     );
-    if (generation !== state.loadGeneration) return false;
+    if (
+      generation !== state.navigationGeneration ||
+      state.pendingModule !== modulePath
+    ) {
+      return false;
+    }
     const diskSource = payload.document.source;
-    const diskVersion = payload.document.version;
+    const diskVersion = payload.digest || payload.document.version;
+    const indexed = state.project?.documents.find(
+      (entry) => entry.module === payload.module,
+    );
+    if (!indexed || indexed.version !== diskVersion) {
+      await refreshProjectIndex();
+      if (
+        generation !== state.navigationGeneration ||
+        state.pendingModule !== modulePath
+      ) {
+        return false;
+      }
+      const refreshed = state.project?.documents.find(
+        (entry) => entry.module === payload.module,
+      );
+      if (!refreshed) {
+        throw new Error(`Module ${payload.module} no longer exists.`);
+      }
+      if (refreshed.version !== diskVersion && projectRetry < 1) {
+        return loadDocument(modulePath, {
+          force: true,
+          preserveTrace,
+          history,
+          focus,
+          projectRetry: projectRetry + 1,
+        });
+      }
+      if (refreshed.version !== diskVersion) {
+        throw new Error(
+          `Module ${payload.module} changed again while it was opening.`,
+        );
+      }
+    }
     const recovery = recoveredDraft(payload.module, diskVersion);
     const recovered =
       recovery?.source && recovery.source !== payload.document.source;
@@ -364,10 +551,8 @@ async function loadDocument(
     state.module = payload.module;
     state.path = payload.document.path;
     state.document = payload.document;
-    state.project = payload.project;
     state.savedVersion = diskVersion;
     state.savedSource = diskSource;
-    state.projectVersion = payload.projectVersion;
     state.evaluation = null;
     state.evaluationPlan = null;
     state.evaluationInvalidation = null;
@@ -402,7 +587,10 @@ async function loadDocument(
       conflict: null,
     };
     state.sessions.set(payload.module, session);
+    state.provisionalNavigation = null;
     updateRoute(payload.module, history);
+    clearPendingNavigation();
+    if (focus === "outline") state.outlineFocusTransfer = true;
     render();
     void loadDependencyContext(payload.module);
     scheduleEvaluation(payload.document.source, { immediate: true });
@@ -410,13 +598,302 @@ async function loadDocument(
     if (focus === "main") {
       queueMicrotask(() => state.sourceEditorView?.focus());
     } else if (focus === "outline") {
-      queueMicrotask(() => state.outlineView?.focus());
+      queueMicrotask(() => {
+        state.outlineView?.focus();
+        queueMicrotask(() => {
+          state.outlineFocusTransfer = false;
+        });
+      });
     }
     return true;
   } catch (error) {
     if (error.name === "AbortError") return false;
-    toast(error.message);
+    if (
+      error.status === 404 &&
+      projectRetry < 1 &&
+      generation === state.navigationGeneration
+    ) {
+      try {
+        await refreshProjectIndex();
+        if (generation !== state.navigationGeneration) return false;
+        if (
+          state.project?.documents.some(
+            (entry) => entry.module === modulePath,
+          )
+        ) {
+          return loadDocument(modulePath, {
+            force: true,
+            preserveTrace,
+            history,
+            focus,
+            projectRetry: projectRetry + 1,
+          });
+        }
+      } catch {
+        // Keep the original page-load failure as the persistent diagnostic.
+      }
+    }
+    if (generation === state.navigationGeneration) {
+      clearPendingNavigation();
+      state.workspaceError = error.message;
+      updateStatusOnly();
+    }
     return false;
+  } finally {
+    if (state.navigationController === controller) {
+      state.navigationController = null;
+    }
+    if (state.requestController === controller) {
+      state.requestController = null;
+    }
+  }
+}
+
+function cachedRevalidationRequest(modulePath, digest) {
+  const key = `${modulePath}\u0000${digest}`;
+  let request = state.pageRevalidations.get(key);
+  if (!request) {
+    request = api(
+      `/api/page?module=${encodeURIComponent(modulePath)}&ifDigest=${encodeURIComponent(digest)}`,
+    ).finally(() => {
+      if (state.pageRevalidations.get(key) === request) {
+        state.pageRevalidations.delete(key);
+      }
+    });
+    state.pageRevalidations.set(key, request);
+  }
+  return request;
+}
+
+function finishProvisionalNavigation(provisional) {
+  if (
+    provisional &&
+    state.provisionalNavigation?.generation === provisional.generation
+  ) {
+    state.provisionalNavigation = null;
+  }
+}
+
+async function rollbackProvisionalNavigation(provisional, message) {
+  if (
+    !provisional ||
+    state.provisionalNavigation?.generation !== provisional.generation ||
+    state.navigationGeneration !== provisional.generation ||
+    state.module !== provisional.module
+  ) {
+    return;
+  }
+  state.sessions.delete(provisional.module);
+  invalidateEvaluation();
+  const previous = provisional.previousModule
+    ? state.sessions.get(provisional.previousModule)
+    : null;
+  if (previous) {
+    restoreSession(previous);
+    if (Number.isFinite(provisional.previousHistoryState?.outlineSelection)) {
+      const length =
+        state.outlineView?.state.doc.length ?? state.outlineText.length;
+      state.outlineSelection = Math.min(
+        Math.max(provisional.previousHistoryState.outlineSelection, 0),
+        length,
+      );
+    }
+    window.history.replaceState(
+      provisional.previousHistoryState,
+      "",
+      provisional.previousUrl,
+    );
+  } else {
+    state.module = null;
+    state.path = null;
+    state.document = null;
+  }
+  state.provisionalNavigation = null;
+  state.workspaceError = message;
+  invalidateDependencyContext({ clear: true });
+  render();
+  if (state.module) {
+    void loadDependencyContext(state.module);
+    if (!previous?.evaluation || previous.evaluationInvalidation) {
+      scheduleEvaluation(previous.document.source, { immediate: true });
+    }
+  }
+}
+
+async function refreshProjectIndex({ forceOutline = false } = {}) {
+  if (state.projectRefreshPromise) {
+    await state.projectRefreshPromise;
+    if (forceOutline) {
+      installProjectSnapshot(state.project, {
+        forceOutline: true,
+        installEpoch: state.projectInstallEpoch,
+      });
+    }
+    return state.project;
+  }
+  const requestEpoch = ++state.projectRequestEpoch;
+  const request = api("/api/project")
+    .then((project) => {
+      installProjectSnapshot(project, {
+        forceOutline,
+        installEpoch: requestEpoch,
+      });
+      return project;
+    })
+    .finally(() => {
+      if (state.projectRefreshPromise === request) {
+        state.projectRefreshPromise = null;
+      }
+    });
+  state.projectRefreshPromise = request;
+  await request;
+  return state.project;
+}
+
+async function revalidateCachedSession(
+  session,
+  provisional = null,
+  refreshRetry = 0,
+) {
+  const modulePath = session.module;
+  const digest = session.savedVersion;
+  const revision = session.editRevision;
+  const source = session.editorState?.doc.toString() || session.document.source;
+  try {
+    const payload = await cachedRevalidationRequest(modulePath, digest);
+    if (state.sessions.get(modulePath) !== session) {
+      finishProvisionalNavigation(provisional);
+      return;
+    }
+    if (
+      payload.notModified === true ||
+      payload.digest === digest ||
+      payload.document?.version === digest
+    ) {
+      finishProvisionalNavigation(provisional);
+      return;
+    }
+    const document = payload.document;
+    if (!document) {
+      throw new Error(`Module ${modulePath} no longer exists.`);
+    }
+    const latestSource =
+      session === currentSession()
+        ? state.document.source
+        : session.editorState?.doc.toString() || session.document.source;
+    if (
+      session.editRevision !== revision ||
+      latestSource !== source ||
+      latestSource !== session.savedSource
+    ) {
+      session.conflict =
+        `${modulePath} changed on disk while this page had local edits.`;
+      if (session === currentSession()) {
+        state.workspaceError = session.conflict;
+        updateStatusOnly();
+      }
+      finishProvisionalNavigation(provisional);
+      return;
+    }
+    const indexed = state.project?.documents.find(
+      (entry) => entry.module === modulePath,
+    );
+    if (!indexed || indexed.version !== payload.digest) {
+      await refreshProjectIndex();
+      if (state.sessions.get(modulePath) !== session) {
+        finishProvisionalNavigation(provisional);
+        return;
+      }
+      const latestAfterRefresh =
+        session === currentSession()
+          ? state.document.source
+          : session.editorState?.doc.toString() || session.document.source;
+      if (
+        session.editRevision !== revision ||
+        latestAfterRefresh !== source ||
+        latestAfterRefresh !== session.savedSource
+      ) {
+        session.conflict =
+          `${modulePath} changed on disk while this page had local edits.`;
+        if (session === currentSession()) {
+          state.workspaceError = session.conflict;
+          updateStatusOnly();
+        }
+        finishProvisionalNavigation(provisional);
+        return;
+      }
+      const refreshedEntry = state.project?.documents.find(
+        (entry) => entry.module === modulePath,
+      );
+      if (!refreshedEntry) {
+        throw new Error(`Module ${modulePath} no longer exists.`);
+      }
+      if (refreshedEntry.version !== payload.digest) {
+        if (refreshRetry < 1) {
+          return revalidateCachedSession(
+            session,
+            provisional,
+            refreshRetry + 1,
+          );
+        }
+        throw new Error(
+          `Module ${modulePath} changed again while it was revalidating.`,
+        );
+      }
+    }
+    session.document = document;
+    session.savedSource = document.source;
+    session.savedVersion = payload.digest || document.version;
+    session.editorState = replaceEditorStateDocument(
+      session.editorState,
+      document.source,
+    );
+    session.evaluation = null;
+    session.evaluationPlan = null;
+    session.evaluationInvalidation = null;
+    if (session === currentSession()) {
+      restoreSession(session);
+      state.workspaceError = state.outlineConflict || null;
+      finishProvisionalNavigation(provisional);
+      render();
+      void loadDependencyContext(modulePath);
+      scheduleEvaluation(document.source, { immediate: true });
+    } else {
+      finishProvisionalNavigation(provisional);
+    }
+  } catch (error) {
+    let project = null;
+    try {
+      project = await refreshProjectIndex();
+    } catch {
+      // The direct read error remains the useful navigation failure.
+    }
+    if (state.sessions.get(modulePath) !== session) {
+      finishProvisionalNavigation(provisional);
+      return;
+    }
+    const stillExists = project?.documents?.some(
+      (entry) => entry.module === modulePath,
+    );
+    if (stillExists) {
+      finishProvisionalNavigation(provisional);
+      return;
+    }
+    if (session.document.source !== session.savedSource) {
+      session.conflict = error.message;
+      if (session === currentSession()) {
+        state.workspaceError = error.message;
+        updateStatusOnly();
+      }
+      finishProvisionalNavigation(provisional);
+      return;
+    }
+    if (state.module !== modulePath) {
+      state.sessions.delete(modulePath);
+      finishProvisionalNavigation(provisional);
+      return;
+    }
+    await rollbackProvisionalNavigation(provisional, error.message);
   }
 }
 
@@ -478,18 +955,167 @@ function renderSidebar() {
   `;
 }
 
-function refreshOutlineModel({ force = false } = {}) {
-  const entries = state.project?.pageIndex?.outline || [];
-  const text = entries.map((entry) => entry.text).join("\n");
-  state.outlineLineMap = entries;
-  if (force || !state.outlineCommittedText) {
-    state.outlineText = text;
-    state.outlineCommittedText = text;
-  }
-  return { entries, text };
+function normalizeOutlineEntries(project) {
+  const raw = project?.pageIndex?.outline || [];
+  const stack = [];
+  return raw.map((entry, index) => {
+    const text = entry.text || "";
+    const spaces = text.match(/^ */)?.[0].length || 0;
+    const depth = entry.depth ?? spaces / 2;
+    const component = text.slice(spaces);
+    stack.length = depth;
+    stack.push(component);
+    const path = entry.path || stack.join(".");
+    const pageModule = entry.pageModule ?? entry.module ?? null;
+    const landingModule = entry.landingModule ?? null;
+    const namespace = Boolean(
+      entry.namespace || entry.hasChildren || landingModule,
+    );
+    return {
+      ...entry,
+      rowId: entry.rowId || `${path}\u0000${pageModule || ""}\u0000${landingModule || ""}`,
+      sourceLine: index + 1,
+      text,
+      depth,
+      component,
+      path,
+      pageModule,
+      landingModule,
+      namespace,
+      hasChildren: entry.hasChildren ?? Boolean(entry.namespace),
+      originPath: path,
+      originModule: pageModule,
+      originLandingModule: landingModule,
+      originNamespace: namespace,
+      originTarget: landingModule || pageModule,
+      proposedPath: path,
+      changed: false,
+    };
+  });
 }
 
-function parseOutlineDraft(source) {
+function outlineFingerprint(entries) {
+  return entries
+    .map((entry) =>
+      [
+        entry.rowId,
+        entry.path,
+        entry.pageModule || "",
+        entry.landingModule || "",
+        entry.namespace ? "n" : "p",
+      ].join("\u0001"),
+    )
+    .join("\u0000");
+}
+
+function installOutlineBase(project, entries, { keepDraft = false } = {}) {
+  const text = entries.map((entry) => entry.text).join("\n");
+  state.outlineBase = {
+    projectVersion: project.version,
+    committedText: text,
+    committedRowsWithOrigins: entries,
+    fingerprint: outlineFingerprint(entries),
+  };
+  state.outlineCommittedText = text;
+  if (!keepDraft) {
+    state.outlineText = text;
+    state.outlineDraftRows = entries;
+    state.outlineLineMap = entries;
+    state.outlineDraftError = null;
+    state.outlineConflict = null;
+    state.outlineFailedGeneration = null;
+  } else {
+    try {
+      const draft = parseOutlineDraft(state.outlineText, {
+        previousRows: state.outlineDraftRows,
+      });
+      state.outlineDraftRows = draft.rows;
+      state.outlineLineMap = draft.lineMap;
+      state.outlineDraftError = null;
+      state.outlineConflict = null;
+    } catch (error) {
+      state.outlineDraftError = error;
+    }
+  }
+}
+
+function installProjectSnapshot(
+  project,
+  {
+    forceOutline = false,
+    installEpoch = ++state.projectRequestEpoch,
+  } = {},
+) {
+  if (!project || installEpoch < state.projectInstallEpoch) return false;
+  state.projectInstallEpoch = installEpoch;
+  const entries = normalizeOutlineEntries(project);
+  const fingerprint = outlineFingerprint(entries);
+  const dirty =
+    state.outlineText !== state.outlineCommittedText ||
+    Boolean(state.outlineDraftError);
+  state.project = project;
+  state.projectVersion = project.version;
+  if (!state.outlineBase || forceOutline || !dirty) {
+    installOutlineBase(project, entries);
+  } else if (fingerprint === state.outlineBase.fingerprint) {
+    installOutlineBase(project, entries, { keepDraft: true });
+  } else {
+    state.outlineConflict =
+      "The module tree changed while this outline draft was being edited. Press Escape to reload it.";
+    state.workspaceError = state.outlineConflict;
+  }
+  syncOutlineEditor();
+  updateStatusOnly();
+  return true;
+}
+
+function installAuthoritativeProject(project, options = {}) {
+  return installProjectSnapshot(project, {
+    ...options,
+    installEpoch: ++state.projectRequestEpoch,
+  });
+}
+
+function refreshOutlineModel({ force = false } = {}) {
+  if (!state.outlineBase || force) {
+    installProjectSnapshot(state.project, { forceOutline: true });
+  }
+  return {
+    entries: state.outlineLineMap,
+    text: state.outlineCommittedText,
+  };
+}
+
+function mappedPreviousRows(previousRows, update) {
+  const mapped = new Map();
+  if (!previousRows?.length) return mapped;
+  if (!update) {
+    for (const row of previousRows) {
+      if (!mapped.has(row.sourceLine)) mapped.set(row.sourceLine, row);
+      else mapped.set(row.sourceLine, null);
+    }
+    return mapped;
+  }
+  for (const row of previousRows) {
+    if (!row.sourceLine || row.sourceLine > update.startState.doc.lines) continue;
+    const position = update.startState.doc.line(row.sourceLine).from;
+    const nextPosition = update.changes.mapPos(position, 1);
+    const nextLine = update.state.doc.lineAt(
+      Math.min(nextPosition, update.state.doc.length),
+    ).number;
+    if (!mapped.has(nextLine)) mapped.set(nextLine, row);
+    else mapped.set(nextLine, null);
+  }
+  return mapped;
+}
+
+function carryOutlineRowsThroughUpdate(previousRows, update) {
+  return Array.from(mappedPreviousRows(previousRows, update).entries())
+    .filter(([, row]) => Boolean(row))
+    .map(([sourceLine, row]) => ({ ...row, sourceLine }));
+}
+
+function parseOutlineDraft(source, { previousRows = [], update = null } = {}) {
   const raw = source.split("\n");
   const rows = [];
   const stack = [];
@@ -516,16 +1142,75 @@ function parseOutlineDraft(source) {
       sourceLine: index + 1,
       depth,
       component,
-      module: stack.join("."),
+      proposedPath: stack.join("."),
     });
   }
   for (let index = 0; index < rows.length; index += 1) {
-    rows[index].namespace =
+    rows[index].hasChildren =
       index + 1 < rows.length && rows[index + 1].depth > rows[index].depth;
   }
-  const modules = rows
-    .filter((row) => !row.namespace)
-    .map((row) => row.module);
+  const baseRows = state.outlineBase?.committedRowsWithOrigins || [];
+  const baseByPath = new Map();
+  for (const entry of baseRows) {
+    const values = baseByPath.get(entry.path) || [];
+    values.push(entry);
+    baseByPath.set(entry.path, values);
+  }
+  const previousByLine = mappedPreviousRows(previousRows, update);
+  const claimed = new Set();
+  for (const row of rows) {
+    const exact = baseByPath.get(row.proposedPath) || [];
+    const mapped = previousByLine.get(row.sourceLine);
+    let origin =
+      exact.length === 1 && !claimed.has(exact[0].rowId)
+        ? exact[0]
+        : mapped?.rowId && !claimed.has(mapped.rowId)
+          ? mapped
+          : null;
+    if (origin) claimed.add(origin.rowId);
+    const originNamespace = Boolean(
+      origin?.originNamespace ?? origin?.namespace,
+    );
+    if (origin && originNamespace && !row.hasChildren && !origin.originLandingModule) {
+      throw new Error(
+        `${origin.originPath} cannot implicitly become a page when its last child moves.`,
+      );
+    }
+    if (origin && !originNamespace && row.hasChildren) {
+      throw new Error(
+        `${origin.originPath} cannot implicitly become a namespace. Move the page to ${origin.originPath}.Index first.`,
+      );
+    }
+    const namespace = row.hasChildren || Boolean(origin?.originLandingModule);
+    const originModule = origin?.originModule || null;
+    const originLandingModule = origin?.originLandingModule || null;
+    const targetModule = namespace
+      ? originLandingModule
+        ? `${row.proposedPath}.Index`
+        : null
+      : row.proposedPath;
+    Object.assign(row, {
+      rowId: origin?.rowId || `draft:${state.outlineDraftGeneration}:${row.sourceLine}`,
+      originPath: origin?.originPath || null,
+      originModule,
+      originLandingModule,
+      originNamespace,
+      originTarget: originLandingModule || originModule,
+      path: row.proposedPath,
+      pageModule: namespace ? null : targetModule,
+      landingModule: namespace ? targetModule : null,
+      namespace,
+      targetModule,
+      changed:
+        !origin ||
+        origin.originPath !== row.proposedPath ||
+        originNamespace !== namespace,
+      text: raw[row.sourceLine - 1],
+    });
+  }
+  const modules = rows.flatMap((row) =>
+    row.targetModule ? [row.targetModule] : [],
+  );
   if (new Set(modules).size !== modules.length) {
     throw new Error("The outline contains a duplicate page module.");
   }
@@ -541,14 +1226,24 @@ function parseOutlineDraft(source) {
       }
     }
   }
-  return { rows, modules };
+  const lineMap = raw.map((_, index) =>
+    rows.find((row) => row.sourceLine === index + 1) || null,
+  );
+  return { rows, modules, lineMap };
 }
 
-function outlineModuleAtLine(source, lineNumber) {
+function outlineRowAtLine(lineNumber) {
+  return state.outlineLineMap[lineNumber - 1] || null;
+}
+
+function outlineModuleAtLine(source, lineNumber, { committed = false } = {}) {
   try {
-    return parseOutlineDraft(source).rows.find(
-      (row) => row.sourceLine === lineNumber && !row.namespace,
-    )?.module;
+    const row = committed
+      ? state.outlineBase?.committedRowsWithOrigins?.[lineNumber - 1]
+      : outlineRowAtLine(lineNumber);
+    return committed
+      ? row?.landingModule || row?.pageModule || row?.module || null
+      : row?.originTarget || null;
   } catch {
     return null;
   }
@@ -581,6 +1276,14 @@ function rewriteModulePaths(source, mapping) {
 
 async function refreshSessionsAfterRefactor(mapping, project, bases) {
   const renamed = new Map(mapping.map(({ before, after }) => [before, after]));
+  captureCurrentSession();
+  state.navigationGeneration += 1;
+  state.navigationController?.abort();
+  state.navigationController = null;
+  state.requestController?.abort();
+  state.requestController = null;
+  clearPendingNavigation();
+  state.provisionalNavigation = null;
   const entries = Array.from(state.sessions.entries());
   const currentModule = renamed.get(state.module) || state.module;
   const payloads = new Map();
@@ -589,11 +1292,20 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
     const payload = await api(
       `/api/page?module=${encodeURIComponent(modulePath)}`,
     );
+    const expected = project.documents.find(
+      (entry) => entry.module === modulePath,
+    );
+    const digest = payload.digest || payload.document.version;
+    if (!expected || expected.version !== digest) {
+      throw new Error(
+        `Module ${modulePath} changed while refactor sessions were refreshing.`,
+      );
+    }
     payloads.set(oldModule, { modulePath, payload, session });
   }
 
-  let refreshed;
-  for (;;) {
+  let refreshed = null;
+  for (let pass = 0; pass < 5 && !refreshed; pass += 1) {
     const staged = [];
     const revisions = new Map(
       entries.map(([oldModule, session]) => [
@@ -604,7 +1316,7 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
     for (const [oldModule] of entries) {
       const { modulePath, payload, session } = payloads.get(oldModule);
       const savedSource = payload.document.source;
-      const baseSource = bases.get(oldModule)?.source;
+      const baseSource = bases.get(oldModule)?.source ?? session.savedSource;
       const draft =
         session.editorState?.doc.toString() || session.document.source;
       let source = savedSource;
@@ -638,11 +1350,16 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
       )
     ) {
       refreshed = staged;
-      break;
     }
   }
+  if (!refreshed) {
+    throw new Error(
+      "Pause typing briefly so the completed refactor can rebase this draft.",
+    );
+  }
 
-  const nextSessions = new Map();
+  const nextSessions = new Map(state.sessions);
+  const recoveryDestinations = new Set();
   for (const {
     oldModule,
     modulePath,
@@ -653,7 +1370,9 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
     editorState,
   } of refreshed) {
     const savedSource = payload.document.source;
-    clearRecoveryDraft(oldModule);
+    if (nextSessions.get(oldModule) === session) {
+      nextSessions.delete(oldModule);
+    }
     session.module = modulePath;
     session.path = payload.document.path;
     session.document = changedDuringRefactor
@@ -665,25 +1384,30 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
       : payload.document;
     session.editorState = editorState;
     session.savedSource = savedSource;
-    session.savedVersion = payload.document.version;
+    session.savedVersion = payload.digest || payload.document.version;
     session.evaluation = null;
     session.evaluationPlan = null;
     session.evaluationInvalidation = null;
     session.conflict = null;
     session.autosaveQueued = changedDuringRefactor;
-    if (changedDuringRefactor) storeRecoveryDraft(session, source);
-    else clearRecoveryDraft(modulePath);
+    if (changedDuringRefactor) {
+      storeRecoveryDraft(session, source);
+      recoveryDestinations.add(modulePath);
+    }
     nextSessions.set(modulePath, session);
   }
+  for (const { oldModule, modulePath, changedDuringRefactor } of refreshed) {
+    if (!recoveryDestinations.has(oldModule)) clearRecoveryDraft(oldModule);
+    if (!changedDuringRefactor) clearRecoveryDraft(modulePath);
+  }
   state.sessions = nextSessions;
-  state.project = project;
-  state.projectVersion = project.version;
   state.module = currentModule;
   const current = state.sessions.get(currentModule);
   if (current) {
     restoreSession(current);
     updateRoute(currentModule, "replace");
   }
+  return project;
 }
 
 async function drainDirtySessions() {
@@ -718,92 +1442,250 @@ async function drainDirtySessions() {
   throw new Error("Pause typing briefly so the refactor can catch up.");
 }
 
-async function commitOutline({ navigateLine = null } = {}) {
+function outlineModules(entries) {
+  return entries.flatMap((entry) => {
+    const modulePath =
+      entry.targetModule ||
+      entry.landingModule ||
+      entry.pageModule ||
+      entry.module;
+    return modulePath ? [modulePath] : [];
+  });
+}
+
+function mappedNamespacePath(originPath, mapping) {
+  const direct = mapping.get(originPath);
+  if (direct) return direct;
+  const descendant = Array.from(mapping.entries()).find(([before]) =>
+    before.startsWith(`${originPath}.`),
+  );
+  if (!descendant) return originPath;
+  const [before, after] = descendant;
+  const suffix = before.slice(originPath.length);
+  return after.endsWith(suffix)
+    ? after.slice(0, after.length - suffix.length)
+    : null;
+}
+
+function rebaseOutlineRowsThroughMapping(rows, mapping, authoritativeRows) {
+  if (!mapping.length) return rows;
+  const renamed = new Map(
+    mapping.map(({ before, after }) => [before, after]),
+  );
+  const byPath = new Map();
+  for (const row of authoritativeRows) {
+    const matches = byPath.get(row.path) || [];
+    matches.push(row);
+    byPath.set(row.path, matches);
+  }
+  return rows.map((row) => {
+    if (!row.originPath && !row.originModule && !row.originLandingModule) {
+      return row;
+    }
+    const mappedModule = row.originModule
+      ? renamed.get(row.originModule) || row.originModule
+      : null;
+    const mappedLanding = row.originLandingModule
+      ? renamed.get(row.originLandingModule) || row.originLandingModule
+      : null;
+    const mappedPath = mappedLanding
+      ? mappedLanding.replace(/\.Index$/, "")
+      : mappedModule ||
+        mappedNamespacePath(row.originPath, renamed);
+    const candidates = byPath.get(mappedPath) || [];
+    if (candidates.length !== 1) {
+      throw new Error(
+        `The newer outline draft could not be mapped through ${row.originPath}.`,
+      );
+    }
+    const origin = candidates[0];
+    return {
+      ...row,
+      rowId: origin.rowId,
+      originPath: origin.originPath,
+      originModule: origin.originModule,
+      originLandingModule: origin.originLandingModule,
+      originNamespace: origin.originNamespace,
+      originTarget: origin.originTarget,
+    };
+  });
+}
+
+function commonModulePrefix(modulePaths) {
+  if (!modulePaths.length) return [];
+  const components = modulePaths.map((modulePath) => modulePath.split("."));
+  const prefix = [];
+  for (let index = 0; ; index += 1) {
+    const component = components[0][index];
+    if (
+      component === undefined ||
+      !components.every((parts) => parts[index] === component)
+    ) {
+      return prefix;
+    }
+    prefix.push(component);
+  }
+}
+
+function scheduleOutlineCommit() {
+  clearTimeout(state.outlineCommitTimer);
+  state.outlineCommitTimer = null;
   if (
-    state.outlineCommitting ||
+    state.outlineDraftError ||
+    state.outlineConflict ||
     state.outlineText === state.outlineCommittedText
   ) {
-    if (navigateLine !== null) {
-      const modulePath = outlineModuleAtLine(
-        state.outlineText,
-        navigateLine,
-      );
-      if (modulePath) {
-        await loadDocument(modulePath, {
-          history: "replace",
-          focus: "outline",
-        });
+    return;
+  }
+  const cursorLine =
+    state.outlineView?.state.doc.lineAt(state.outlineSelection).number || 1;
+  if (
+    state.outlineDraftRows.some(
+      (row) => row.changed && row.sourceLine === cursorLine,
+    )
+  ) {
+    return;
+  }
+  const generation = state.outlineDraftGeneration;
+  state.outlineCommitTimer = setTimeout(() => {
+    if (generation === state.outlineDraftGeneration) {
+      void commitOutline({ reason: "idle" });
+    }
+  }, 900);
+}
+
+async function createNamespaceLanding(row) {
+  if (
+    !row?.namespace ||
+    row.landingModule ||
+    row.originLandingModule ||
+    state.outlineText !== state.outlineCommittedText ||
+    state.outlineConflict
+  ) {
+    return false;
+  }
+  if (state.refactorInFlight || state.outlineCommitting) return false;
+  state.outlineCommitting = true;
+  state.refactorInFlight = true;
+  const modulePath = `${row.path}.Index`;
+  try {
+    await drainDirtySessions();
+    if (state.outlineConflict) throw new Error(state.outlineConflict);
+    const payload = await withProjectMutation(async () => {
+      const result = await api("/api/page", {
+        method: "POST",
+        body: JSON.stringify({
+          module: modulePath,
+          baseProjectVersion: state.outlineBase.projectVersion,
+        }),
+      });
+      installAuthoritativeProject(result.project, { forceOutline: true });
+      return result;
+    });
+    state.workspaceError = null;
+    render();
+    await loadDocument(modulePath, {
+      history: "push",
+      focus: "outline",
+    });
+    return true;
+  } finally {
+    state.refactorInFlight = false;
+    state.outlineCommitting = false;
+    for (const session of state.sessions.values()) {
+      if (session.autosaveQueued) {
+        scheduleAutosave(session, { immediate: true });
       }
     }
-    return;
   }
+}
+
+async function commitOutline({ reason = "explicit" } = {}) {
+  clearTimeout(state.outlineCommitTimer);
+  state.outlineCommitTimer = null;
+  if (state.outlineCommitting) {
+    state.outlineCommitQueued = true;
+    return false;
+  }
+  if (state.outlineDraftError) {
+    state.workspaceError = state.outlineDraftError.message;
+    updateStatusOnly();
+    return false;
+  }
+  if (state.outlineConflict) {
+    state.workspaceError = state.outlineConflict;
+    updateStatusOnly();
+    return false;
+  }
+  if (state.outlineText === state.outlineCommittedText) {
+    if (reason === "mod-enter") {
+      const line =
+        state.outlineView?.state.doc.lineAt(state.outlineSelection).number || 1;
+      try {
+        return await createNamespaceLanding(outlineRowAtLine(line));
+      } catch (error) {
+        state.workspaceError = error.message;
+        updateStatusOnly();
+      }
+    }
+    return true;
+  }
+
   const submittedDraft = state.outlineText;
-  let draft;
-  try {
-    draft = parseOutlineDraft(submittedDraft);
-  } catch (error) {
-    state.workspaceError = error.message;
-    return;
-  }
-  const previous = state.outlineLineMap
-    .filter((entry) => entry.module)
-    .map((entry) => entry.module);
+  const submittedGeneration = state.outlineDraftGeneration;
+  const draft = parseOutlineDraft(submittedDraft, {
+    previousRows: state.outlineDraftRows,
+  });
+  const previous = outlineModules(
+    state.outlineBase?.committedRowsWithOrigins || [],
+  );
   const next = draft.modules;
   const previousSet = new Set(previous);
   const nextSet = new Set(next);
   const removed = previous.filter((modulePath) => !nextSet.has(modulePath));
   const added = next.filter((modulePath) => !previousSet.has(modulePath));
-  const commonPrefix = (modulePaths) => {
-    if (!modulePaths.length) return [];
-    const components = modulePaths.map((modulePath) => modulePath.split("."));
-    const prefix = [];
-    for (let index = 0; ; index += 1) {
-      const component = components[0][index];
-      if (
-        component === undefined ||
-        !components.every((parts) => parts[index] === component)
-      ) {
-        return prefix;
-      }
-      prefix.push(component);
-    }
-  };
   state.outlineCommitting = true;
-  state.outlineCommitController?.abort();
+  state.outlineSubmittedGeneration = submittedGeneration;
+  state.outlineCommitQueued = false;
   const controller = new AbortController();
   state.outlineCommitController = controller;
+  let authoritativeProject = null;
+  let appliedMapping = [];
+  let releaseProjectMutation = null;
   try {
     if (!removed.length && !added.length) {
-      state.outlineText = state.outlineCommittedText;
+      authoritativeProject = state.project;
     } else if (!removed.length && added.length === 1) {
-      const created = added;
       if (next.length !== previous.length + 1) {
         throw new Error("Create one module at a time before reorganizing it.");
       }
+      state.refactorInFlight = true;
+      await drainDirtySessions();
+      if (state.outlineConflict) throw new Error(state.outlineConflict);
+      releaseProjectMutation = await acquireProjectMutation();
       const payload = await api("/api/page", {
         method: "POST",
         signal: controller.signal,
         body: JSON.stringify({
-          module: created[0],
-          baseProjectVersion: state.projectVersion,
+          module: added[0],
+          baseProjectVersion: state.outlineBase.projectVersion,
         }),
       });
-      state.project = payload.project;
-      state.projectVersion = payload.projectVersion;
+      authoritativeProject = payload.project;
     } else if (removed.length === added.length) {
       const renames =
         removed.length === 1
           ? [{ before: removed[0], after: added[0] }]
           : (() => {
-              const beforePrefix = commonPrefix(removed);
-              const afterPrefix = commonPrefix(added);
+              const beforePrefix = commonModulePrefix(removed);
+              const afterPrefix = commonModulePrefix(added);
               if (!beforePrefix.length || !afterPrefix.length) {
                 throw new Error(
                   "Move or rename one namespace subtree at a time.",
                 );
               }
               const addedSet = new Set(added);
-              const mapping = removed.map((before) => {
+              return removed.map((before) => {
                 const suffix = before.split(".").slice(beforePrefix.length);
                 const after = [...afterPrefix, ...suffix].join(".");
                 if (!addedSet.has(after)) {
@@ -813,16 +1695,6 @@ async function commitOutline({ navigateLine = null } = {}) {
                 }
                 return { before, after };
               });
-              if (
-                mapping.some(
-                  ({ after }, index) => after !== added[index],
-                )
-              ) {
-                throw new Error(
-                  "Keep page lines in order while moving a namespace subtree.",
-                );
-              }
-              return mapping;
             })();
       if (new Set(renames.map(({ after }) => after)).size !== renames.length) {
         throw new Error(
@@ -831,60 +1703,131 @@ async function commitOutline({ navigateLine = null } = {}) {
       }
       state.refactorInFlight = true;
       const refactorBases = await drainDirtySessions();
+      if (state.outlineConflict) throw new Error(state.outlineConflict);
+      releaseProjectMutation = await acquireProjectMutation();
+      const projectVersion = state.outlineBase.projectVersion;
       const preview = await api("/api/refactor/preview", {
         method: "POST",
         signal: controller.signal,
-        body: JSON.stringify({
-          projectVersion: state.projectVersion,
-          renames,
-        }),
+        body: JSON.stringify({ projectVersion, renames }),
       });
       const payload = await api("/api/refactor/apply", {
         method: "POST",
         signal: controller.signal,
         body: JSON.stringify({
-          projectVersion: state.projectVersion,
+          projectVersion,
           previewId: preview.previewId,
           renames,
         }),
       });
-      await refreshSessionsAfterRefactor(
+      appliedMapping = payload.mapping || [];
+      authoritativeProject = payload.project;
+      migrateRecoveryDraftKeys(appliedMapping);
+      state.refactorModuleMapping = new Map(
+        appliedMapping.map(({ before, after }) => [before, after]),
+      );
+      const sessionRefresh = refreshSessionsAfterRefactor(
         payload.mapping,
         payload.project,
         refactorBases,
       );
+      state.refactorSessionRefresh = sessionRefresh;
+      try {
+        await sessionRefresh;
+      } finally {
+        if (state.refactorSessionRefresh === sessionRefresh) {
+          state.refactorSessionRefresh = null;
+        }
+      }
     } else {
       throw new Error(
         "Removing a module requires an explicit delete confirmation.",
       );
     }
-    const newerDraft = state.outlineText;
-    const changedDuringCommit = newerDraft !== submittedDraft;
-    state.workspaceError = null;
-    refreshOutlineModel({ force: true });
-    if (changedDuringCommit) {
+
+    const newerDraft =
+      state.outlineDraftGeneration > submittedGeneration
+        ? state.outlineText
+        : null;
+    const newerRows = newerDraft !== null ? state.outlineDraftRows : null;
+    installAuthoritativeProject(authoritativeProject, { forceOutline: true });
+    if (newerDraft !== null) {
       state.outlineText = newerDraft;
-      state.workspaceError =
-        "The refactor finished. A newer outline edit was kept for review.";
+      try {
+        const rebasedRows = rebaseOutlineRowsThroughMapping(
+          newerRows,
+          appliedMapping,
+          state.outlineBase.committedRowsWithOrigins,
+        );
+        const reparsed = parseOutlineDraft(newerDraft, {
+          previousRows: rebasedRows,
+        });
+        state.outlineDraftRows = reparsed.rows;
+        state.outlineLineMap = reparsed.lineMap;
+      } catch (error) {
+        state.outlineDraftRows = newerRows.map((row) => ({
+          ...row,
+          rowId: `unmapped:${row.sourceLine}`,
+          originPath: null,
+          originModule: null,
+          originLandingModule: null,
+          originTarget: null,
+        }));
+        state.outlineLineMap = newerDraft.split("\n").map((text, index) => ({
+          ...(state.outlineDraftRows.find(
+            (row) => row.sourceLine === index + 1,
+          ) || {}),
+          text,
+        }));
+        state.outlineConflict =
+          `${error.message} Press Escape to reload the committed outline.`;
+        state.workspaceError = state.outlineConflict;
+      }
     }
+    state.outlineFailedGeneration = null;
+    if (!state.outlineConflict) state.workspaceError = null;
     invalidateDependencyContext({ clear: true });
     render();
     if (state.module) void loadDependencyContext(state.module);
-    if (navigateLine !== null) {
-      const modulePath = outlineModuleAtLine(
-        state.outlineCommittedText,
-        navigateLine,
-      );
-      if (modulePath) {
-        await loadDocument(modulePath, {
-          history: "replace",
-          focus: "outline",
-        });
-      }
-    }
+    return true;
   } catch (error) {
-    if (error.name !== "AbortError") state.workspaceError = error.message;
+    if (authoritativeProject && appliedMapping.length) {
+      const outlineText = state.outlineText;
+      const outlineRows = state.outlineDraftRows;
+      migrateRecoveryDraftKeys(appliedMapping);
+      installAuthoritativeProject(authoritativeProject, {
+        forceOutline: true,
+      });
+      state.outlineText = outlineText;
+      state.outlineDraftRows = outlineRows.map((row) => ({
+        ...row,
+        rowId: `unmapped:${row.sourceLine}`,
+        originPath: null,
+        originModule: null,
+        originLandingModule: null,
+        originTarget: null,
+      }));
+      state.outlineLineMap = outlineText.split("\n").map((text, index) => ({
+        ...(state.outlineDraftRows.find(
+          (row) => row.sourceLine === index + 1,
+        ) || {}),
+        text,
+      }));
+      state.outlineConflict =
+        "The refactor committed, but local page sessions could not be refreshed. Browser recovery drafts were preserved; press Escape to reload the module outline.";
+      syncOutlineEditor();
+    }
+    if (error.name !== "AbortError") {
+      state.outlineFailedGeneration = submittedGeneration;
+      state.workspaceError = state.outlineConflict
+        ? `${state.outlineConflict} ${error.message}`
+        : error.message;
+      updateStatusOnly();
+    }
+    return false;
   } finally {
+    releaseProjectMutation?.();
+    state.refactorModuleMapping = null;
     state.refactorInFlight = false;
     for (const session of state.sessions.values()) {
       if (session.autosaveQueued) scheduleAutosave(session, { immediate: true });
@@ -893,7 +1836,36 @@ async function commitOutline({ navigateLine = null } = {}) {
       state.outlineCommitController = null;
     }
     state.outlineCommitting = false;
+    if (
+      state.outlineCommitQueued &&
+      state.outlineDraftGeneration > submittedGeneration
+    ) {
+      scheduleOutlineCommit();
+    }
   }
+}
+
+function syncOutlineEditor() {
+  const view = state.outlineView;
+  if (!view?.dom.isConnected) return;
+  updateModuleOutlineEditor(view, {
+    doc: state.outlineText,
+    selection: state.outlineSelection,
+    activeModule: state.module,
+    pendingModule: state.pendingModule,
+    pendingVisible: state.pendingVisible,
+    lineMap: state.outlineLineMap,
+  });
+}
+
+function cancelOutlineDraft() {
+  clearTimeout(state.outlineCommitTimer);
+  state.outlineCommitTimer = null;
+  state.outlineConflict = null;
+  state.outlineDraftError = null;
+  installProjectSnapshot(state.project, { forceOutline: true });
+  render();
+  queueMicrotask(() => state.outlineView?.focus());
 }
 
 function mountOutlineEditor() {
@@ -905,6 +1877,8 @@ function mountOutlineEditor() {
       doc: state.outlineText,
       selection: state.outlineSelection,
       activeModule: state.module,
+      pendingModule: state.pendingModule,
+      pendingVisible: state.pendingVisible,
       lineMap: state.outlineLineMap,
     });
     return;
@@ -913,23 +1887,75 @@ function mountOutlineEditor() {
     doc: state.outlineText,
     selection: state.outlineSelection,
     activeModule: state.module,
+    pendingModule: state.pendingModule,
+    pendingVisible: state.pendingVisible,
     lineMap: state.outlineLineMap,
     onChange: (source, update) => {
       state.outlineText = source;
       state.outlineSelection = update.state.selection.main.head;
-      state.workspaceError = null;
+      state.workspaceError = state.outlineConflict || null;
+      state.outlineDraftGeneration += 1;
+      state.outlineFailedGeneration = null;
+      const carriedRows = carryOutlineRowsThroughUpdate(
+        state.outlineDraftRows,
+        update,
+      );
+      try {
+        const draft = parseOutlineDraft(source, {
+          previousRows: state.outlineDraftRows,
+          update,
+        });
+        state.outlineDraftRows = draft.rows;
+        state.outlineLineMap = draft.lineMap;
+        state.outlineDraftError = null;
+      } catch (error) {
+        state.outlineDraftError = error;
+        state.outlineDraftRows = carriedRows;
+        const line = Number(error.message.match(/^Line (\d+)/)?.[1] || 0);
+        const carriedByLine = new Map(
+          carriedRows.map((row) => [row.sourceLine, row]),
+        );
+        state.outlineLineMap = source.split("\n").map((text, index) => {
+          const sourceLine = index + 1;
+          return {
+            ...(carriedByLine.get(sourceLine) || {}),
+            text,
+            sourceLine,
+            invalid: !line || line === sourceLine,
+            error: error.message,
+          };
+        });
+      }
+      syncOutlineEditor();
+      scheduleOutlineCommit();
     },
-    onNavigate: (selection, update) => {
+    onNavigate: (selection, update, kind) => {
       if (!selection.empty || update.view.composing) return;
       state.outlineSelection = selection.head;
       const line = update.state.doc.lineAt(selection.head);
-      void commitOutline({ navigateLine: line.number });
+      scheduleOutlineCommit();
+      const modulePath = outlineModuleAtLine(state.outlineText, line.number);
+      if (modulePath && modulePath !== state.module) {
+        void loadDocument(modulePath, {
+          history: outlineHistoryMode(kind),
+          focus: "outline",
+        });
+      }
     },
-    onCommit: () => void commitOutline(),
-    onCancel: () => {
-      state.outlineText = state.outlineCommittedText;
-      render();
-      queueMicrotask(() => state.outlineView?.focus());
+    onCommit: (reason) => void commitOutline({ reason }),
+    onCancel: cancelOutlineDraft,
+    onFocus: () => {
+      if (!state.outlineFocusTransfer) state.outlineNavigationRun = false;
+    },
+    onBlur: () => {
+      if (state.outlineFocusTransfer) return;
+      state.outlineNavigationRun = false;
+      if (
+        state.outlineText !== state.outlineCommittedText &&
+        !state.outlineDraftError
+      ) {
+        void commitOutline({ reason: "focusout" });
+      }
     },
   });
 }
@@ -1674,12 +2700,26 @@ function updateSource(source, { evaluate = true } = {}) {
   }
 }
 
+function typeRequestIsCurrent(request, { includeProject = true } = {}) {
+  const cursor = state.cursorPosition;
+  return (
+    request.generation === state.typeGeneration &&
+    state.view === "document" &&
+    request.path === state.path &&
+    request.source === state.document?.source &&
+    (!includeProject || request.projectVersion === state.projectVersion) &&
+    cursor?.line === request.line &&
+    cursor?.column === request.column
+  );
+}
+
 async function startTypeLookup() {
   if (state.typeController || !state.typePending) return;
   const request = state.typePending;
   state.typePending = null;
   const controller = new AbortController();
   state.typeController = controller;
+  let retryRequest = null;
   try {
     const payload = await api("/api/type-at", {
       method: "POST",
@@ -1692,23 +2732,40 @@ async function startTypeLookup() {
         baseProjectVersion: request.projectVersion,
       }),
     });
-    const cursor = state.cursorPosition;
     if (
-      request.generation !== state.typeGeneration ||
-      state.view !== "document" ||
-      request.path !== state.path ||
-      request.source !== state.document?.source ||
-      request.projectVersion !== state.projectVersion ||
-      cursor?.line !== request.line ||
-      cursor?.column !== request.column
+      payload.projectVersion &&
+      payload.projectVersion !== state.projectVersion
     ) {
-      return;
+      const error = new Error("The project changed during type lookup.");
+      error.status = 409;
+      throw error;
     }
+    if (!typeRequestIsCurrent(request)) return;
     state.typeInfo = payload.info;
     refreshInspector();
   } catch (error) {
     if (
       error.name !== "AbortError" &&
+      error.status === 409 &&
+      request.retryCount < 1 &&
+      typeRequestIsCurrent(request, { includeProject: false })
+    ) {
+      try {
+        await refreshProjectIndex();
+        if (typeRequestIsCurrent(request, { includeProject: false })) {
+          retryRequest = {
+            ...request,
+            projectVersion: state.projectVersion,
+            retryCount: request.retryCount + 1,
+          };
+        }
+      } catch {
+        // Fall through to the normal empty type state.
+      }
+    }
+    if (
+      error.name !== "AbortError" &&
+      !retryRequest &&
       request.generation === state.typeGeneration
     ) {
       state.typeInfo = null;
@@ -1716,6 +2773,7 @@ async function startTypeLookup() {
     }
   } finally {
     if (state.typeController === controller) state.typeController = null;
+    if (retryRequest && !state.typePending) state.typePending = retryRequest;
     if (state.typePending) startTypeLookup();
   }
 }
@@ -1745,6 +2803,7 @@ function scheduleTypeLookup(editor, position) {
     path: state.path,
     source: state.document.source,
     projectVersion: state.projectVersion,
+    retryCount: 0,
     ...cursor,
   };
   state.typeTimer = setTimeout(() => {
@@ -1909,12 +2968,28 @@ function showCompletion(context, compilerItems, loading) {
   refreshInspector();
 }
 
+function sameCompletionTarget(left, right) {
+  return Boolean(
+    left &&
+      right &&
+      left.path === right.path &&
+      left.source === right.source &&
+      left.line === right.line &&
+      left.column === right.column &&
+      left.from === right.from &&
+      left.to === right.to &&
+      left.context === right.context &&
+      left.query === right.query,
+  );
+}
+
 async function requestCompletionItems(editor, request) {
   state.completionController?.abort();
   const controller = new AbortController();
   const generation = ++state.completionGeneration;
   state.completionController = controller;
   state.completionRequestKey = request.key;
+  let retryRequest = null;
   try {
     const payload = await api("/api/complete", {
       method: "POST",
@@ -1928,6 +3003,14 @@ async function requestCompletionItems(editor, request) {
         baseProjectVersion: request.projectVersion,
       }),
     });
+    if (
+      payload.projectVersion &&
+      payload.projectVersion !== state.projectVersion
+    ) {
+      const error = new Error("The project changed during completion.");
+      error.status = 409;
+      throw error;
+    }
     if (
       generation !== state.completionGeneration ||
       state.completionRequestKey !== request.key
@@ -1949,6 +3032,33 @@ async function requestCompletionItems(editor, request) {
   } catch (error) {
     if (
       error.name !== "AbortError" &&
+      error.status === 409 &&
+      (request.retryCount || 0) < 1 &&
+      generation === state.completionGeneration
+    ) {
+      try {
+        await refreshProjectIndex();
+        const current = completionContextAt(
+          editor,
+          editor.state.selection.main.head,
+          { allowEmpty: true },
+        );
+        if (
+          generation === state.completionGeneration &&
+          sameCompletionTarget(request, current)
+        ) {
+          retryRequest = {
+            ...current,
+            retryCount: (request.retryCount || 0) + 1,
+          };
+        }
+      } catch {
+        // Fall through to the normal empty completion state.
+      }
+    }
+    if (
+      error.name !== "AbortError" &&
+      !retryRequest &&
       generation === state.completionGeneration
     ) {
       cacheCompletionItems(request.key, []);
@@ -1969,6 +3079,7 @@ async function requestCompletionItems(editor, request) {
       state.completionController = null;
       state.completionRequestKey = null;
     }
+    if (retryRequest) void requestCompletionItems(editor, retryRequest);
   }
 }
 
@@ -2052,6 +3163,7 @@ function scheduleEvaluation(
   {
     immediate = false,
     plan = buildExecutionPlan(source, state.document.blocks),
+    retryCount = 0,
   } = {},
 ) {
   const pending = state.pendingEvaluation;
@@ -2079,6 +3191,7 @@ function scheduleEvaluation(
     source,
     baseProjectVersion: state.projectVersion,
     plan,
+    retryCount,
     started: false,
   };
   state.pendingEvaluation = request;
@@ -2108,6 +3221,26 @@ function scheduleEvaluation(
       ) {
         return;
       }
+      if (
+        payload.projectVersion &&
+        payload.projectVersion !== state.projectVersion
+      ) {
+        state.pendingEvaluation = null;
+        state.evaluating = false;
+        await refreshProjectIndex();
+        if (
+          request.retryCount < 1 &&
+          request.path === state.path &&
+          request.source === state.document.source
+        ) {
+          scheduleEvaluation(state.document.source, {
+            immediate: true,
+            plan: request.plan,
+            retryCount: request.retryCount + 1,
+          });
+        }
+        return;
+      }
       state.document = payload.document;
       state.evaluation = payload.evaluation;
       state.evaluationPlan = request.plan;
@@ -2133,6 +3266,26 @@ function scheduleEvaluation(
         return;
       }
       if (error.name === "AbortError") return;
+      if (error.status === 409 && request.retryCount < 1) {
+        state.pendingEvaluation = null;
+        state.evaluating = false;
+        try {
+          await refreshProjectIndex();
+          if (
+            request.path === state.path &&
+            request.source === state.document.source
+          ) {
+            scheduleEvaluation(state.document.source, {
+              immediate: true,
+              plan: request.plan,
+              retryCount: request.retryCount + 1,
+            });
+          }
+        } catch (refreshError) {
+          toast(refreshError.message);
+        }
+        return;
+      }
       state.pendingEvaluation = null;
       state.evaluating = false;
       toast(error.message);
@@ -2194,14 +3347,18 @@ async function drainAutosave(session) {
   session.autosaveQueued = false;
   let succeeded = false;
   try {
-    const payload = await api("/api/page/source", {
-      method: "PUT",
-      body: JSON.stringify({
-        module: session.module,
-        source,
-        expectedDigest,
-        editRevision: revision,
-      }),
+    const payload = await withProjectMutation(async () => {
+      const result = await api("/api/page/source", {
+        method: "PUT",
+        body: JSON.stringify({
+          module: session.module,
+          source,
+          expectedDigest,
+          editRevision: revision,
+        }),
+      });
+      installAuthoritativeProject(result.project);
+      return result;
     });
     session.savedVersion = payload.digest;
     session.savedSource = source;
@@ -2213,13 +3370,11 @@ async function drainAutosave(session) {
         : session.editorState?.doc.toString() || session.document.source;
     if (latestSource === source) clearRecoveryDraft(session.module);
     else storeRecoveryDraft(session, latestSource);
-    state.project = payload.project;
-    state.projectVersion = payload.projectVersion;
     if (session === currentSession()) {
       state.savedVersion = session.savedVersion;
       state.savedSource = session.savedSource;
       state.dirty = state.document.source !== session.savedSource;
-      state.workspaceError = null;
+      state.workspaceError = state.outlineConflict || null;
       updateStatusOnly();
       if (state.evaluationInvalidation) {
         scheduleEvaluation(state.document.source, {
@@ -2276,8 +3431,7 @@ async function buildArtifact(entry, name) {
         documentVersion: state.savedVersion,
       }),
     });
-    state.project = await api("/api/project");
-    state.projectVersion = state.project.version;
+    await refreshProjectIndex();
     state.showBuild = false;
     refreshInspector();
     toast(`Built ${manifest.name} from project version ${manifest.projectVersion.slice(0, 8)}.`);
@@ -2431,16 +3585,17 @@ async function createDocument() {
   const modulePath = window.prompt("New module", "NewPage");
   if (!modulePath) return;
   try {
-    const payload = await api("/api/page", {
-      method: "POST",
-      body: JSON.stringify({
-        module: modulePath,
-        baseProjectVersion: state.projectVersion,
-      }),
+    const payload = await withProjectMutation(async () => {
+      const result = await api("/api/page", {
+        method: "POST",
+        body: JSON.stringify({
+          module: modulePath,
+          baseProjectVersion: state.projectVersion,
+        }),
+      });
+      installAuthoritativeProject(result.project, { forceOutline: true });
+      return result;
     });
-    state.project = payload.project;
-    state.projectVersion = payload.projectVersion;
-    refreshOutlineModel({ force: true });
     await loadDocument(modulePath, { force: true });
   } catch (error) {
     state.workspaceError = error.message;
@@ -2672,6 +3827,19 @@ function bindArtifactForm() {
 initialize();
 
 window.addEventListener("popstate", (event) => {
+  state.navigationGeneration += 1;
+  state.navigationController?.abort();
+  state.navigationController = null;
+  clearPendingNavigation();
+  state.outlineNavigationRun = false;
+  if (Number.isFinite(event.state?.outlineSelection)) {
+    const length = state.outlineView?.state.doc.length ?? state.outlineText.length;
+    state.outlineSelection = Math.min(
+      Math.max(event.state.outlineSelection, 0),
+      length,
+    );
+    syncOutlineEditor();
+  }
   const modulePath =
     event.state?.module ||
     decodeURIComponent(window.location.pathname.match(/^\/page\/(.+)$/)?.[1] || "");

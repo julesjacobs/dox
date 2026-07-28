@@ -8,6 +8,12 @@ type snapshot = {
   module_graph : Module_graph.t;
 }
 
+type direct_page = {
+  module_path : Module_path.t;
+  path : string;
+  document : Document.t;
+}
+
 type error =
   | Not_found of string
   | Conflict of string
@@ -31,6 +37,8 @@ let metadata_directory project = Filename.concat project.root ".doclang"
 
 let lock_path project =
   Filename.concat (metadata_directory project) "project.lock"
+
+let recover_before_read = ref (fun (_ : t) -> Ok ())
 
 let document_paths project =
   Util.list_files project.root
@@ -100,6 +108,7 @@ let snapshot project =
   | Error message -> Error (Io message)
   | Ok () ->
       Util.with_file_lock (lock_path project) (fun () ->
+          let* () = !recover_before_read project in
           snapshot_unlocked project)
 
 let document snapshot path =
@@ -844,6 +853,58 @@ let recover_transactions project =
           Result.bind result (fun () -> recover rest)
     in
     recover intents
+
+let () = recover_before_read := recover_transactions
+
+let direct_page ?(cancelled = fun () -> false) project module_path =
+  let* module_path =
+    Module_path.validate module_path
+    |> Result.map_error (fun message -> Invalid message)
+  in
+  if Module_path.is_beneath ~namespace:"Doclang_prelude" module_path then
+    Error
+      (Invalid
+         "Doclang_prelude is reserved for the generated Doclang support module.")
+  else
+    let path = Module_path.source_path module_path in
+    match Util.ensure_directory (metadata_directory project) with
+    | Error message -> Error (Io message)
+    | Ok () -> (
+        match
+          Util.with_file_lock_cancelled (lock_path project) ~cancelled
+            (fun () ->
+              if cancelled () then raise Evaluator.Cancelled;
+              let* () = recover_transactions project in
+              if cancelled () then raise Evaluator.Cancelled;
+              let* source =
+                try
+                  Ok
+                    (Doclang_native.read_file_nofollow ~root:project.root ~path)
+                with
+                | Unix.Unix_error (Unix.ENOENT, _, _) ->
+                    Error
+                      (Not_found
+                         (Printf.sprintf "Page module %S was not found."
+                            module_path))
+                | Unix.Unix_error
+                    ((Unix.ELOOP | Unix.ENOTDIR | Unix.EINVAL), operation, _) ->
+                    Error
+                      (Invalid
+                         (Printf.sprintf
+                            "%s cannot be read through a symlink or \
+                             non-directory path component (%s)."
+                            path operation))
+                | Unix.Unix_error (error, operation, argument) ->
+                    Error
+                      (Io
+                         (Printf.sprintf "%s(%s): %s" operation argument
+                            (Unix.error_message error)))
+              in
+              if cancelled () then raise Evaluator.Cancelled;
+              Ok { module_path; path; document = Document.parse ~path source })
+        with
+        | None -> raise Evaluator.Cancelled
+        | Some result -> result)
 
 let replace_document documents replacement =
   documents

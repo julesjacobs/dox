@@ -23,6 +23,12 @@ let write root path source =
   result (Util.ensure_directory (Filename.dirname absolute));
   result (Util.write_file absolute source)
 
+let outline_entry index path =
+  Page_index.line_entries index
+  |> List.find (fun entry ->
+      Yojson.Safe.Util.member "path" entry
+      |> Yojson.Safe.Util.to_string |> String.equal path)
+
 let () =
   expect
     (Module_path.of_source_path "models/statistics.live.md"
@@ -50,6 +56,91 @@ let () =
               "# Reserved support module\n";
           ]))
     "the generated Doclang_prelude module identity was not reserved";
+  let folded_index =
+    result
+      (Page_index.build
+         [
+           Document.parse ~path:"index.live.md" "# Root index\n";
+           Document.parse ~path:"models/index.live.md" "# Models\n";
+           Document.parse ~path:"models/regression.live.md" "# Regression\n";
+           Document.parse ~path:"models/nested/index.live.md" "# Nested\n";
+           Document.parse ~path:"solo/index.live.md" "# Solo\n";
+         ])
+  in
+  let models = outline_entry folded_index "Models" in
+  expect
+    (Yojson.Safe.Util.member "pageModule" models = `Null
+    && Yojson.Safe.Util.member "landingModule" models = `String "Models.Index"
+    && Yojson.Safe.Util.member "namespace" models = `Bool true
+    && Yojson.Safe.Util.member "hasChildren" models = `Bool true)
+    "namespace landing page was not attached to its parent row";
+  expect
+    (not
+       (List.exists
+          (fun entry ->
+            Yojson.Safe.Util.member "path" entry = `String "Models.Index")
+          (Page_index.line_entries folded_index)))
+    "a folded namespace Index page was emitted as a physical row";
+  let solo = outline_entry folded_index "Solo" in
+  expect
+    (Yojson.Safe.Util.member "landingModule" solo = `String "Solo.Index"
+    && Yojson.Safe.Util.member "namespace" solo = `Bool true
+    && Yojson.Safe.Util.member "hasChildren" solo = `Bool false)
+    "an Index-only namespace lost its namespace identity";
+  let root_index = outline_entry folded_index "Index" in
+  expect
+    (Yojson.Safe.Util.member "pageModule" root_index = `String "Index"
+    && Yojson.Safe.Util.member "landingModule" root_index = `Null
+    && Yojson.Safe.Util.member "namespace" root_index = `Bool false)
+    "the root Index page was incorrectly folded";
+  let nested = outline_entry folded_index "Models.Nested" in
+  expect
+    (Yojson.Safe.Util.member "landingModule" nested
+     = `String "Models.Nested.Index"
+    && Yojson.Safe.Util.member "hasChildren" nested = `Bool false)
+    "a nested Index-only namespace was not folded losslessly";
+  let no_index_documents =
+    [
+      Document.parse ~path:"catalog/zeta.live.md" "# Zeta\n";
+      Document.parse ~path:"catalog/alpha.live.md" "# Alpha\n";
+    ]
+  in
+  let no_index = result (Page_index.build no_index_documents) in
+  let catalog = outline_entry no_index "Catalog" in
+  expect
+    (Yojson.Safe.Util.member "landingModule" catalog = `Null
+    && Yojson.Safe.Util.member "namespace" catalog = `Bool true
+    && Yojson.Safe.Util.member "hasChildren" catalog = `Bool true
+    && Page_index.modules no_index = [ "Catalog.Alpha"; "Catalog.Zeta" ])
+    "a namespace without Index lost or invented a landing page";
+  let reordered = result (Page_index.build (List.rev no_index_documents)) in
+  expect
+    (Page_index.line_entries reordered = Page_index.line_entries no_index)
+    "reordering child inputs changed the canonical outline or row attachments";
+  let last_child_before =
+    result
+      (Page_index.build
+         [
+           Document.parse ~path:"archive/index.live.md" "# Archive\n";
+           Document.parse ~path:"archive/only.live.md" "# Only\n";
+         ])
+  in
+  let last_child_after =
+    result
+      (Page_index.build
+         [ Document.parse ~path:"archive/index.live.md" "# Archive\n" ])
+  in
+  let archive_before = outline_entry last_child_before "Archive" in
+  let archive_after = outline_entry last_child_after "Archive" in
+  expect
+    (Yojson.Safe.Util.member "landingModule" archive_before
+     = `String "Archive.Index"
+    && Yojson.Safe.Util.member "hasChildren" archive_before = `Bool true
+    && Yojson.Safe.Util.member "landingModule" archive_after
+       = `String "Archive.Index"
+    && Yojson.Safe.Util.member "hasChildren" archive_after = `Bool false
+    && Page_index.modules last_child_after = [ "Archive.Index" ])
+    "removing the last visible child lost or converted the Index landing page";
   let deep_description =
     Compiler_workspace.manifest_description
       [
@@ -468,6 +559,118 @@ let () =
            true
          with Not_found -> false)
         "a swap refactor clobbered the second module";
+      write directory "manual/index.live.md"
+        "# Manual\n\n    let title = \"Manual\"\n";
+      write directory "manual/start.live.md"
+        "# Start\n\n    let summary = \"Start\"\n";
+      let landing_snapshot = project_result (Project.snapshot project) in
+      let landing_renames =
+        [
+          { Project.before = "Manual.Index"; after = "Guides.Index" };
+          { Project.before = "Manual.Start"; after = "Guides.Start" };
+        ]
+      in
+      let _, landing_renamed_snapshot, _ =
+        project_result
+          (Project.apply_module_refactor project
+             ~expected_project_version:landing_snapshot.version
+             ~expected_preview_id:
+               (Project.refactor_preview_id landing_snapshot landing_renames)
+             landing_renames)
+      in
+      expect
+        (Option.is_some
+           (Page_index.find landing_renamed_snapshot.page_index "Guides.Index")
+        && Option.is_some
+             (Page_index.find landing_renamed_snapshot.page_index "Guides.Start")
+        && Option.is_none
+             (Page_index.find landing_renamed_snapshot.page_index "Manual.Index")
+        )
+        "namespace refactor did not carry its attached landing page";
+      let guides = outline_entry landing_renamed_snapshot.page_index "Guides" in
+      expect
+        (Yojson.Safe.Util.member "landingModule" guides = `String "Guides.Index"
+        && Yojson.Safe.Util.member "hasChildren" guides = `Bool true)
+        "renamed namespace lost its landing attachment";
+      let handbook_index_source =
+        "# Handbook\n\n    let title = \"Handbook\"\n"
+      in
+      let handbook_start_source =
+        "# Start\n\n    let introduction = \"Start\"\n"
+      in
+      let handbook_advanced_source = "# Advanced\n\n    let level = 2\n" in
+      write directory "handbook/index.live.md" handbook_index_source;
+      write directory "handbook/start.live.md" handbook_start_source;
+      write directory "handbook/topics/advanced.live.md"
+        handbook_advanced_source;
+      let reparent_snapshot = project_result (Project.snapshot project) in
+      let reparent_renames =
+        [
+          {
+            Project.before = "Handbook.Index";
+            after = "Reference.Handbook.Index";
+          };
+          {
+            Project.before = "Handbook.Start";
+            after = "Reference.Handbook.Start";
+          };
+          {
+            Project.before = "Handbook.Topics.Advanced";
+            after = "Reference.Handbook.Topics.Advanced";
+          };
+        ]
+      in
+      let _, reparented_snapshot, _ =
+        project_result
+          (Project.apply_module_refactor project
+             ~expected_project_version:reparent_snapshot.version
+             ~expected_preview_id:
+               (Project.refactor_preview_id reparent_snapshot reparent_renames)
+             reparent_renames)
+      in
+      let reparented_modules =
+        Page_index.modules reparented_snapshot.page_index
+      in
+      expect
+        (List.for_all
+           (fun module_path -> List.mem module_path reparented_modules)
+           [
+             "Reference.Handbook.Index";
+             "Reference.Handbook.Start";
+             "Reference.Handbook.Topics.Advanced";
+           ]
+        && List.for_all
+             (fun module_path -> not (List.mem module_path reparented_modules))
+             [ "Handbook.Index"; "Handbook.Start"; "Handbook.Topics.Advanced" ]
+        )
+        "namespace reparent lost pages or retained old module identities";
+      let reparented_handbook =
+        outline_entry reparented_snapshot.page_index "Reference.Handbook"
+      in
+      expect
+        (Yojson.Safe.Util.member "landingModule" reparented_handbook
+         = `String "Reference.Handbook.Index"
+        && Yojson.Safe.Util.member "namespace" reparented_handbook = `Bool true
+        && Yojson.Safe.Util.member "hasChildren" reparented_handbook
+           = `Bool true)
+        "namespace reparent detached its Index landing page";
+      let reparented_index =
+        project_result
+          (Project.page reparented_snapshot "Reference.Handbook.Index")
+      in
+      let reparented_start =
+        project_result
+          (Project.page reparented_snapshot "Reference.Handbook.Start")
+      in
+      let reparented_advanced =
+        project_result
+          (Project.page reparented_snapshot "Reference.Handbook.Topics.Advanced")
+      in
+      expect
+        (String.equal reparented_index.source handbook_index_source
+        && String.equal reparented_start.source handbook_start_source
+        && String.equal reparented_advanced.source handbook_advanced_source)
+        "namespace reparent did not preserve page contents";
       write directory "bad-name.live.md" "# Needs migration\n";
       let migration_snapshot = project_result (Project.snapshot project) in
       expect

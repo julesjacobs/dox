@@ -1579,12 +1579,17 @@ const outlineTheme = EditorView.theme({
   ".cm-content": {
     padding: "4px 2px 28px",
     caretColor: colors.green,
+    whiteSpace: "pre",
   },
   ".cm-line": {
+    position: "relative",
     borderRadius: "5px",
     padding: "0 6px",
   },
   ".cm-activeLine": {
+    backgroundColor: "transparent",
+  },
+  "&.cm-focused .cm-activeLine": {
     backgroundColor: "rgba(19, 95, 75, 0.07)",
   },
   ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
@@ -1592,11 +1597,25 @@ const outlineTheme = EditorView.theme({
   },
   ".cm-outline-active": {
     color: "#0a3e31",
-    fontWeight: "650",
+    boxShadow: "inset 3px 0 0 #36816c",
   },
   ".cm-outline-namespace": {
     color: "#68746e",
-    fontWeight: "620",
+  },
+  ".cm-outline-pending": {
+    backgroundColor: "rgba(104, 116, 110, 0.09)",
+  },
+  ".cm-outline-pending-visible::after": {
+    content: '""',
+    position: "absolute",
+    top: "50%",
+    right: "7px",
+    width: "5px",
+    height: "5px",
+    marginTop: "-2.5px",
+    borderRadius: "50%",
+    backgroundColor: "#87908a",
+    animation: "doclang-outline-pulse 900ms ease-in-out infinite alternate",
   },
   ".cm-outline-invalid": {
     textDecoration: "underline wavy #a94436",
@@ -1608,7 +1627,12 @@ const setOutlineConfig = StateEffect.define();
 
 const outlineConfigField = StateField.define({
   create() {
-    return { activeModule: null, lineMap: [] };
+    return {
+      activeModule: null,
+      pendingModule: null,
+      pendingVisible: false,
+      lineMap: [],
+    };
   },
   update(value, transaction) {
     for (const effect of transaction.effects) {
@@ -1624,7 +1648,12 @@ function outlineDepth(text) {
 }
 
 function outlineDecorations(view) {
-  const { activeModule, lineMap } = view.state.field(outlineConfigField);
+  const {
+    activeModule,
+    pendingModule,
+    pendingVisible,
+    lineMap,
+  } = view.state.field(outlineConfigField);
   const decorations = [];
   for (let number = 1; number <= view.state.doc.lines; number += 1) {
     const line = view.state.doc.line(number);
@@ -1632,16 +1661,29 @@ function outlineDecorations(view) {
     const spaces = line.text.match(/^ */)?.[0].length || 0;
     const component = line.text.slice(spaces);
     const classes = [];
-    if (spaces % 2 !== 0 || (component && !/^[A-Z][a-z0-9_']*$/.test(component))) {
+    if (
+      entry?.invalid ||
+      spaces % 2 !== 0 ||
+      (component && !/^[A-Z][a-z0-9_']*$/.test(component))
+    ) {
       classes.push("cm-outline-invalid");
     }
     if (entry?.namespace) classes.push("cm-outline-namespace");
-    if (entry?.module === activeModule) classes.push("cm-outline-active");
+    const modulePath =
+      entry?.originTarget ||
+      entry?.landingModule ||
+      entry?.pageModule ||
+      entry?.module;
+    if (modulePath === activeModule) classes.push("cm-outline-active");
+    if (pendingModule && modulePath === pendingModule) {
+      classes.push("cm-outline-pending");
+      if (pendingVisible) classes.push("cm-outline-pending-visible");
+    }
     if (classes.length) {
+      const attributes = { class: classes.join(" ") };
+      if (entry?.error) attributes.title = entry.error;
       decorations.push(
-        Decoration.line({ attributes: { class: classes.join(" ") } }).range(
-          line.from,
-        ),
+        Decoration.line({ attributes }).range(line.from),
       );
     }
   }
@@ -1686,11 +1728,15 @@ export function mountModuleOutlineEditor(
     doc,
     selection = 0,
     activeModule,
+    pendingModule = null,
+    pendingVisible = false,
     lineMap = [],
     onChange,
     onNavigate,
     onCommit,
     onCancel,
+    onFocus,
+    onBlur,
   },
 ) {
   parent.classList.add("cm-module-outline");
@@ -1737,7 +1783,7 @@ export function mountModuleOutlineEditor(
         {
           key: "Mod-Enter",
           run: () => {
-            onCommit?.();
+            onCommit?.("mod-enter");
             return true;
           },
         },
@@ -1746,14 +1792,34 @@ export function mountModuleOutlineEditor(
     keymap.of([...defaultKeymap, ...historyKeymap]),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) onChange?.(update.state.doc.toString(), update);
-      if (update.selectionSet && !update.docChanged) {
-        onNavigate?.(update.state.selection.main, update);
+      if (update.selectionSet && !update.docChanged && !update.view.composing) {
+        const userEvent = update.transactions
+          .map((transaction) => transaction.annotation(Transaction.userEvent))
+          .find(Boolean);
+        if (userEvent?.startsWith("select")) {
+          const before = update.startState.doc.lineAt(
+            update.startState.selection.main.head,
+          ).number;
+          const after = update.state.doc.lineAt(
+            update.state.selection.main.head,
+          ).number;
+          if (before !== after || userEvent.includes("pointer")) {
+            onNavigate?.(
+              update.state.selection.main,
+              update,
+              userEvent.includes("pointer") ? "pointer" : "vertical",
+            );
+          }
+        }
       }
     }),
     EditorView.domEventHandlers({
+      focus: () => {
+        onFocus?.();
+      },
       focusout: (_event, view) => {
         queueMicrotask(() => {
-          if (!view.dom.contains(document.activeElement)) onCommit?.();
+          if (!view.dom.contains(document.activeElement)) onBlur?.();
         });
       },
     }),
@@ -1768,22 +1834,44 @@ export function mountModuleOutlineEditor(
     parent,
   });
   view.dispatch({
-    effects: setOutlineConfig.of({ activeModule, lineMap }),
+    effects: setOutlineConfig.of({
+      activeModule,
+      pendingModule,
+      pendingVisible,
+      lineMap,
+    }),
   });
   return view;
 }
 
 export function updateModuleOutlineEditor(
   view,
-  { doc, selection, activeModule, lineMap },
+  {
+    doc,
+    selection,
+    activeModule,
+    pendingModule = null,
+    pendingVisible = false,
+    lineMap,
+  },
 ) {
   const current = view.state.doc.toString();
   const changed = current !== doc;
   const maxSelection = Math.min(selection, doc.length);
+  const selectionChanged =
+    view.state.selection.main.anchor !== maxSelection ||
+    !view.state.selection.main.empty;
   view.dispatch({
     changes: changed ? { from: 0, to: current.length, insert: doc } : undefined,
-    selection: changed ? { anchor: maxSelection } : undefined,
-    effects: setOutlineConfig.of({ activeModule, lineMap }),
-    userEvent: changed ? "input.outline-sync" : undefined,
+    selection:
+      changed || selectionChanged ? { anchor: maxSelection } : undefined,
+    effects: setOutlineConfig.of({
+      activeModule,
+      pendingModule,
+      pendingVisible,
+      lineMap,
+    }),
+    userEvent:
+      changed || selectionChanged ? "outline.sync" : undefined,
   });
 }
