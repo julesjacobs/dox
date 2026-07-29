@@ -6,7 +6,7 @@ import {
   setMarkdownEditorEvaluation,
   setMarkdownEditorResultInvalidation,
   replaceEditorStateDocument,
-} from "./editor.bundle.js?v=20260729g";
+} from "./editor.bundle.js?v=20260729h";
 
 const app = document.querySelector("#app");
 

@@ -1647,7 +1647,7 @@ const outlineTheme = EditorView.theme({
   "&": {
     height: "100%",
     backgroundColor: "transparent",
-    color: "#dce7e1",
+    color: "#34443d",
     fontSize: "13px",
   },
   "&.cm-focused": { outline: "none" },
@@ -1658,7 +1658,7 @@ const outlineTheme = EditorView.theme({
   },
   ".cm-content": {
     padding: "4px 0 28px",
-    caretColor: "#91c7b5",
+    caretColor: colors.green,
     whiteSpace: "pre",
   },
   ".cm-line": {
@@ -1670,13 +1670,13 @@ const outlineTheme = EditorView.theme({
   },
   ".cm-line:not(.cm-outline-active):hover": {
     borderRadius: "6px 0 0 6px",
-    backgroundColor: "rgba(255, 255, 255, 0.05)",
+    backgroundColor: "rgba(19, 95, 75, 0.055)",
   },
   "&.cm-focused .cm-activeLine": {
-    backgroundColor: "rgba(255, 255, 255, 0.07)",
+    backgroundColor: "rgba(19, 95, 75, 0.07)",
   },
   ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
-    backgroundColor: "rgba(145, 199, 181, 0.24)",
+    backgroundColor: "rgba(19, 95, 75, 0.14)",
   },
   ".cm-outline-active": {
     zIndex: "1",
@@ -1706,16 +1706,16 @@ const outlineTheme = EditorView.theme({
     boxShadow: "4px -4px 0 4px var(--paper)",
   },
   ".cm-outline-namespace": {
-    color: "#91a29a",
+    color: "#6f7b75",
   },
   ".cm-outline-active.cm-outline-namespace": {
     color: "#31433b",
   },
   ".cm-outline-pending": {
-    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    backgroundColor: "rgba(19, 95, 75, 0.08)",
   },
   ".cm-outline-pending-visible": {
-    backgroundImage: "radial-gradient(circle, #91a29a 0 2px, transparent 2.5px)",
+    backgroundImage: "radial-gradient(circle, #73817a 0 2px, transparent 2.5px)",
     backgroundPosition: "right 7px center",
     backgroundRepeat: "no-repeat",
   },
