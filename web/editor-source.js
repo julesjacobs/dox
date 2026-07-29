@@ -1720,6 +1720,13 @@ function changeOutlineIndent(view, delta) {
   const line = view.state.doc.lineAt(selection.head);
   const spaces = line.text.match(/^ */)?.[0].length || 0;
   if (delta < 0 && spaces < 2) return true;
+  if (delta > 0) {
+    let previous = line.number - 1;
+    while (previous > 0 && !view.state.doc.line(previous).text.trim()) {
+      previous -= 1;
+    }
+    if (previous === 0) return true;
+  }
   const lines = [line];
   for (let number = line.number + 1; number <= view.state.doc.lines; number += 1) {
     const candidate = view.state.doc.line(number);
@@ -1757,6 +1764,7 @@ export function mountModuleOutlineEditor(
     pendingVisible = false,
     lineMap = [],
     onChange,
+    onSelectionChange,
     onNavigate,
     onCommit,
     onCancel,
@@ -1819,7 +1827,16 @@ export function mountModuleOutlineEditor(
     ),
     keymap.of([...defaultKeymap, ...historyKeymap]),
     EditorView.updateListener.of((update) => {
-      if (update.docChanged) onChange?.(update.state.doc.toString(), update);
+      const externalSync = update.transactions.some(
+        (transaction) =>
+          transaction.annotation(Transaction.userEvent) === "outline.sync",
+      );
+      if (update.docChanged && !externalSync) {
+        onChange?.(update.state.doc.toString(), update);
+      }
+      if (update.selectionSet || update.docChanged) {
+        onSelectionChange?.(update.state.selection.main, update);
+      }
       if (update.selectionSet && !update.docChanged && !update.view.composing) {
         const userEvent = update.transactions
           .map((transaction) => transaction.annotation(Transaction.userEvent))
@@ -1861,6 +1878,7 @@ export function mountModuleOutlineEditor(
     }),
     parent,
   });
+  view.doclangOutlineExtensions = extensions;
   view.dispatch({
     effects: setOutlineConfig.of({
       activeModule,
@@ -1881,6 +1899,7 @@ export function updateModuleOutlineEditor(
     pendingModule = null,
     pendingVisible = false,
     lineMap,
+    moveSelection = false,
   },
 ) {
   const current = view.state.doc.toString();
@@ -1889,10 +1908,31 @@ export function updateModuleOutlineEditor(
   const selectionChanged =
     view.state.selection.main.anchor !== maxSelection ||
     !view.state.selection.main.empty;
+  if (changed) {
+    const focused = view.hasFocus;
+    view.setState(
+      EditorState.create({
+        doc,
+        selection: { anchor: maxSelection },
+        extensions: view.doclangOutlineExtensions,
+      }),
+    );
+    view.dispatch({
+      effects: setOutlineConfig.of({
+        activeModule,
+        pendingModule,
+        pendingVisible,
+        lineMap,
+      }),
+    });
+    if (focused) view.focus();
+    return;
+  }
   view.dispatch({
-    changes: changed ? { from: 0, to: current.length, insert: doc } : undefined,
     selection:
-      changed || selectionChanged ? { anchor: maxSelection } : undefined,
+      moveSelection && selectionChanged
+        ? { anchor: maxSelection }
+        : undefined,
     effects: setOutlineConfig.of({
       activeModule,
       pendingModule,
@@ -1900,6 +1940,8 @@ export function updateModuleOutlineEditor(
       lineMap,
     }),
     userEvent:
-      changed || selectionChanged ? "outline.sync" : undefined,
+      moveSelection && selectionChanged
+        ? "outline.sync"
+        : undefined,
   });
 }

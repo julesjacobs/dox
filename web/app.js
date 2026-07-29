@@ -5,7 +5,7 @@ import {
   setMarkdownEditorEvaluation,
   setMarkdownEditorResultInvalidation,
   replaceEditorStateDocument,
-} from "./editor.bundle.js?v=20260727ad";
+} from "./editor.bundle.js?v=20260729b";
 
 const app = document.querySelector("#app");
 
@@ -80,6 +80,7 @@ const state = {
   outlineNavigationRun: false,
   outlineFocusTransfer: false,
   outlineSelection: 0,
+  outlineSyncQueued: false,
   outlineCommitController: null,
   outlineCommitting: false,
   outlineCommitPromise: null,
@@ -1040,6 +1041,21 @@ function outlinePositionForCursor(entries, cursor) {
   return null;
 }
 
+function outlinePositionForModule(entries, modulePath) {
+  let offset = 0;
+  for (const entry of entries) {
+    if (
+      entry.pageModule === modulePath ||
+      entry.targetModule === modulePath ||
+      entry.originTarget === modulePath
+    ) {
+      return offset + entry.text.length;
+    }
+    offset += entry.text.length + 1;
+  }
+  return null;
+}
+
 function installOutlineBase(project, entries, { keepDraft = false } = {}) {
   const cursor = keepDraft ? null : captureOutlineCursor();
   const text = entries.map((entry) => entry.text).join("\n");
@@ -1062,9 +1078,13 @@ function installOutlineBase(project, entries, { keepDraft = false } = {}) {
     state.outlineFailedGeneration = null;
   } else {
     try {
-      const draft = parseOutlineDraft(state.outlineText, {
-        previousRows: state.outlineDraftRows,
-      });
+      const draft = preserveBlankOutlineOrigins(
+        state.outlineText,
+        parseOutlineDraft(state.outlineText, {
+          previousRows: state.outlineDraftRows,
+        }),
+        state.outlineDraftRows,
+      );
       state.outlineDraftRows = draft.rows;
       state.outlineLineMap = draft.lineMap;
       state.outlineDraftError = null;
@@ -1241,6 +1261,42 @@ function parseOutlineDraft(source, { previousRows = [], update = null } = {}) {
     rows.find((row) => row.sourceLine === index + 1) || null,
   );
   return { rows, modules, lineMap };
+}
+
+function preserveBlankOutlineOrigins(
+  source,
+  draft,
+  previousRows,
+  update = null,
+) {
+  const lines = source.split("\n");
+  const previousByLine = mappedPreviousRows(previousRows, update);
+  const placeholders = [];
+  const lineMap = [...draft.lineMap];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].trim() || lineMap[index]) continue;
+    const previous = previousByLine.get(index + 1);
+    if (!previous?.originPath && !previous?.originModule) continue;
+    const placeholder = {
+      ...previous,
+      sourceLine: index + 1,
+      text: lines[index],
+      component: "",
+      pageModule: null,
+      targetModule: null,
+      changed: true,
+      blank: true,
+    };
+    placeholders.push(placeholder);
+    lineMap[index] = placeholder;
+  }
+  return {
+    ...draft,
+    rows: [...draft.rows, ...placeholders].sort(
+      (left, right) => left.sourceLine - right.sourceLine,
+    ),
+    lineMap,
+  };
 }
 
 function outlineRowAtLine(lineNumber) {
@@ -1511,6 +1567,9 @@ function scheduleOutlineCommit() {
   }
   const cursorLine =
     state.outlineView?.state.doc.lineAt(state.outlineSelection).number || 1;
+  const cursorText =
+    state.outlineView?.state.doc.line(cursorLine).text || "";
+  if (!cursorText.trim()) return;
   const activeRow = state.outlineDraftRows.find(
     (row) => row.sourceLine === cursorLine,
   );
@@ -1747,14 +1806,17 @@ async function performOutlineCommit({
       openModule,
     );
     if (openedModule) {
-      await loadDocument(openedModule, {
-        history: "push",
-        focus: "main",
-      });
-    } else {
-      render();
-      if (state.module) void loadDependencyContext(state.module);
+      const position = outlinePositionForModule(
+        newerDraft !== null
+          ? state.outlineDraftRows
+          : state.outlineBase.committedRowsWithOrigins,
+        openedModule,
+      );
+      if (position !== null) state.outlineSelection = position;
     }
+    render();
+    syncOutlineEditor({ moveSelection: Boolean(openedModule) });
+    if (state.module) void loadDependencyContext(state.module);
     return true;
   } catch (error) {
     if (authoritativeProject && appliedMapping.length) {
@@ -1809,7 +1871,7 @@ async function performOutlineCommit({
   }
 }
 
-function syncOutlineEditor() {
+function syncOutlineEditor({ moveSelection = false } = {}) {
   const view = state.outlineView;
   if (!view?.dom.isConnected) return;
   updateModuleOutlineEditor(view, {
@@ -1819,26 +1881,32 @@ function syncOutlineEditor() {
     pendingModule: state.pendingModule,
     pendingVisible: state.pendingVisible,
     lineMap: state.outlineLineMap,
+    moveSelection,
+  });
+}
+
+function scheduleOutlineEditorSync() {
+  if (state.outlineSyncQueued) return;
+  state.outlineSyncQueued = true;
+  queueMicrotask(() => {
+    state.outlineSyncQueued = false;
+    syncOutlineEditor();
   });
 }
 
 async function openOutlineModule(row, kind) {
   const modulePath =
-    row?.originTarget ||
     row?.targetModule ||
+    row?.originTarget ||
     (row?.originPath && !row?.originModule ? row.proposedPath || row.path : null);
   if (!modulePath) return;
-  if (row.originTarget) {
-    if (modulePath !== state.module) {
-      await loadDocument(modulePath, {
-        history: outlineHistoryMode(kind),
-        focus: "outline",
-      });
-    }
-    return;
+  if (state.outlineText !== state.outlineCommittedText) {
+    const committed = await commitOutline({
+      reason: "navigate",
+      openModule: modulePath,
+    });
+    if (!committed) return;
   }
-  const committed = await commitOutline({ reason: "navigate" });
-  if (!committed) return;
   if (!state.project?.pageIndex?.modules?.includes(modulePath)) {
     if (state.outlineConflict || state.outlineDraftError) return;
     await withProjectMutation(async () => {
@@ -1852,6 +1920,10 @@ async function openOutlineModule(row, kind) {
       installAuthoritativeProject(payload.project, { forceOutline: true });
     });
     render();
+  }
+  if (modulePath === state.module) {
+    queueMicrotask(() => state.outlineView?.focus());
+    return;
   }
   await loadDocument(modulePath, {
     history: outlineHistoryMode(kind),
@@ -1902,10 +1974,15 @@ function mountOutlineEditor() {
         update,
       );
       try {
-        const draft = parseOutlineDraft(source, {
-          previousRows: state.outlineDraftRows,
+        const draft = preserveBlankOutlineOrigins(
+          source,
+          parseOutlineDraft(source, {
+            previousRows: state.outlineDraftRows,
+            update,
+          }),
+          state.outlineDraftRows,
           update,
-        });
+        );
         state.outlineDraftRows = draft.rows;
         state.outlineLineMap = draft.lineMap;
         state.outlineDraftError = null;
@@ -1927,12 +2004,14 @@ function mountOutlineEditor() {
           };
         });
       }
-      syncOutlineEditor();
+      scheduleOutlineEditorSync();
       scheduleOutlineCommit();
+    },
+    onSelectionChange: (selection) => {
+      state.outlineSelection = selection.head;
     },
     onNavigate: (selection, update, kind) => {
       if (!selection.empty || update.view.composing) return;
-      state.outlineSelection = selection.head;
       const line = update.state.doc.lineAt(selection.head);
       scheduleOutlineCommit();
       const row = outlineRowAtLine(line.number);
@@ -1947,10 +2026,17 @@ function mountOutlineEditor() {
         state.outlineView?.state.doc.lineAt(state.outlineSelection).number || 1;
       const row = outlineRowAtLine(line);
       const openModule =
-        reason === "enter"
+        reason === "enter" || reason === "mod-enter"
           ? row?.targetModule || row?.originTarget || null
           : null;
-      void commitOutline({ reason, openModule });
+      if (openModule) {
+        void openOutlineModule(row, "explicit").catch((error) => {
+          state.workspaceError = error.message;
+          updateStatusOnly();
+        });
+      } else {
+        void commitOutline({ reason });
+      }
     },
     onCancel: cancelOutlineDraft,
     onFocus: () => {
@@ -3847,7 +3933,7 @@ window.addEventListener("popstate", (event) => {
       Math.max(event.state.outlineSelection, 0),
       length,
     );
-    syncOutlineEditor();
+    syncOutlineEditor({ moveSelection: true });
   }
   const modulePath =
     event.state?.module ||
