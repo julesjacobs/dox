@@ -15,7 +15,7 @@ let () =
      let not_run = false\n\
      ```\n"
   in
-  let document = Document.parse ~path:"demo.live.md" source in
+  let document = Document.parse ~path:"demo.ml.md" source in
   expect (document.title = "Demo") "title was not parsed";
   expect (List.length document.blocks = 4) "unexpected block count";
   expect
@@ -30,7 +30,7 @@ let () =
   | [ definition ] ->
       expect (definition.name = "twice") "definition name was not parsed";
       let malformed =
-        Document.parse ~path:"bad.live.md"
+        Document.parse ~path:"bad.ml.md"
           "```ocaml name=duplicate\n\
            let a = 1\n\
            ```\n\
@@ -41,7 +41,7 @@ let () =
         (List.length malformed.issues >= 2)
         "unclosed and duplicate fences were not diagnosed";
       let dependencies =
-        Document.parse ~path:"dependencies.live.md"
+        Document.parse ~path:"dependencies.ml.md"
           "```ocaml\n\
            let observations = [ 1.; 2. ]\n\
            let mean = List.fold_left ( +. ) 0. observations\n\
@@ -64,7 +64,7 @@ let () =
         (mean.references = [ "observations" ])
         "a later definition lost its lexical dependency";
       let indented =
-        Document.parse ~path:"indented.live.md"
+        Document.parse ~path:"indented.ml.md"
           "# Indented OCaml\n\n\
            A paragraph.\n\n\
           \    let answer = 6 * 7\n\
@@ -85,14 +85,14 @@ let () =
            .line = 5)
         "indented OCaml source location was incorrect";
       let nested_lists =
-        Document.parse ~path:"lists.live.md"
+        Document.parse ~path:"lists.ml.md"
           "# Lists\n\n- first\n    - nested\n    continued detail\n- second\n"
       in
       expect
         (String.equal (Document.program_source nested_lists) "")
         "nested Markdown list content was misclassified as OCaml";
       let inline =
-        Document.parse ~path:"inline.live.md"
+        Document.parse ~path:"inline.ml.md"
           "Plain `code` and computed `1 + 2 =`.\n\
            Double-backtick ``3 + 4 =`` then `5 + 6 =`.\n\
            Escaped \\`7 + 8 =\\` is literal.\n\

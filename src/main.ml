@@ -1,9 +1,9 @@
 let usage () =
   Printf.eprintf
     "Usage:\n\
-    \  doclang serve [--root DIR] [--assets DIR] [--port PORT]\n\
-    \  doclang check FILE\n\
-    \  doclang artifact FILE ENTRY OUTPUT\n";
+    \  dox serve [--root DIR] [--assets DIR] [--port PORT]\n\
+    \  dox check FILE\n\
+    \  dox artifact FILE ENTRY OUTPUT\n";
   exit 2
 
 let rec serve_options root assets port = function

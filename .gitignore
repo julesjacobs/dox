@@ -1,5 +1,5 @@
 _build/
 _artifacts/
-.doclang/
+.dox/
 node_modules/
 _toolchain/

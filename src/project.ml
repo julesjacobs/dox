@@ -33,7 +33,7 @@ let create root =
   in
   { root }
 
-let metadata_directory project = Filename.concat project.root ".doclang"
+let metadata_directory project = Filename.concat project.root ".dox"
 
 let lock_path project =
   Filename.concat (metadata_directory project) "project.lock"
@@ -42,11 +42,15 @@ let recover_before_read = ref (fun (_ : t) -> Ok ())
 
 let document_paths project =
   Util.list_files project.root
-  |> List.filter (fun path -> Util.ends_with ~suffix:".live.md" path)
+  |> List.filter (fun path ->
+      Util.ends_with ~suffix:Module_path.source_suffix path)
 
 let read_document_file project path =
-  if not (Util.ends_with ~suffix:".live.md" path) then
-    Error (Invalid "Only .live.md documents belong to the live project.")
+  if not (Util.ends_with ~suffix:Module_path.source_suffix path) then
+    Error
+      (Invalid
+         (Printf.sprintf "Only %s documents belong to the live project."
+            Module_path.source_suffix))
   else
     match Util.safe_existing_path ~root:project.root path with
     | Error message -> Error (Not_found message)
@@ -856,10 +860,9 @@ let direct_page ?(cancelled = fun () -> false) project module_path =
     Module_path.validate module_path
     |> Result.map_error (fun message -> Invalid message)
   in
-  if Module_path.is_beneath ~namespace:"Doclang_prelude" module_path then
+  if Module_path.is_beneath ~namespace:"Dox_prelude" module_path then
     Error
-      (Invalid
-         "Doclang_prelude is reserved for the generated Doclang support module.")
+      (Invalid "Dox_prelude is reserved for the generated Dox support module.")
   else
     let path = Module_path.source_path module_path in
     match Util.ensure_directory (metadata_directory project) with
@@ -873,8 +876,7 @@ let direct_page ?(cancelled = fun () -> false) project module_path =
               if cancelled () then raise Evaluator.Cancelled;
               let* source =
                 try
-                  Ok
-                    (Doclang_native.read_file_nofollow ~root:project.root ~path)
+                  Ok (Dox_native.read_file_nofollow ~root:project.root ~path)
                 with
                 | Unix.Unix_error (Unix.ENOENT, _, _) ->
                     Error
@@ -1058,8 +1060,11 @@ let save_document project ~path ~source ~base_version ~base_project_version
                   } ))
 
 let create_document project ~path ~source ~base_project_version ~principal =
-  if not (Util.ends_with ~suffix:".live.md" path) then
-    Error (Invalid "New documents must end in .live.md.")
+  if not (Util.ends_with ~suffix:Module_path.source_suffix path) then
+    Error
+      (Invalid
+         (Printf.sprintf "New documents must end in %s."
+            Module_path.source_suffix))
   else
     match Util.ensure_directory (metadata_directory project) with
     | Error message -> Error (Io message)
@@ -2114,7 +2119,7 @@ let build_artifact project ~path ~entry ~name ~expected_project_version
                   | Error message -> Error (Io message)
                 in
                 let staging =
-                  Filename.temp_dir ~temp_dir:name_root ".doclang-artifact-" ""
+                  Filename.temp_dir ~temp_dir:name_root ".dox-artifact-" ""
                 in
                 let output = Filename.concat staging name in
                 match

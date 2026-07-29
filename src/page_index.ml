@@ -33,11 +33,9 @@ let build_internal ~strict documents =
         | Error message ->
             reject (Printf.sprintf "%s: %s" document.Document.path message)
         | Ok module_path ->
-            if Module_path.is_beneath ~namespace:"Doclang_prelude" module_path
-            then
+            if Module_path.is_beneath ~namespace:"Dox_prelude" module_path then
               reject
-                "Doclang_prelude is reserved for the generated Doclang support \
-                 module."
+                "Dox_prelude is reserved for the generated Dox support module."
             else if List.mem module_path seen_pages then
               reject (Printf.sprintf "Duplicate page module %s." module_path)
             else

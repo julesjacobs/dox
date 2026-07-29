@@ -2,12 +2,12 @@
 
 ## 1. Outcome
 
-Doclang should behave as a Git-backed wiki whose pages are also OCaml
+Dox should behave as a Git-backed wiki whose pages are also OCaml
 compilation units.
 
 - The main page is a live Markdown document. The sidebar is a derived,
   text-editable CodeMirror outline of qualified OCaml modules.
-- Pages autosave to ordinary `.live.md` files in the Git working tree.
+- Pages autosave to ordinary `.ml.md` files in the Git working tree.
 - Typing `[[` completes an OCaml module path. A missing module can be created
   as a page without leaving the editor.
 - Markdown page links and OCaml module references navigate to the same page.
@@ -18,8 +18,8 @@ compilation units.
 - Normal successful operation has no save, dirty, evaluation, or Git status
   indicator. Persistent UI appears only when something needs attention.
 
-This plan replaces the explicit-save document list and `.doclang` change
-history. Git becomes the history model. `.doclang` remains only for disposable
+This plan replaces the explicit-save document list and `.dox` change
+history. Git becomes the history model. `.dox` remains only for disposable
 caches and transaction recovery.
 
 ## 2. One identity
@@ -41,7 +41,7 @@ The same path appears everywhere:
 The source path is a deterministic storage encoding, not another name:
 
 ```text
-Models.Statistics  <->  models/statistics.live.md
+Models.Statistics  <->  models/statistics.ml.md
 ```
 
 Each module component must use a restricted conventional OCaml form,
@@ -63,7 +63,7 @@ needs one.
 
 A module path may be both a page and the parent of child modules.
 `Models.Statistics` may exist beneath the page/module `Models`. The canonical
-files are `models.live.md` and `models/statistics.live.md`; links, URLs, and
+files are `models.ml.md` and `models/statistics.ml.md`; links, URLs, and
 OCaml code use those exact module paths. The compiler workspace uses private
 generated unit names to implement this hierarchy without exposing a second
 identity.
@@ -94,7 +94,7 @@ type page_reference = {
 
 Resolution rules:
 
-1. Require a fully qualified, valid Doclang module path.
+1. Require a fully qualified, valid Dox module path.
 2. Resolve it exactly against the project page index.
 3. Optionally retain and validate a heading fragment:
    `[[Models.Statistics#Assumptions]]`.
@@ -215,7 +215,7 @@ For every page:
 
 1. Parse the literate source.
 2. Concatenate its executable regions in document order.
-3. Preserve `#line` directives pointing to the `.live.md` file.
+3. Preserve `#line` directives pointing to the `.ml.md` file.
 4. Apply observation and inline-expression instrumentation.
 5. Write a generated lowercase `.ml` file at the path derived from the
    qualified module path.
@@ -231,7 +231,7 @@ keeps it warm for incremental requests. Never start concurrent Dune commands
 against that directory. Cancellation marks an older result obsolete and
 terminates its process when safe before starting the newest request.
 
-Generated files live in a content-addressed cache under `.doclang/cache/` and
+Generated files live in a content-addressed cache under `.dox/cache/` and
 are never source files or Git history.
 
 Compile two related forms:
@@ -265,7 +265,7 @@ interface artifacts and instrumented runtime artifacts separately.
   supplies ordering only.
 
 OCaml references are the only dependency declarations. Dune compiles the
-requested page and its dependency closure; Doclang does not maintain a second
+requested page and its dependency closure; Dox does not maintain a second
 path-based import system.
 
 ### 6.3 Incremental compilation and evaluation
@@ -363,7 +363,7 @@ Models.Internal.Optimizer
 ```
 
 A module below `N.Internal` may be referenced only by modules below `N`.
-Doclang validates that rule against typed edges and reports violations as
+Dox validates that rule against typed edges and reports violations as
 compiler diagnostics. A boundary-visible module that is observed to be
 namespace-local may receive a non-blocking “move under `N.Internal`”
 suggestion. Observed use never silently changes visibility or module paths.
@@ -419,8 +419,8 @@ Once Git-backed:
 - the working tree is the current editable state;
 - `HEAD` is the comparison baseline;
 - commits and branches are history;
-- Doclang does not maintain a competing `.doclang/changes.jsonl` history;
-- `.doclang/cache`, transaction intents, and session recovery are ignored by
+- Dox does not maintain a competing `.dox/changes.jsonl` history;
+- `.dox/cache`, transaction intents, and session recovery are ignored by
   Git.
 
 ### 7.1 Autosave protocol
@@ -535,7 +535,7 @@ Runtime
 ```
 
 The sidebar is an editable projection, not a saved document. It has an editor
-state and undo stack, but no `.live.md` source, evaluation, autosave queue, or
+state and undo stack, but no `.ml.md` source, evaluation, autosave queue, or
 independent Git content. Valid structural edits are translated into page
 operations against the real modules and files.
 
@@ -640,7 +640,7 @@ rolls back on failure.
 - Validate the proposed qualified module path.
 - Reject invalid components, page/namespace collisions, and unsafe derived
   paths.
-- Create the derived `.live.md` file. Seed it with `# Module.Path` as a
+- Create the derived `.ml.md` file. Seed it with `# Module.Path` as a
   convenience, while treating that heading as ordinary editable content.
 - Optionally insert a link at the initiating cursor.
 - Add no status UI on success.
@@ -662,7 +662,7 @@ Example:
 
 ```text
 Models.Statistics -> Analysis.Statistics
-models/statistics.live.md -> analysis/statistics.live.md
+models/statistics.ml.md -> analysis/statistics.ml.md
 ```
 
 - Obtain compiler-resolved references to the old qualified module.
@@ -721,7 +721,7 @@ Refactor:
 - `Project.snapshot` contains the page index and module graph.
 - `Evaluator` consumes named units instead of concatenated documents.
 - `Diff` reads Git before/after sources rather than defining history.
-- `.doclang` object and change-journal code is removed after migration.
+- `.dox` object and change-journal code is removed after migration.
 
 ### 10.2 API
 
@@ -777,7 +777,7 @@ CodeMirror instance.
 
 - Add fixtures for invalid file stems, nested paths, page/namespace collisions,
   links, traces, inline results, and external edits.
-- Report how every existing `.live.md` path and internal Markdown link maps to
+- Report how every existing `.ml.md` path and internal Markdown link maps to
   a qualified module path and `[[Module.Path]]` reference.
 - Record current evaluation and source-location behavior.
 - Add the reversible module-path/source-path library without changing runtime
@@ -851,7 +851,7 @@ externally without losing text; only conflicts or failures produce status UI.
   delete previews.
 - Use compiler references for module-path renames.
 - Migrate invalid filenames and path-based Markdown page links.
-- Remove shared-scope evaluation and `.doclang` history compatibility code.
+- Remove shared-scope evaluation and `.dox` history compatibility code.
 
 Exit condition: all page operations are atomic, Git-visible, compiler-checked,
 and recover correctly from a forced failure between any two write steps.
@@ -959,7 +959,7 @@ Test the sidebar outline separately:
 5. Change prose only and confirm that no OCaml job starts.
 6. Change an implementation without changing its interface and confirm that
    dependents are not recompiled but evaluations that execute it rerun.
-7. Introduce a conflict externally and confirm that Doclang preserves both
+7. Introduce a conflict externally and confirm that Dox preserves both
    versions and stops only the affected autosave queue.
 
 ### 12.4 Budgets
@@ -978,7 +978,7 @@ Test the sidebar outline separately:
 ### Compiler-unit migration
 
 Named units reject unqualified cross-page names. Compiler diagnostics and
-completion should guide qualification with the page module path; Doclang does
+completion should guide qualification with the page module path; Dox does
 not retain a second import mechanism.
 
 ### Module-path rename correctness

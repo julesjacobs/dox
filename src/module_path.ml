@@ -2,6 +2,7 @@ type t = string
 type error = string
 
 let component_re = Str.regexp "^[A-Z][A-Za-z0-9_']*$"
+let source_suffix = ".ml.md"
 let split value = String.split_on_char '.' value
 
 let validate value =
@@ -34,13 +35,15 @@ let uncapitalize_component value =
 
 let source_path value =
   split value |> List.map uncapitalize_component |> String.concat "/"
-  |> fun path -> path ^ ".live.md"
+  |> fun path -> path ^ source_suffix
 
 let of_source_path path =
-  if not (Util.ends_with ~suffix:".live.md" path) then
-    Error "Page source paths must end in .live.md."
+  if not (Util.ends_with ~suffix:source_suffix path) then
+    Error (Printf.sprintf "Page source paths must end in %s." source_suffix)
   else
-    let stem = String.sub path 0 (String.length path - 8) in
+    let stem =
+      String.sub path 0 (String.length path - String.length source_suffix)
+    in
     let components = String.split_on_char '/' stem in
     if
       List.exists
@@ -80,11 +83,11 @@ let replace_prefix ~before ~after value =
   else None
 
 let compare = String.compare
-let compiler_unit value = "Doclang__" ^ (split value |> String.concat "__")
-let namespace_unit = function "" -> "Doclang" | value -> compiler_unit value
+let compiler_unit value = "Dox__" ^ (split value |> String.concat "__")
+let namespace_unit = function "" -> "Dox" | value -> compiler_unit value
 
 let page_scope_unit value =
-  "Doclang_scope_for__" ^ (split value |> String.concat "__")
+  "Dox_scope_for__" ^ (split value |> String.concat "__")
 
 let rec take count = function
   | _ when count <= 0 -> []

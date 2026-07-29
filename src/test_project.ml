@@ -32,11 +32,11 @@ let strings name json =
   |> List.map Yojson.Safe.Util.to_string
 
 let () =
-  let directory = Filename.temp_dir "doclang-project-test-" "" in
+  let directory = Filename.temp_dir "dox-project-test-" "" in
   Fun.protect
     ~finally:(fun () -> remove_tree directory)
     (fun () ->
-      let path = Filename.concat directory "change.live.md" in
+      let path = Filename.concat directory "change.ml.md" in
       (match Util.write_file path original with
       | Ok () -> ()
       | Error message -> fail message);
@@ -44,21 +44,21 @@ let () =
       Unix.mkdir vendor 0o755;
       (match
          Util.write_file
-           (Filename.concat vendor "ignored.live.md")
+           (Filename.concat vendor "ignored.ml.md")
            "# Ignored dependency\n"
        with
       | Ok () -> ()
       | Error message -> fail message);
       let project = Project.create directory in
       let grouped_before =
-        Document.parse ~path:"grouped.live.md"
+        Document.parse ~path:"grouped.ml.md"
           "```ocaml\n\
            let observations = [ 1.; 2. ]\n\
            let mean = List.length observations\n\
            ```\n"
       in
       let grouped_after =
-        Document.parse ~path:"grouped.live.md"
+        Document.parse ~path:"grouped.ml.md"
           "```ocaml\n\
            let observations = [ 1.; 2.; 3. ]\n\
            let mean = List.length observations\n\
@@ -76,7 +76,7 @@ let () =
         = [ "mean" ])
         "definition-level impact analysis missed a dependent definition";
       let document =
-        match Project.read_document project "change.live.md" with
+        match Project.read_document project "change.ml.md" with
         | Ok document -> document
         | Error error -> fail (Project.error_message error)
       in
@@ -86,7 +86,7 @@ let () =
         | Error error -> fail (Project.error_message error)
       in
       expect
-        (String.equal direct.path "change.live.md"
+        (String.equal direct.path "change.ml.md"
         && String.equal direct.document.version document.version)
         "direct page read did not return the canonical document";
       let context : Server.context =
@@ -122,13 +122,13 @@ let () =
       expect
         (List.length snapshot.documents = 1)
         "project snapshot traversed an ignored dependency directory";
-      let draft = Document.parse ~path:"change.live.md" changed in
+      let draft = Document.parse ~path:"change.ml.md" changed in
       let validation =
         Evaluator.evaluate ~project_version:snapshot.version draft
       in
       let change =
         match
-          Project.save_document project ~path:"change.live.md" ~source:changed
+          Project.save_document project ~path:"change.ml.md" ~source:changed
             ~base_version:document.version
             ~base_project_version:snapshot.version ~principal:"test" ~validation
         with
@@ -157,18 +157,18 @@ let () =
         "change set did not preserve its after source";
       expect
         (Result.is_error
-           (Project.save_document project ~path:"change.live.md"
-              ~source:original ~base_version:document.version
+           (Project.save_document project ~path:"change.ml.md" ~source:original
+              ~base_version:document.version
               ~base_project_version:snapshot.version ~principal:"test"
               ~validation))
         "stale project version was accepted";
-      let outside_path = Filename.temp_file "doclang-outside-" ".live.md" in
+      let outside_path = Filename.temp_file "dox-outside-" ".ml.md" in
       (match Util.write_file outside_path "# Outside\n" with
       | Ok () -> ()
       | Error message -> fail message);
-      Unix.symlink outside_path (Filename.concat directory "escape.live.md");
+      Unix.symlink outside_path (Filename.concat directory "escape.ml.md");
       expect
-        (Result.is_error (Project.read_document project "escape.live.md"))
+        (Result.is_error (Project.read_document project "escape.ml.md"))
         "symlink escaped the project boundary";
       expect
         (Result.is_error (Project.direct_page project "Escape"))
@@ -179,7 +179,7 @@ let () =
       | Error message -> fail message);
       (match
          Util.write_file
-           (Filename.concat directory "real/page.live.md")
+           (Filename.concat directory "real/page.ml.md")
            "# Symlinked parent\n"
        with
       | Ok () -> ()
@@ -189,7 +189,7 @@ let () =
         (Result.is_error (Project.direct_page project "Linked.Page"))
         "direct page read followed a symlinked parent directory";
       let replacement_outside =
-        Filename.temp_dir "doclang-direct-page-replacement-outside-" ""
+        Filename.temp_dir "dox-direct-page-replacement-outside-" ""
       in
       Fun.protect
         ~finally:(fun () -> remove_tree replacement_outside)
@@ -207,14 +207,14 @@ let () =
           | Error message -> fail message);
           (match
              Util.write_file
-               (Filename.concat parent "inner/page.live.md")
+               (Filename.concat parent "inner/page.ml.md")
                safe_source
            with
           | Ok () -> ()
           | Error message -> fail message);
           (match
              Util.write_file
-               (Filename.concat outside_parent "page.live.md")
+               (Filename.concat outside_parent "page.ml.md")
                outside_source
            with
           | Ok () -> ()
@@ -367,13 +367,13 @@ let () =
         "workers that exited during accept still consumed the worker cap";
       let recovery_before = "# Before recovery\n" in
       let recovery_after = "# After recovery\n" in
-      let recovery_path = Filename.concat directory "recovery.live.md" in
+      let recovery_path = Filename.concat directory "recovery.ml.md" in
       let recovery_directory =
-        Filename.concat directory ".doclang/transactions/recovery-test.files"
+        Filename.concat directory ".dox/transactions/recovery-test.files"
       in
       let recovery_quarantine = Filename.concat recovery_directory "document" in
       let recovery_intent =
-        Filename.concat directory ".doclang/transactions/recovery-test.json"
+        Filename.concat directory ".dox/transactions/recovery-test.json"
       in
       (match Util.write_file recovery_path recovery_before with
       | Ok () -> ()
@@ -388,7 +388,7 @@ let () =
               (`Assoc
                  [
                    ("kind", `String "page-save");
-                   ("path", `String "recovery.live.md");
+                   ("path", `String "recovery.ml.md");
                    ("beforeSource", `String recovery_before);
                    ("afterSource", `String recovery_after);
                    ("quarantine", `String recovery_quarantine);
@@ -409,14 +409,14 @@ let () =
         "direct page read did not recover an abandoned page transaction";
       (match
          Util.write_file
-           (Filename.concat directory "library.live.md")
+           (Filename.concat directory "library.ml.md")
            "```ocaml name=shared\nlet shared = 41\n```\n"
        with
       | Ok () -> ()
       | Error message -> fail message);
       (match
          Util.write_file
-           (Filename.concat directory "importer.live.md")
+           (Filename.concat directory "importer.ml.md")
            "```ocaml name=result\n\
             let answer = Library.shared + 1\n\
             let () = Doc.value ~id:\"result\" ~type_:\"int\" (string_of_int \
@@ -432,12 +432,12 @@ let () =
       in
       expect
         (Result.is_error
-           (Project.create_document project ~path:"./noncanonical.live.md"
+           (Project.create_document project ~path:"./noncanonical.ml.md"
               ~source:"# Invalid path\n"
               ~base_project_version:imported_snapshot.version ~principal:"test"))
         "non-canonical project path was accepted";
       let importer =
-        match Project.document imported_snapshot "importer.live.md" with
+        match Project.document imported_snapshot "importer.ml.md" with
         | Ok document -> document
         | Error error -> fail (Project.error_message error)
       in
@@ -448,7 +448,7 @@ let () =
       in
       expect
         (List.map (fun document -> document.Document.path) closure
-        = [ "library.live.md"; "importer.live.md" ])
+        = [ "library.ml.md"; "importer.ml.md" ])
         "multi-file dependency closure was not ordered";
       let imported_evaluation =
         Evaluator.evaluate_documents ~project_version:imported_snapshot.version
@@ -457,7 +457,7 @@ let () =
       expect imported_evaluation.ok "multi-file program did not evaluate";
       (match
          Util.write_file
-           (Filename.concat directory "failing.live.md")
+           (Filename.concat directory "failing.ml.md")
            "```ocaml name=main\n\
             let main () = ()\n\
             let () = failwith \"validation failure\"\n\
@@ -471,23 +471,23 @@ let () =
         | Error error -> fail (Project.error_message error)
       in
       let failing_document =
-        match Project.document failing_snapshot "failing.live.md" with
+        match Project.document failing_snapshot "failing.ml.md" with
         | Ok document -> document
         | Error error -> fail (Project.error_message error)
       in
       expect
         (Result.is_error
-           (Project.build_artifact project ~path:"failing.live.md" ~entry:"main"
+           (Project.build_artifact project ~path:"failing.ml.md" ~entry:"main"
               ~name:"must-not-publish"
               ~expected_project_version:failing_snapshot.version
               ~expected_document_version:failing_document.version
               ~principal:"test"))
         "artifact was published after failed validation";
       let publication_path =
-        Filename.concat directory "publication-race.live.md"
+        Filename.concat directory "publication-race.ml.md"
       in
       let quarantine_path =
-        Filename.concat directory ".doclang/test-publication-quarantine"
+        Filename.concat directory ".dox/test-publication-quarantine"
       in
       (match Util.write_file publication_path "external edit" with
       | Ok () -> ()

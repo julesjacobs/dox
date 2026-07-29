@@ -21,7 +21,7 @@
 #endif
 
 #ifndef O_NOFOLLOW
-#error "Doclang direct page reads require O_NOFOLLOW"
+#error "Dox direct page reads require O_NOFOLLOW"
 #endif
 
 static void close_if_open(int descriptor)
@@ -29,7 +29,7 @@ static void close_if_open(int descriptor)
   if (descriptor >= 0) close(descriptor);
 }
 
-CAMLprim value doclang_read_file_nofollow(value root_value, value path_value)
+CAMLprim value dox_read_file_nofollow(value root_value, value path_value)
 {
   CAMLparam2(root_value, path_value);
   CAMLlocal1(result);

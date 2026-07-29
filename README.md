@@ -1,6 +1,7 @@
-# Doclang
+# Dox
 
-Doclang is a working vertical slice of a live literate programming workspace.
+Dox (document OxCaml) is a working vertical slice of a live literate
+programming workspace.
 Markdown is the document language and OCaml is the inner language.
 
 It requires OCaml 5.1 or newer, Dune 3.15 or newer, Yojson 3, and Merlin 5.
@@ -12,16 +13,16 @@ opam install . --deps-only
 ## Start the workspace
 
 ```sh
-dune exec doclang -- serve
+dune exec dox -- serve
 ```
 
 Then open <http://127.0.0.1:8080>.
 
 The server uses the current directory as the project root and finds every file
-ending in `.live.md`. Use another project directory or port with:
+ending in `.ml.md`. Use another project directory or port with:
 
 ```sh
-dune exec doclang -- serve --root /path/to/project --port 9000
+dune exec dox -- serve --root /path/to/project --port 9000
 ```
 
 This checkout uses the project-local OxCaml compiler in
@@ -122,13 +123,13 @@ cannot read or mutate the workspace.
 Type-check and evaluate one document:
 
 ```sh
-dune exec doclang -- check examples/welcome.live.md
+dune exec dox -- check examples/welcome.ml.md
 ```
 
 Compile a `unit -> unit` entry value:
 
 ```sh
-dune exec doclang -- artifact examples/welcome.live.md main _artifacts/welcome
+dune exec dox -- artifact examples/welcome.ml.md main _artifacts/welcome
 ```
 
 The workspace Build control performs the same operation and records a manifest
@@ -162,7 +163,7 @@ Markdown and OCaml document. The generated bundle is included. After changing
 - Saves use a project lock, atomic source replacement, content-addressed source
   objects, and recoverable transaction intents.
 - Every saved edit creates an exact reconstructable change set in
-  `.doclang/changes.jsonl`.
+  `.dox/changes.jsonl`.
 - Directly edited definitions and transitively affected definitions are stored
   separately.
 - Change sets contain exact line diffs, changed document regions, validation

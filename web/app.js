@@ -6,7 +6,7 @@ import {
   setMarkdownEditorEvaluation,
   setMarkdownEditorResultInvalidation,
   replaceEditorStateDocument,
-} from "./editor.bundle.js?v=20260729f";
+} from "./editor.bundle.js?v=20260729g";
 
 const app = document.querySelector("#app");
 
@@ -57,7 +57,7 @@ const state = {
   evaluationController: null,
   sourceEditorView: null,
   sourceMode:
-    localStorage.getItem("doclang:v2:editor-mode") === "source"
+    localStorage.getItem("dox:v2:editor-mode") === "source"
       ? "source"
       : "literate",
   paneWidths: { sidebar: 220, inspector: 280 },
@@ -120,7 +120,7 @@ const escapeHtml = (value = "") =>
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 
-const recoveryKey = (modulePath) => `doclang:v2:draft:${modulePath}`;
+const recoveryKey = (modulePath) => `dox:v2:draft:${modulePath}`;
 
 function storeRecoveryDraft(session, source) {
   try {
@@ -145,7 +145,7 @@ function recoveredDraft(modulePath, expectedDigest) {
     if (!value) return null;
     if (value.expectedDigest === expectedDigest) return value;
     const conflictKey =
-      `doclang:v2:conflict:${modulePath}:${Date.now()}`;
+      `dox:v2:conflict:${modulePath}:${Date.now()}`;
     localStorage.setItem(conflictKey, raw);
     localStorage.removeItem(key);
     return { conflictKey };
@@ -189,7 +189,7 @@ async function api(url, options = {}) {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      ...(state.sessionToken ? { "X-Doclang-Token": state.sessionToken } : {}),
+      ...(state.sessionToken ? { "X-Dox-Token": state.sessionToken } : {}),
       ...(options.headers || {}),
     },
   });
@@ -237,7 +237,7 @@ function toast(message) {
 }
 
 function paneStorageKey() {
-  return `doclang:v2:pane-widths:${state.projectRoot || "default"}`;
+  return `dox:v2:pane-widths:${state.projectRoot || "default"}`;
 }
 
 function loadPaneWidths() {
@@ -971,7 +971,7 @@ function renderShell() {
       style="--sidebar-width: ${state.paneWidths.sidebar}px; --inspector-width: ${state.paneWidths.inspector}px"
     >
       <header class="topbar">
-        <div class="brand"><span class="brand-mark">D</span><span>Doclang</span></div>
+        <div class="brand"><span class="brand-mark">D</span><span>Dox</span></div>
         <div class="view-title">${escapeHtml(state.module || "")}</div>
         <div class="top-actions">
           <button class="button pane-toggle files-toggle" id="files-toggle" aria-label="Show project files">Files</button>
@@ -2109,7 +2109,7 @@ function mountOutlineEditor() {
 
 function renderMain() {
   if (!state.document) {
-    return `<div class="empty-state"><h2>The project has no live documents yet.</h2><p>Create a file ending in <code>.live.md</code>.</p></div>`;
+    return `<div class="empty-state"><h2>The project has no live documents yet.</h2><p>Create a file ending in <code>.ml.md</code>.</p></div>`;
   }
   return renderDocument();
 }
@@ -4110,7 +4110,7 @@ function bindPaneResizers() {
 
 function setSourceMode(mode) {
   state.sourceMode = mode;
-  localStorage.setItem("doclang:v2:editor-mode", mode);
+  localStorage.setItem("dox:v2:editor-mode", mode);
   setMarkdownEditorMode(state.sourceEditorView, mode);
   document
     .querySelector(".workspace")

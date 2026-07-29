@@ -1,7 +1,7 @@
 (lang dune 3.15)
-(name doclang)
+(name dox)
 
 (generate_opam_files false)
 
 (package
- (name doclang))
+ (name dox))

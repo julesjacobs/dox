@@ -2,28 +2,28 @@
 
 ## Goal
 
-Doclang pages are ordinary qualified OCaml modules. OCaml references are the
+Dox pages are ordinary qualified OCaml modules. OCaml references are the
 only dependency declaration. Dune owns incremental workspace compilation and
-dependency discovery. Doclang continues to own literate source mapping,
+dependency discovery. Dox continues to own literate source mapping,
 interactive evaluation, tracing, and editor request cancellation.
 
 ## Source and module model
 
-- Remove `doclang: imports` from the document model, JSON API, evaluator,
+- Remove `dox: imports` from the document model, JSON API, evaluator,
   refactorer, UI, examples, and tests.
-- Map `models/statistics.live.md` to the generated source
+- Map `models/statistics.ml.md` to the generated source
   `pages/models/statistics.ml`, and compile `pages` with Dune
   `include_subdirs qualified`. The source therefore has the ordinary OCaml
   identity `Models.Statistics`; no textual path rewriting or generated
   `open` is needed.
-- Generate `Doclang_prelude` beside the page sources.
-- Preserve `#line` directives so Dune diagnostics point to the `.live.md`
+- Generate `Dox_prelude` beside the page sources.
+- Preserve `#line` directives so Dune diagnostics point to the `.ml.md`
   source.
 
 ## Persistent build workspace
 
 Each project gets a generated workspace under
-`.doclang/dune-workspace/`. It contains:
+`.dox/dune-workspace/`. It contains:
 
 - `dune-project`;
 - `pages/dune` and generated page `.ml` files;
@@ -77,7 +77,7 @@ For a snapshot or unsaved draft:
 5. Return the graph and diagnostics produced from that request's synchronized
    source manifest.
 
-Doclang currently has one active editable page and autosaves inactive sessions.
+Dox currently has one active editable page and autosaves inactive sessions.
 The coordinator therefore serializes one global draft overlay at a time. It
 does not attempt to maintain several simultaneous generated overlays.
 
@@ -113,8 +113,8 @@ optimization and consistency improvement.
 - `pages/dune` uses `(include_subdirs qualified)`.
 - The page library uses `(wrapped false)` and `(modes byte)`, making
   `models/statistics.ml` exactly `Models.Statistics`.
-- `Doclang_prelude` is a separate support library. Generated page sources
-  explicitly `open Doclang_prelude`.
+- `Dox_prelude` is a separate support library. Generated page sources
+  explicitly `open Dox_prelude`.
 - The page index forbids a page module from being a strict prefix of another
   page module; Dune cannot represent both `Models` and `Models.Statistics` as
   pages.
@@ -123,7 +123,7 @@ optimization and consistency improvement.
   Compiler identity and Dune version are part of workspace invalidation.
 - Merlin continues to receive an unsaved target overlay and the same
   compiler-derived document closure. `#line` directives and the manifest map
-  diagnostics and type locations back to `.live.md`.
+  diagnostics and type locations back to `.ml.md`.
 
 ## Watcher lifecycle and recovery
 
@@ -142,9 +142,9 @@ optimization and consistency improvement.
   removes its socket, and exits so a replacement server can start.
 - The server closes coordinator descriptors in request children, tracks worker
   PIDs explicitly, and terminates the coordinator on orderly shutdown.
-- Generated source is disposable. Canonical `.live.md` files, save intents,
+- Generated source is disposable. Canonical `.ml.md` files, save intents,
   and refactor intents remain outside the generated workspace.
-- `.doclang/dune-workspace` stays ignored by Git.
+- `.dox/dune-workspace` stays ignored by Git.
 
 ## Validation
 

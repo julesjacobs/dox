@@ -30,7 +30,7 @@ parenthesized: `consume (@(produce ()))`.
 
 ## Compiler boundary
 
-Doclang uses a project-local OxCaml compiler pinned in `vendor/oxcaml`. The
+Dox uses a project-local OxCaml compiler pinned in `vendor/oxcaml`. The
 parser represents each marker as a private internal attribute on the unchanged
 OCaml expression or binding. Type checking therefore sees the original program:
 the marker does not introduce a helper call, thunk, dependency, or additional
@@ -39,7 +39,7 @@ value restriction.
 After type checking, `Translcore` wraps the typed Lambda expression with three
 non-allocating runtime primitives. The wrapper records entry, evaluates the
 expression exactly once, and records either its result or exception. Exception
-handling uses re-raise semantics so the original backtrace is retained. Doclang
+handling uses re-raise semantics so the original backtrace is retained. Dox
 does not replace the user's system compiler.
 
 The compiler keeps the marked source span on the generated expression. Runtime

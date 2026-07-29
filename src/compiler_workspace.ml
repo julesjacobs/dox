@@ -43,7 +43,7 @@ let generated_pages index =
         source_path = page.source_path;
         generated_path = generated_path page.module_path;
         source =
-          "open Doclang_prelude\n"
+          "open Dox_prelude\n"
           ^ Module_path.ancestor_open_source page.module_path
           ^ Document.compilation_source page.document
           ^ "\n"
@@ -55,7 +55,7 @@ let generated_aliases pages =
   let internal =
     Module_path.alias_units modules @ Module_path.scope_alias_units modules
     |> List.filter (fun (unit_name, _) ->
-        (not (String.equal unit_name "Doclang"))
+        (not (String.equal unit_name "Dox"))
         && not
              (List.exists
                 (fun module_path ->
@@ -115,7 +115,7 @@ let internal_violations modules =
                      "%s is below %s.Internal and cannot be used by %s."
                      entry.module_path owner user)))
 
-let workspace root = Filename.concat root ".doclang/dune-workspace"
+let workspace root = Filename.concat root ".dox/dune-workspace"
 let pages_directory root = Filename.concat (workspace root) "pages"
 let manifest_path root = Filename.concat (workspace root) "manifest.json"
 let watcher_log_path root = Filename.concat (workspace root) "watcher.log"
@@ -125,49 +125,49 @@ let watcher_identity_path root =
   Filename.concat (workspace root) "watcher-identity.json"
 
 let dune_project =
-  "(lang dune 3.12)\n(name doclang_workspace)\n(generate_opam_files false)\n"
+  "(lang dune 3.12)\n(name dox_workspace)\n(generate_opam_files false)\n"
 
 let pages_dune aliases =
   let scope_modules =
     aliases
     |> List.filter_map (fun (path, _) ->
         let base = Filename.basename path |> Filename.chop_extension in
-        if Util.starts_with ~prefix:"doclang_scope_for__" base then
+        if Util.starts_with ~prefix:"dox_scope_for__" base then
           Some (String.capitalize_ascii base)
         else None)
   in
   match scope_modules with
   | [] ->
       {|(library
- (name doclang_pages)
+ (name dox_pages)
  (wrapped false)
  (modes byte)
  (flags (:standard -w -33 -no-alias-deps))
- (libraries doclang_support))
+ (libraries dox_support))
 |}
   | _ ->
       let modules = String.concat " " scope_modules in
       Printf.sprintf
         {|(library
- (name doclang_scopes)
+ (name dox_scopes)
  (wrapped false)
  (modes byte)
  (modules %s)
  (flags (:standard -w -33-49 -no-alias-deps)))
 
 (library
- (name doclang_pages)
+ (name dox_pages)
  (wrapped false)
  (modes byte)
  (modules (:standard \ %s))
  (flags (:standard -w -33 -no-alias-deps))
- (libraries doclang_support doclang_scopes))
+ (libraries dox_support dox_scopes))
 |}
         modules modules
 
 let support_dune =
   {|(library
- (name doclang_support)
+ (name dox_support)
  (wrapped false)
  (modes byte))
 |}
@@ -200,7 +200,7 @@ let ensure_plain_directory path =
 
 let ensure_workspace_directories root =
   let open Result in
-  let metadata = Filename.concat root ".doclang" in
+  let metadata = Filename.concat root ".dox" in
   let directory = workspace root in
   let pages = pages_directory root in
   let support = Filename.concat directory "support" in
@@ -315,7 +315,7 @@ let sync root pages =
   in
   let* () =
     write_generated_file
-      (Filename.concat support "doclang_prelude.ml")
+      (Filename.concat support "dox_prelude.ml")
       Evaluator.prelude
   in
   let current_files =
@@ -531,16 +531,13 @@ let describe root pages =
           |> Option.map (fun page -> { page; cmt }))
     in
     if List.length described = List.length pages then Ok described
-    else Error "Dune did not describe every generated Doclang page."
+    else Error "Dune did not describe every generated Dox page."
 
 let manifest_description pages =
   pages
   |> List.map (fun page ->
       let cmt_name = Filename.chop_extension page.generated_path ^ ".cmt" in
-      {
-        page;
-        cmt = "_build/default/pages/.doclang_pages.objs/byte/" ^ cmt_name;
-      })
+      { page; cmt = "_build/default/pages/.dox_pages.objs/byte/" ^ cmt_name })
 
 let read_from path offset =
   try
@@ -555,7 +552,7 @@ let read_from path offset =
   with Sys_error _ -> ""
 
 let watcher_enabled root =
-  match Sys.getenv_opt "DOCLANG_DUNE_WATCH" with
+  match Sys.getenv_opt "DOX_DUNE_WATCH" with
   | Some watched -> String.equal watched (workspace root)
   | None -> false
 
@@ -687,7 +684,7 @@ let start_watcher ~root pages =
           record_identity (attempts - 1))
       in
       record_identity 20;
-      Unix.putenv "DOCLANG_DUNE_WATCH" (workspace root);
+      Unix.putenv "DOX_DUNE_WATCH" (workspace root);
       Ok pid
 
 let wait_for_watcher root =
@@ -1010,8 +1007,8 @@ let page_of_json ~root json =
   let* _ = Module_path.validate module_path in
   let expected_source_path = Module_path.source_path module_path in
   let expected_generated_path = generated_path module_path in
-  if Module_path.is_beneath ~namespace:"Doclang_prelude" module_path then
-    Error "Doclang_prelude is reserved for compiler support."
+  if Module_path.is_beneath ~namespace:"Dox_prelude" module_path then
+    Error "Dox_prelude is reserved for compiler support."
   else if not (String.equal source_path expected_source_path) then
     Error
       (Printf.sprintf "Invalid source path %S for %s." source_path module_path)
@@ -1081,7 +1078,7 @@ type coordinator = {
 
 let coordinator_socket root =
   Filename.concat "/tmp"
-    (Printf.sprintf "doclang-%d-%s.sock" (Unix.getuid ()) (Util.digest root))
+    (Printf.sprintf "dox-%d-%s.sock" (Unix.getuid ()) (Util.digest root))
 
 let connect socket_path =
   let socket = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
@@ -1348,7 +1345,7 @@ let coordinator_loop ~root ~listener ~owner ~ready initial_pages =
             let cancelled () = socket_closed socket || owner_closed owner in
             let analysis =
               try
-                Util.with_file_lock (Filename.concat root ".doclang/build.lock")
+                Util.with_file_lock (Filename.concat root ".dox/build.lock")
                   (fun () ->
                     if cancelled () then raise Evaluator.Cancelled;
                     match prepare pages with
@@ -1378,7 +1375,7 @@ let coordinator_loop ~root ~listener ~owner ~ready initial_pages =
       Option.iter stop_watcher !watcher)
     (fun () ->
       match
-        Util.with_file_lock (Filename.concat root ".doclang/build.lock") start
+        Util.with_file_lock (Filename.concat root ".dox/build.lock") start
       with
       | Ok () ->
           output_string ready "ready\n";
@@ -1394,7 +1391,7 @@ let start_coordinator ~root index =
   let pages = generated_pages index in
   let socket_path = coordinator_socket root in
   let* () = ensure_workspace_directories root in
-  Util.with_file_lock (Filename.concat root ".doclang/coordinator-start.lock")
+  Util.with_file_lock (Filename.concat root ".dox/coordinator-start.lock")
     (fun () ->
       let existing =
         if Sys.file_exists socket_path then (
@@ -1409,8 +1406,8 @@ let start_coordinator ~root index =
       in
       if existing then
         Error
-          "This project already has a live Doclang compiler coordinator. Stop \
-           the other server before starting another one."
+          "This project already has a live Dox compiler coordinator. Stop the \
+           other server before starting another one."
       else
         let listener = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
         let owns_socket = ref false in
@@ -1551,14 +1548,14 @@ let stop_coordinator coordinator =
         try Sys.remove coordinator.socket_path with Sys_error _ -> ())
 
 let analyze_unlocked index =
-  let root = Filename.temp_dir "doclang-dune-workspace-" "" in
+  let root = Filename.temp_dir "dox-dune-workspace-" "" in
   Fun.protect
     ~finally:(fun () ->
       try remove_tree root with Sys_error _ | Unix.Unix_error _ -> ())
     (fun () -> analyze_workspace ~root index)
 
 let analyze ?target ?(cancelled = fun () -> false) ~root ~version:_ index =
-  let metadata = Filename.concat root ".doclang" in
+  let metadata = Filename.concat root ".dox" in
   match Util.ensure_directory metadata with
   | Error message ->
       {

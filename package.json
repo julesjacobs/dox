@@ -1,5 +1,5 @@
 {
-  "name": "doclang-web",
+  "name": "dox-web",
   "private": true,
   "scripts": {
     "build:web": "esbuild web/editor-source.js --bundle --format=esm --minify --outfile=web/editor.bundle.js",

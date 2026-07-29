@@ -31,16 +31,16 @@ let outline_entry index path =
 
 let () =
   expect
-    (Module_path.of_source_path "models/statistics.live.md"
+    (Module_path.of_source_path "models/statistics.ml.md"
     = Ok "Models.Statistics")
     "source path did not decode to a qualified module";
   expect
     (String.equal
        (Module_path.source_path "Models.Statistics")
-       "models/statistics.live.md")
+       "models/statistics.ml.md")
     "qualified module did not encode reversibly";
   expect
-    (Module_path.of_source_path "httpServer/clientAPI.live.md"
+    (Module_path.of_source_path "httpServer/clientAPI.ml.md"
     = Ok "HttpServer.ClientAPI")
     "CamelCase module components did not encode reversibly";
   expect
@@ -50,25 +50,25 @@ let () =
     (Compiler_workspace.safe_generated_file "models/statistics.ml"
     && not
          (Compiler_workspace.safe_generated_file
-            "../../../../project-file.live.md"))
+            "../../../../project-file.ml.md"))
     "generated source cleanup accepted a path outside its workspace";
   expect
     (Result.is_error
        (Page_index.build
           [
-            Document.parse ~path:"doclang_prelude.live.md"
+            Document.parse ~path:"dox_prelude.ml.md"
               "# Reserved support module\n";
           ]))
-    "the generated Doclang_prelude module identity was not reserved";
+    "the generated Dox_prelude module identity was not reserved";
   let parent_pages =
     result
       (Page_index.build
          [
-           Document.parse ~path:"models.live.md" "# Models\n";
-           Document.parse ~path:"models/regression.live.md" "# Regression\n";
-           Document.parse ~path:"models/nested.live.md" "# Nested\n";
-           Document.parse ~path:"models/nested/child.live.md" "# Child\n";
-           Document.parse ~path:"solo.live.md" "# Solo\n";
+           Document.parse ~path:"models.ml.md" "# Models\n";
+           Document.parse ~path:"models/regression.ml.md" "# Regression\n";
+           Document.parse ~path:"models/nested.ml.md" "# Nested\n";
+           Document.parse ~path:"models/nested/child.ml.md" "# Child\n";
+           Document.parse ~path:"solo.ml.md" "# Solo\n";
          ])
   in
   let models = outline_entry parent_pages "Models" in
@@ -92,8 +92,8 @@ let () =
     result
       (Page_index.build
          [
-           Document.parse ~path:"models.live.md" "# Models\n";
-           Document.parse ~path:"models/index.live.md" "# Literal child\n";
+           Document.parse ~path:"models.ml.md" "# Models\n";
+           Document.parse ~path:"models/index.ml.md" "# Literal child\n";
          ])
   in
   let literal_index_child = outline_entry literal_index "Models.Index" in
@@ -103,8 +103,8 @@ let () =
     "the Index component retained special compatibility behavior";
   let no_index_documents =
     [
-      Document.parse ~path:"catalog/zeta.live.md" "# Zeta\n";
-      Document.parse ~path:"catalog/alpha.live.md" "# Alpha\n";
+      Document.parse ~path:"catalog/zeta.ml.md" "# Zeta\n";
+      Document.parse ~path:"catalog/alpha.ml.md" "# Alpha\n";
     ]
   in
   let no_index = result (Page_index.build no_index_documents) in
@@ -122,14 +122,13 @@ let () =
     result
       (Page_index.build
          [
-           Document.parse ~path:"archive.live.md" "# Archive\n";
-           Document.parse ~path:"archive/only.live.md" "# Only\n";
+           Document.parse ~path:"archive.ml.md" "# Archive\n";
+           Document.parse ~path:"archive/only.ml.md" "# Only\n";
          ])
   in
   let last_child_after =
     result
-      (Page_index.build
-         [ Document.parse ~path:"archive.live.md" "# Archive\n" ])
+      (Page_index.build [ Document.parse ~path:"archive.ml.md" "# Archive\n" ])
   in
   let archive_before = outline_entry last_child_before "Archive" in
   let archive_after = outline_entry last_child_after "Archive" in
@@ -145,7 +144,7 @@ let () =
       [
         {
           Compiler_workspace.module_path = "A.B.C";
-          source_path = "a/b/c.live.md";
+          source_path = "a/b/c.ml.md";
           generated_path = Compiler_workspace.generated_path "A.B.C";
           source = "";
         };
@@ -154,8 +153,7 @@ let () =
   expect
     (match deep_description with
     | [ entry ] ->
-        Util.ends_with ~suffix:"/doclang__A__B__C.cmt"
-          entry.Compiler_workspace.cmt
+        Util.ends_with ~suffix:"/dox__A__B__C.cmt" entry.Compiler_workspace.cmt
     | _ -> false)
     "the passive Dune target for a deep qualified module was incorrect";
   expect
@@ -169,26 +167,25 @@ let () =
        ]
     <> [])
     "an Internal namespace boundary violation was accepted";
-  let unsafe_root = Filename.temp_dir "doclang-workspace-symlink-test-" "" in
-  let outside = Filename.temp_dir "doclang-workspace-outside-test-" "" in
+  let unsafe_root = Filename.temp_dir "dox-workspace-symlink-test-" "" in
+  let outside = Filename.temp_dir "dox-workspace-outside-test-" "" in
   Fun.protect
     ~finally:(fun () ->
       remove_tree unsafe_root;
       remove_tree outside)
     (fun () ->
-      write unsafe_root "a/b.live.md" "# Unsafe\n\n    let value = 1\n";
+      write unsafe_root "a/b.ml.md" "# Unsafe\n\n    let value = 1\n";
       result
         (Util.ensure_directory
-           (Filename.concat unsafe_root ".doclang/dune-workspace/pages"));
+           (Filename.concat unsafe_root ".dox/dune-workspace/pages"));
       Unix.symlink outside
-        (Filename.concat unsafe_root
-           ".doclang/dune-workspace/pages/doclang__A__B.ml");
+        (Filename.concat unsafe_root ".dox/dune-workspace/pages/dox__A__B.ml");
       let page =
         {
           Compiler_workspace.module_path = "A.B";
-          source_path = "a/b.live.md";
+          source_path = "a/b.ml.md";
           generated_path = Compiler_workspace.generated_path "A.B";
-          source = "open Doclang_prelude\nlet value = 1\n";
+          source = "open Dox_prelude\nlet value = 1\n";
         }
       in
       expect
@@ -197,13 +194,11 @@ let () =
       expect
         (Array.length (Sys.readdir outside) = 0)
         "compiler source generation wrote outside its workspace");
-  let concurrent_root =
-    Filename.temp_dir "doclang-workspace-concurrent-test-" ""
-  in
+  let concurrent_root = Filename.temp_dir "dox-workspace-concurrent-test-" "" in
   Fun.protect
     ~finally:(fun () -> remove_tree concurrent_root)
     (fun () ->
-      write concurrent_root "index.live.md"
+      write concurrent_root "index.ml.md"
         "# Concurrent start\n\n    let value = 1\n";
       let concurrent_project = Project.create concurrent_root in
       let concurrent_snapshot =
@@ -260,15 +255,15 @@ let () =
         (fun pid ->
           try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ())
         contenders);
-  let directory = Filename.temp_dir "doclang-workspace-test-" "" in
+  let directory = Filename.temp_dir "dox-workspace-test-" "" in
   Fun.protect
     ~finally:(fun () -> remove_tree directory)
     (fun () ->
-      write directory "models.live.md"
+      write directory "models.ml.md"
         "# Models\n\n    let description = \"Statistical models\"\n";
-      write directory "models/statistics.live.md"
+      write directory "models/statistics.ml.md"
         "# Statistics\n\n    let mean values = List.length values\n";
-      write directory "reports/forecast.live.md"
+      write directory "reports/forecast.ml.md"
         "# Forecast\n\n\
          See [[Models.Statistics]]. Models.Statistics in ordinary prose stays \
          literal.\n\n\
@@ -310,9 +305,9 @@ let () =
       in
       expect qualified_evaluation.ok
         "qualified page modules did not compile and evaluate";
-      write directory "models/section.live.md"
+      write directory "models/section.ml.md"
         "# Section\n\n    let parent_result = Statistics.mean [1; 2]\n";
-      write directory "models/section/consumer.live.md"
+      write directory "models/section/consumer.ml.md"
         "# Consumer\n\n    let child_result = Statistics.mean [1; 2; 3]\n";
       let nested_namespace_snapshot =
         project_result (Project.snapshot project)
@@ -353,9 +348,9 @@ let () =
         ^ " ("
         ^ String.concat "; " nested_analysis.diagnostics
         ^ ")");
-      Sys.remove (Filename.concat directory "models/section/consumer.live.md");
-      Sys.remove (Filename.concat directory "models/section.live.md");
-      write directory "reports/shadow.live.md"
+      Sys.remove (Filename.concat directory "models/section/consumer.ml.md");
+      Sys.remove (Filename.concat directory "models/section.ml.md");
+      write directory "reports/shadow.ml.md"
         "# Shadow\n\n\
         \    module Models = struct\n\
         \      module Statistics = struct\n\
@@ -382,7 +377,7 @@ let () =
       expect
         (shadow_evaluation.ok && String.equal shadow_evaluation.stdout "99\n")
         "a local module did not shadow the workspace namespace";
-      write directory "reports/declaration_order.live.md"
+      write directory "reports/declaration_order.ml.md"
         "# Declaration order\n\n\
         \    let before_shadow = Models.Statistics.mean [1; 2]\n\
         \    module Models = struct end\n";
@@ -409,7 +404,7 @@ let () =
       in
       expect declaration_order_evaluation.ok
         "a reference before a local module declaration did not compile";
-      write directory "reports/nested_shadow.live.md"
+      write directory "reports/nested_shadow.ml.md"
         "# Nested shadow\n\n\
         \    module X = struct\n\
         \      module Models = struct end\n\
@@ -431,7 +426,7 @@ let () =
       in
       expect nested_shadow_evaluation.ok
         "a nested local module hid a later workspace dependency";
-      write directory "broken.live.md"
+      write directory "broken.ml.md"
         "# Broken\n\n    let this_does_not_parse =\n";
       let partially_broken_snapshot =
         project_result (Project.snapshot project)
@@ -456,8 +451,8 @@ let () =
             (List.map
                (fun diagnostic -> diagnostic.Evaluator.message)
                nested_shadow_with_broken_page.diagnostics));
-      Sys.remove (Filename.concat directory "broken.live.md");
-      write directory "reports/opened.live.md"
+      Sys.remove (Filename.concat directory "broken.ml.md");
+      write directory "reports/opened.ml.md"
         "# Opened\n\n\
         \    open Models\n\
         \    let opened_result = Statistics.mean [1; 2]\n";
@@ -478,7 +473,7 @@ let () =
       in
       expect opened_evaluation.ok
         "open Models did not resolve the qualified workspace namespace";
-      Sys.remove (Filename.concat directory "reports/opened.live.md");
+      Sys.remove (Filename.concat directory "reports/opened.ml.md");
       let compiler_graph =
         Compiler_workspace.analyze ~root:directory ~version:snapshot.version
           snapshot.page_index
@@ -505,7 +500,7 @@ let () =
       let statistics =
         project_result (Project.page snapshot "Models.Statistics")
       in
-      write directory "notes.live.md" "# Notes\n";
+      write directory "notes.ml.md" "# Notes\n";
       let changed_source = statistics.source ^ "\nA prose-only autosave.\n" in
       let _, saved_snapshot, acknowledged =
         project_result
@@ -523,7 +518,7 @@ let () =
              ~base_project_version:saved_snapshot.version ~principal:"test")
       in
       expect
-        (String.equal created.path "models/linear.live.md")
+        (String.equal created.path "models/linear.ml.md")
         "nested module creation used the wrong source path";
       let batch_created, batch_snapshot =
         project_result
@@ -532,7 +527,7 @@ let () =
       in
       expect
         (List.map (fun document -> document.Document.path) batch_created
-         = [ "batch.live.md"; "batch/child.live.md" ]
+         = [ "batch.ml.md"; "batch/child.ml.md" ]
         && Option.is_some (Page_index.find batch_snapshot.page_index "Batch")
         && Option.is_some
              (Page_index.find batch_snapshot.page_index "Batch.Child"))
@@ -542,8 +537,7 @@ let () =
            (Project.create_pages project
               ~module_paths:[ "Batch.New"; "Models.Linear" ]
               ~base_project_version:batch_snapshot.version ~principal:"test")
-        && not (Sys.file_exists (Filename.concat directory "batch/new.live.md"))
-        )
+        && not (Sys.file_exists (Filename.concat directory "batch/new.ml.md")))
         "a conflicting batch creation published only part of the batch";
       let renames =
         [
@@ -567,7 +561,7 @@ let () =
       expect
         (not
            (Sys.file_exists
-              (Filename.concat directory "models/statistics.live.md")))
+              (Filename.concat directory "models/statistics.ml.md")))
         "module refactor left the old source path behind";
       let forecast =
         project_result (Project.page renamed_snapshot "Reports.Forecast")
@@ -599,8 +593,8 @@ let () =
            true
          with Not_found -> false)
         "module refactor rewrote prose, comments, or string literals";
-      write directory "alpha.live.md" "# Alpha\n\n    let alpha = 1\n";
-      write directory "bravo.live.md" "# Bravo\n\n    let bravo = 2\n";
+      write directory "alpha.ml.md" "# Alpha\n\n    let alpha = 1\n";
+      write directory "bravo.ml.md" "# Bravo\n\n    let bravo = 2\n";
       let swap_snapshot = project_result (Project.snapshot project) in
       let swap =
         [
@@ -636,9 +630,8 @@ let () =
            true
          with Not_found -> false)
         "a swap refactor clobbered the second module";
-      write directory "manual.live.md"
-        "# Manual\n\n    let title = \"Manual\"\n";
-      write directory "manual/start.live.md"
+      write directory "manual.ml.md" "# Manual\n\n    let title = \"Manual\"\n";
+      write directory "manual/start.ml.md"
         "# Start\n\n    let summary = \"Start\"\n";
       let parent_snapshot = project_result (Project.snapshot project) in
       let parent_renames =
@@ -673,10 +666,9 @@ let () =
         "# Start\n\n    let introduction = \"Start\"\n"
       in
       let handbook_advanced_source = "# Advanced\n\n    let level = 2\n" in
-      write directory "handbook.live.md" handbook_source;
-      write directory "handbook/start.live.md" handbook_start_source;
-      write directory "handbook/topics/advanced.live.md"
-        handbook_advanced_source;
+      write directory "handbook.ml.md" handbook_source;
+      write directory "handbook/start.ml.md" handbook_start_source;
+      write directory "handbook/topics/advanced.ml.md" handbook_advanced_source;
       let reparent_snapshot = project_result (Project.snapshot project) in
       let reparent_renames =
         [
@@ -740,7 +732,7 @@ let () =
         && String.equal reparented_start.source handbook_start_source
         && String.equal reparented_advanced.source handbook_advanced_source)
         "namespace reparent did not preserve page contents";
-      write directory "bad-name.live.md" "# Needs migration\n";
+      write directory "bad-name.ml.md" "# Needs migration\n";
       let migration_snapshot = project_result (Project.snapshot project) in
       expect
         (migration_snapshot.page_index.diagnostics <> [])
@@ -749,7 +741,7 @@ let () =
         (Option.is_some
            (Page_index.find migration_snapshot.page_index "Analysis.Statistics"))
         "an invalid existing path made valid pages unavailable";
-      write directory "a/b/c.live.md" "# Deep page\n\n    let value = 1\n";
+      write directory "a/b/c.ml.md" "# Deep page\n\n    let value = 1\n";
       let passive_snapshot = project_result (Project.snapshot project) in
       let coordinator =
         result
@@ -772,7 +764,7 @@ let () =
             Compiler_workspace.generated_pages passive_snapshot.page_index
             |> List.map (fun (page : Compiler_workspace.generated_page) ->
                 if String.equal page.module_path "A.B.C" then
-                  { page with source = "open Doclang_prelude\nlet value =\n" }
+                  { page with source = "open Dox_prelude\nlet value =\n" }
                 else page)
           in
           let children =
@@ -826,7 +818,7 @@ let () =
             `Assoc
               [
                 ("module", `String "A.B.C");
-                ("sourcePath", `String "a/b/c.live.md");
+                ("sourcePath", `String "a/b/c.ml.md");
                 ("generatedPath", `String "../../outside.ml");
                 ("source", `String "let value = 2\n");
               ]

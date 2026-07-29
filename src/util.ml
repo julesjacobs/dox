@@ -28,7 +28,7 @@ let write_file_atomic path contents =
   try
     let temporary, channel =
       Filename.open_temp_file ~temp_dir:directory
-        ("." ^ basename ^ ".doclang-")
+        ("." ^ basename ^ ".dox-")
         ".tmp"
     in
     (try
@@ -52,7 +52,7 @@ let write_file_atomic_if_absent path contents =
   try
     let temporary, channel =
       Filename.open_temp_file ~temp_dir:directory
-        ("." ^ basename ^ ".doclang-")
+        ("." ^ basename ^ ".dox-")
         ".tmp"
     in
     try
@@ -202,7 +202,7 @@ let timestamp () =
 let list_files root =
   let ignored_directories =
     [
-      ".doclang";
+      ".dox";
       ".git";
       ".opam";
       "_build";

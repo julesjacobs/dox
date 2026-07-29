@@ -84,7 +84,7 @@ Module identity already maps deterministically to a source path. Add a direct
 read operation that:
 
 1. Validates the module path.
-2. Derives its canonical `.live.md` path.
+2. Derives its canonical `.ml.md` path.
 3. Takes the existing project lock for validation, open, and read using a
    cancel-aware nonblocking retry loop. It checks the HTTP disconnect callback
    before each retry and immediately after acquisition.
@@ -190,8 +190,8 @@ Models                 opens Models
   Statistics           opens Models.Statistics
 ```
 
-The canonical files are `models.live.md`, `models/regression.live.md`, and
-`models/statistics.live.md`. The page, URL, link target, and OCaml module use
+The canonical files are `models.ml.md`, `models/regression.ml.md`, and
+`models/statistics.ml.md`. The page, URL, link target, and OCaml module use
 the same identity. `Index` has no special meaning.
 
 The page-index outline entry gains:

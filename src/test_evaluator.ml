@@ -26,7 +26,7 @@ let () =
      let () = Doc.text ~id:\"output\" \"structured\"\n\
      ```\n"
   in
-  let document = Document.parse ~path:"runtime.live.md" source in
+  let document = Document.parse ~path:"runtime.ml.md" source in
   let evaluation = Evaluator.evaluate document in
   expect evaluation.ok "valid document did not evaluate";
   expect
@@ -36,13 +36,13 @@ let () =
     (match evaluation.block_outputs with
     | [ output ] ->
         output.block_id = "code-output"
-        && output.path = "runtime.live.md"
+        && output.path = "runtime.ml.md"
         && output.stdout = "first\n\nsecond\n"
         && output.stderr = ""
     | _ -> false)
     "ordinary stdout was not attributed to its code block";
   let two_blocks =
-    Document.parse ~path:"two-blocks.live.md"
+    Document.parse ~path:"two-blocks.ml.md"
       "    let () = print_endline \"first\"\n\n\
        Between.\n\n\
       \    let () = print_endline \"second\"\n"
@@ -56,7 +56,7 @@ let () =
     | _ -> false)
     "separate code blocks did not retain separate stdout";
   let live_scope =
-    Document.parse ~path:"inline.live.md"
+    Document.parse ~path:"inline.ml.md"
       "# Inline values\n\n\
       \    let base = 40\n\n\
        Between blocks.\n\n\
@@ -73,7 +73,7 @@ let () =
     | _ -> false)
     "an inline OCaml expression did not produce its value";
   let nested_inline_observation =
-    Document.parse ~path:"nested-inline.live.md" "Nested: `@(1) + 2 =`.\n"
+    Document.parse ~path:"nested-inline.ml.md" "Nested: `@(1) + 2 =`.\n"
     |> Evaluator.evaluate
   in
   expect
@@ -82,7 +82,7 @@ let () =
     | _ -> false)
     "a nested observation replaced the enclosing inline result";
   let isolated_inline_failure =
-    Document.parse ~path:"inline-failure.live.md"
+    Document.parse ~path:"inline-failure.ml.md"
       "    let base = 3\n\n\
        Raised: `failwith \"boom\" =`.\n\
        Later: `base + 2 =`.\n"
@@ -99,11 +99,11 @@ let () =
   expect
     (List.for_all
        (fun (event : Evaluator.trace_event) ->
-         not (Util.starts_with ~prefix:"<doclang-inline:" event.path))
+         not (Util.starts_with ~prefix:"<dox-inline:" event.path))
        isolated_inline_failure.traces)
     "synthetic inline observations leaked into the execution trace";
   let invalid_inline =
-    Document.parse ~path:"invalid-inline.live.md"
+    Document.parse ~path:"invalid-inline.ml.md"
       "    let base = 3\n\nInvalid: `base + \"x\" =`.\n"
     |> Evaluator.evaluate
   in
@@ -116,7 +116,7 @@ let () =
   expect
     (List.exists
        (fun (diagnostic : Evaluator.diagnostic) ->
-         diagnostic.path = Some "invalid-inline.live.md"
+         diagnostic.path = Some "invalid-inline.ml.md"
          && diagnostic.line = Some 3)
        invalid_inline.diagnostics)
     "an inline compiler error was not mapped back to the Markdown span";
@@ -127,7 +127,7 @@ let () =
     | _ -> false)
     "structured runtime event was not captured";
   let invalid =
-    Document.parse ~path:"invalid.live.md"
+    Document.parse ~path:"invalid.ml.md"
       "```ocaml\nlet answer : string = 42\n```\n"
     |> Evaluator.evaluate
   in
@@ -138,7 +138,7 @@ let () =
        invalid.diagnostics)
     "compiler diagnostic did not preserve the literate source line";
   let oversized_view =
-    Document.parse ~path:"oversized.live.md"
+    Document.parse ~path:"oversized.ml.md"
       "```ocaml\n\
        let () = Doc.text ~id:\"large\" (String.make 2100000 'x')\n\
        ```\n"
@@ -148,7 +148,7 @@ let () =
     (String.equal oversized_view.status "output-limited")
     "structured runtime output escaped the output cap";
   let typed_document =
-    Document.parse ~path:"types.live.md"
+    Document.parse ~path:"types.ml.md"
       "# Types\n\n\
       \    let observations = [ 3.; 5. ]\n\
       \    let mean values = List.length values\n\
@@ -204,11 +204,11 @@ let () =
     | Error _ -> false)
     "Merlin completions did not expand module paths";
   let imported_document =
-    Document.parse ~path:"examples/library.live.md"
+    Document.parse ~path:"examples/library.ml.md"
       "# Library\n\n    let @imported_values = [ 1.; 2. ]\n"
   in
   let importing_document =
-    Document.parse ~path:"examples/consumer.live.md"
+    Document.parse ~path:"examples/consumer.ml.md"
       "# Consumer\n\n\
       \    let imported_count = List.length Library.imported_values\n"
   in
@@ -238,11 +238,11 @@ let () =
     | Error _ -> false)
     "Merlin completions did not include imported live definitions";
   let definition_document =
-    Document.parse ~path:"library.live.md"
+    Document.parse ~path:"library.ml.md"
       "# Library\n\n    let add_one value =\n      value + 1\n"
   in
   let definition_consumer =
-    Document.parse ~path:"consumer.live.md"
+    Document.parse ~path:"consumer.ml.md"
       "# Consumer\n\n    let result = Library.add_one 4\n"
   in
   let located_definition =
@@ -261,7 +261,7 @@ let () =
     | _ -> false)
     "Merlin definition lookup did not map an imported value back to its page";
   let unicode_document =
-    Document.parse ~path:"unicode.live.md"
+    Document.parse ~path:"unicode.ml.md"
       "# Unicode\n\n    let unicode_value = (\"é😀\", 42)\n"
   in
   let unicode_type =
@@ -277,7 +277,7 @@ let () =
     | _ -> false)
     "Merlin cursor positions did not preserve CodeMirror UTF-16 columns";
   let spanning_document =
-    Document.parse ~path:"spanning.live.md"
+    Document.parse ~path:"spanning.ml.md"
       "# Spanning\n\n\
       \    let spanning = if true then\n\
        This prose is not part of the OCaml program.\n\
@@ -295,7 +295,7 @@ let () =
     | _ -> false)
     "Merlin expression text included literate prose between code regions";
   let observed_document =
-    Document.parse ~path:"observed.live.md"
+    Document.parse ~path:"observed.ml.md"
       "# Observations\n\n\
       \    let rec @fib n =\n\
       \      if n < 2 then n else @(fib (n - 1)) + fib (n - 2)\n\n\
@@ -314,7 +314,7 @@ let () =
       \    let @count = length [1; 2; 3]\n"
   in
   let erased_observations =
-    Observation.erase ~path:"observed.live.md" ~start_line:1
+    Observation.erase ~path:"observed.ml.md" ~start_line:1
       "let rec @fib n = @(fib (n - 1))\n\
        let appended = [1] @ ([2])\n\
        let literal = \"@(not syntax)\"\n"
@@ -450,7 +450,7 @@ let () =
   expect (returned "nothing" "None") "an option preview was not typed";
   expect (returned "done_" "()") "a unit preview was not typed";
   let exception_document =
-    Document.parse ~path:"exception.live.md"
+    Document.parse ~path:"exception.ml.md"
       "# Exceptions\n\n\
       \    let @caught =\n\
       \      try @(raise (Failure \"boom\")) with Failure _ -> 7\n"

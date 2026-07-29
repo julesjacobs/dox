@@ -1,14 +1,14 @@
 (library
- (name doclang_native)
+ (name dox_native)
  (wrapped false)
- (modules doclang_native)
+ (modules dox_native)
  (foreign_stubs
   (language c)
-  (names doclang_openat)))
+  (names dox_openat)))
 
 (executable
  (name main)
- (public_name doclang)
+ (public_name dox)
  (modules
   util
   module_path
@@ -22,7 +22,7 @@
   project
   server
   main)
- (libraries unix str yojson doclang_native))
+ (libraries unix str yojson dox_native))
 
 (test
  (name test_document)
@@ -44,7 +44,7 @@
   compiler_workspace
   project
   server)
- (libraries unix str yojson doclang_native))
+ (libraries unix str yojson dox_native))
 
 (test
  (name test_evaluator)
@@ -65,4 +65,4 @@
   evaluator
   compiler_workspace
   project)
- (libraries unix str yojson doclang_native))
+ (libraries unix str yojson dox_native))

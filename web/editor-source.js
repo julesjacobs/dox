@@ -1980,7 +1980,7 @@ export function mountModuleOutlineEditor(
     }),
     parent,
   });
-  view.doclangOutlineExtensions = extensions;
+  view.doxOutlineExtensions = extensions;
   view.dispatch({
     effects: setOutlineConfig.of({
       activeModule,
@@ -2016,7 +2016,7 @@ export function updateModuleOutlineEditor(
       EditorState.create({
         doc,
         selection: { anchor: maxSelection },
-        extensions: view.doclangOutlineExtensions,
+        extensions: view.doxOutlineExtensions,
       }),
     );
     view.dispatch({

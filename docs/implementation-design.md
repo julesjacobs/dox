@@ -1,4 +1,4 @@
-# Doclang implementation design
+# Dox implementation design
 
 This document fixes the concrete model used by the current implementation. The
 high-level design remains the product specification. These choices are intended
@@ -6,7 +6,7 @@ to keep the implementation coherent while larger features are added.
 
 ## 1. Durable source
 
-A live document is a UTF-8 file ending in `.live.md`.
+A live document is a UTF-8 file ending in `.ml.md`.
 
 - Markdown is durable prose.
 - Fenced `ocaml` regions are executable.
@@ -148,7 +148,7 @@ for the selected project.
 - Active routes require an unguessable session credential.
 - Host and Origin must identify the same loopback workspace.
 - Request lines, headers, and bodies have size limits.
-- Document routes accept only registered `.live.md` regular files.
+- Document routes accept only registered `.ml.md` regular files.
 - Canonical paths must remain inside the project or asset root.
 - Directory scans do not follow symbolic links.
 

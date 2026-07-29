@@ -1,11 +1,11 @@
 opam-version: "2.0"
 synopsis: "A live literate OCaml workspace"
 description: """
-Doclang combines Markdown documents, ordinary OCaml compilation units, live
+Dox combines Markdown documents, ordinary OCaml compilation units, live
 runtime views, versioned project snapshots, and reviewable change sets.
 """
-maintainer: "Doclang contributors"
-authors: "Doclang contributors"
+maintainer: "Dox contributors"
+authors: "Dox contributors"
 license: "MIT"
 depends: [
   "ocaml" {>= "5.1"}

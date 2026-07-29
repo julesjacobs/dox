@@ -134,12 +134,12 @@ let run_process ?cwd ?stdin ?(environment = []) ?(extra_output_paths = [])
     ?(cancelled = fun () -> false) program arguments =
   if cancelled () then raise Cancelled;
   let profile_started = Unix.gettimeofday () in
-  let stdout_path = Filename.temp_file "doclang-stdout-" ".txt" in
-  let stderr_path = Filename.temp_file "doclang-stderr-" ".txt" in
+  let stdout_path = Filename.temp_file "dox-stdout-" ".txt" in
+  let stderr_path = Filename.temp_file "dox-stderr-" ".txt" in
   let stdin_path =
     Option.map
       (fun contents ->
-        let path = Filename.temp_file "doclang-stdin-" ".txt" in
+        let path = Filename.temp_file "dox-stdin-" ".txt" in
         let channel = open_out_bin path in
         Fun.protect
           ~finally:(fun () -> close_out_noerr channel)
@@ -234,9 +234,9 @@ let run_process ?cwd ?stdin ?(environment = []) ?(extra_output_paths = [])
     let stderr = read_file_prefix stderr_path output_limit in
     cleanup_files ();
     let result = { status; stdout; stderr; timed_out; output_limited } in
-    if Option.is_some (Sys.getenv_opt "DOCLANG_PROFILE") then
+    if Option.is_some (Sys.getenv_opt "DOX_PROFILE") then
       prerr_endline
-        ("DOCLANG_PROFILE "
+        ("DOX_PROFILE "
         ^ Yojson.Safe.to_string
             (`Assoc
                [
@@ -1069,7 +1069,7 @@ let compiler_identity () = Lazy.force compiler_identity_value
 
 let artifact_builder_identity () =
   Util.digest
-    ("doclang-artifact-v2\000" ^ compiler_identity () ^ "\000unix.cma\000"
+    ("dox-artifact-v2\000" ^ compiler_identity () ^ "\000unix.cma\000"
    ^ artifact_prelude)
 
 let remove_temp_directory directory =
@@ -1189,7 +1189,7 @@ type inline_marker = {
 }
 
 let block_marker evaluation_id index phase =
-  Printf.sprintf "\030DOCLANG:%s:%d:%c\031" evaluation_id index phase
+  Printf.sprintf "\030DOX:%s:%d:%c\031" evaluation_id index phase
 
 let instrumented_compilation_source evaluation_id documents target =
   let next_index = ref 0 in
@@ -1218,9 +1218,9 @@ let instrumented_compilation_source evaluation_id documents target =
                   # 1 %S\n\
                   let () = flush stdout; output_string stdout %S; flush \
                   stdout; flush stderr; output_string stderr %S; flush stderr\n"
-                 "<doclang-block-boundary>" start_marker start_marker
-                 source_line document.path source "<doclang-block-boundary>"
-                 end_marker end_marker)
+                 "<dox-block-boundary>" start_marker start_marker source_line
+                 document.path source "<dox-block-boundary>" end_marker
+                 end_marker)
         | _ -> None)
     in
     let inline_sources =
@@ -1229,7 +1229,7 @@ let instrumented_compilation_source evaluation_id documents target =
           let index = !next_inline_index in
           incr next_inline_index;
           let virtual_path =
-            Printf.sprintf "<doclang-inline:%s:%d>" evaluation_id index
+            Printf.sprintf "<dox-inline:%s:%d>" evaluation_id index
           in
           inline_markers :=
             { virtual_path; document_path = document.path; inline_expression }
@@ -1238,8 +1238,8 @@ let instrumented_compilation_source evaluation_id documents target =
             virtual_path inline_expression.expression)
     in
     ( document,
-      "open Doclang_prelude\n"
-      ^ String.concat "\n" (block_sources @ inline_sources) )
+      "open Dox_prelude\n" ^ String.concat "\n" (block_sources @ inline_sources)
+    )
   in
   ignore target;
   let sources = List.map document_source documents in
@@ -1250,7 +1250,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
   let unit_name document =
     match Module_path.of_source_path document.Document.path with
     | Ok module_path -> Module_path.compiler_unit module_path
-    | Error _ -> "Doclang__Page_" ^ Util.digest document.path
+    | Error _ -> "Dox__Page_" ^ Util.digest document.path
   in
   let modules =
     sources
@@ -1296,7 +1296,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
   let write_result =
     Result.bind
       (Util.write_file
-         (Filename.concat directory "doclang_prelude.ml")
+         (Filename.concat directory "dox_prelude.ml")
          prelude_source)
       (fun () ->
         Result.bind
@@ -1320,7 +1320,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
   | Error message ->
       Error (diagnostic ~stage:"prepare" ~severity:"error" message)
   | Ok () -> (
-      let prelude_result = compile [ "-c"; "doclang_prelude.ml" ] in
+      let prelude_result = compile [ "-c"; "dox_prelude.ml" ] in
       if not (successful prelude_result.status) then
         Error (process_failure ~stage:"compile" prelude_result)
       else
@@ -1357,7 +1357,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
                                  directory;
                                  "-no-alias-deps";
                                  "-open";
-                                 "Doclang";
+                                 "Dox";
                                  "-c";
                                  Filename.basename path;
                                ]
@@ -1389,8 +1389,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
                   |> Option.get
                 in
                 let signature =
-                  compile
-                    [ "-I"; directory; "-open"; "Doclang"; "-i"; target_path ]
+                  compile [ "-I"; directory; "-open"; "Dox"; "-i"; target_path ]
                 in
                 if not (successful signature.status) then
                   Error (process_failure ~stage:"compile" signature)
@@ -1424,7 +1423,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
                                   "-I";
                                   directory;
                                   "-open";
-                                  "Doclang";
+                                  "Dox";
                                   "-c";
                                   "driver.ml";
                                 ]
@@ -1442,7 +1441,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
                              "-I";
                              directory;
                              "unix.cma";
-                             "doclang_prelude.cmo";
+                             "dox_prelude.cmo";
                            ]
                           @ objects @ driver @ [ "-o"; executable ])
                       in
@@ -1458,7 +1457,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
                             |> String.concat "\n" ))))
 
 let split_block_output evaluation_id markers output =
-  let marker_prefix = Printf.sprintf "\030DOCLANG:%s:" evaluation_id in
+  let marker_prefix = Printf.sprintf "\030DOX:%s:" evaluation_id in
   let marker_re =
     Str.regexp
       (Str.quote marker_prefix ^ "\\([0-9]+\\):\\([SE]\\)" ^ Str.quote "\031")
@@ -1632,7 +1631,7 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
   let evaluation_id =
     Util.random_token () |> fun token -> String.sub token 0 24
   in
-  let directory = Filename.temp_dir "doclang-eval-" "" in
+  let directory = Filename.temp_dir "dox-eval-" "" in
   let event_path = Filename.concat directory "events" in
   let document_sources, block_markers, inline_markers =
     instrumented_compilation_source evaluation_id documents target
@@ -1867,7 +1866,7 @@ let build_artifact_documents ~documents ~entry ~output =
   let directory = Filename.dirname output in
   let source_path = output ^ ".ml" in
   let source_for (document : Document.t) =
-    "open Doclang_prelude\n" ^ Document.compilation_source document
+    "open Dox_prelude\n" ^ Document.compilation_source document
   in
   match Util.ensure_directory directory with
   | Error message -> Error message
@@ -1909,8 +1908,7 @@ let build_artifact_documents ~documents ~entry ~output =
                            with
                           | Ok module_path ->
                               Module_path.compiler_unit module_path
-                          | Error _ ->
-                              "Doclang__Page_" ^ Util.digest target.path)
+                          | Error _ -> "Dox__Page_" ^ Util.digest target.path)
                           entry
                       in
                       Result.map

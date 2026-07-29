@@ -209,7 +209,7 @@ let same_origin context headers =
 let authorized context headers =
   same_origin context headers
   &&
-  match header headers "x-doclang-token" with
+  match header headers "x-dox-token" with
   | Some token -> String.equal token context.session_token
   | None -> false
 
@@ -459,9 +459,9 @@ let refactor_rewrite_response body =
 let evaluate_response context ~cancelled body =
   let open Util in
   let profile phase started =
-    if Option.is_some (Sys.getenv_opt "DOCLANG_PROFILE") then
+    if Option.is_some (Sys.getenv_opt "DOX_PROFILE") then
       prerr_endline
-        ("DOCLANG_PROFILE "
+        ("DOX_PROFILE "
         ^ Yojson.Safe.to_string
             (`Assoc
                [
@@ -951,7 +951,7 @@ let serve ~root ~assets ~port =
       raise error
   in
   Sys.set_signal Sys.sigchld Sys.Signal_default;
-  Printf.printf "Doclang is running at http://127.0.0.1:%d\n%!" port;
+  Printf.printf "Dox is running at http://127.0.0.1:%d\n%!" port;
   Printf.printf "Project: %s\n%!" project.root;
   let max_workers = 16 in
   let workers_ref = ref [] in

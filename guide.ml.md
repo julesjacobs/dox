@@ -1,6 +1,6 @@
-# Doclang guide
+# Dox guide
 
-Doclang is a live Markdown workspace with OCaml embedded directly in each page. Pages are also OCaml modules: the page path shown in the module outline is the module path used by other pages.
+Dox (document OxCaml) is a live Markdown workspace with OCaml embedded directly in each page. Pages are also OCaml modules: the page path shown in the module outline is the module path used by other pages.
 
 ## Writing
 
