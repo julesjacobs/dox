@@ -1647,7 +1647,7 @@ const outlineTheme = EditorView.theme({
   "&": {
     height: "100%",
     backgroundColor: "transparent",
-    color: colors.ink,
+    color: "#dce7e1",
     fontSize: "13px",
   },
   "&.cm-focused": { outline: "none" },
@@ -1657,45 +1657,67 @@ const outlineTheme = EditorView.theme({
     lineHeight: "1.65",
   },
   ".cm-content": {
-    padding: "4px 2px 28px",
-    caretColor: colors.green,
+    padding: "4px 0 28px",
+    caretColor: "#91c7b5",
     whiteSpace: "pre",
   },
   ".cm-line": {
     position: "relative",
-    borderRadius: "5px",
-    padding: "0 6px",
+    padding: "0 10px 0 6px",
   },
   ".cm-activeLine": {
     backgroundColor: "transparent",
   },
+  ".cm-line:not(.cm-outline-active):hover": {
+    borderRadius: "6px 0 0 6px",
+    backgroundColor: "rgba(255, 255, 255, 0.05)",
+  },
   "&.cm-focused .cm-activeLine": {
-    backgroundColor: "rgba(19, 95, 75, 0.07)",
+    backgroundColor: "rgba(255, 255, 255, 0.07)",
   },
   ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
-    backgroundColor: "rgba(19, 95, 75, 0.14)",
+    backgroundColor: "rgba(145, 199, 181, 0.24)",
   },
   ".cm-outline-active": {
-    color: "#0a3e31",
-    boxShadow: "inset 3px 0 0 #36816c",
+    zIndex: "1",
+    borderRadius: "7px 0 0 7px",
+    backgroundColor: "var(--paper)",
+    color: "#14221d",
   },
-  ".cm-outline-namespace": {
-    color: "#68746e",
+  "&.cm-focused .cm-activeLine.cm-outline-active": {
+    backgroundColor: "var(--paper)",
   },
-  ".cm-outline-pending": {
-    backgroundColor: "rgba(104, 116, 110, 0.09)",
-  },
-  ".cm-outline-pending-visible::after": {
+  ".cm-outline-active::before, .cm-outline-active::after": {
     content: '""',
     position: "absolute",
-    top: "50%",
-    right: "7px",
-    width: "5px",
-    height: "5px",
-    marginTop: "-2.5px",
-    borderRadius: "50%",
-    backgroundColor: "#87908a",
-    animation: "doclang-outline-pulse 900ms ease-in-out infinite alternate",
+    right: "0",
+    width: "12px",
+    height: "12px",
+    pointerEvents: "none",
+  },
+  ".cm-outline-active::before": {
+    top: "-12px",
+    borderBottomRightRadius: "12px",
+    boxShadow: "4px 4px 0 4px var(--paper)",
+  },
+  ".cm-outline-active::after": {
+    bottom: "-12px",
+    borderTopRightRadius: "12px",
+    boxShadow: "4px -4px 0 4px var(--paper)",
+  },
+  ".cm-outline-namespace": {
+    color: "#91a29a",
+  },
+  ".cm-outline-active.cm-outline-namespace": {
+    color: "#31433b",
+  },
+  ".cm-outline-pending": {
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+  },
+  ".cm-outline-pending-visible": {
+    backgroundImage: "radial-gradient(circle, #91a29a 0 2px, transparent 2.5px)",
+    backgroundPosition: "right 7px center",
+    backgroundRepeat: "no-repeat",
   },
   ".cm-outline-invalid": {
     textDecoration: "underline wavy #a94436",
