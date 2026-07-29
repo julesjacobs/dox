@@ -237,6 +237,29 @@ let () =
           entries
     | Error _ -> false)
     "Merlin completions did not include imported live definitions";
+  let definition_document =
+    Document.parse ~path:"library.live.md"
+      "# Library\n\n    let add_one value =\n      value + 1\n"
+  in
+  let definition_consumer =
+    Document.parse ~path:"consumer.live.md"
+      "# Consumer\n\n    let result = Library.add_one 4\n"
+  in
+  let located_definition =
+    Evaluator.definition_at_with_cancel
+      ~cancelled:(fun () -> false)
+      ~documents:[ definition_document; definition_consumer ]
+      ~target:definition_consumer ~line:3 ~column:29
+  in
+  expect
+    (match located_definition with
+    | Ok (Some info) ->
+        String.equal info.module_path "Library"
+        && String.equal info.name "add_one"
+        && info.line = 3
+        && String.equal info.source "let add_one value =\n  value + 1"
+    | _ -> false)
+    "Merlin definition lookup did not map an imported value back to its page";
   let unicode_document =
     Document.parse ~path:"unicode.live.md"
       "# Unicode\n\n    let unicode_value = (\"é😀\", 42)\n"

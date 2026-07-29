@@ -555,6 +555,51 @@ let type_at_response context ~cancelled body =
                                ~some:Evaluator.type_info_to_json info );
                          ]))))
 
+let definition_at_response context ~cancelled body =
+  let open Util in
+  let parsed =
+    let* request = json_body body in
+    let* path = string_member "path" request in
+    let* source = string_member "source" request in
+    let* line = int_member "line" request in
+    let* column = int_member "column" request in
+    let* base_project_version = string_member "baseProjectVersion" request in
+    if line < 1 || column < 0 then Error "Invalid cursor position."
+    else Ok (path, source, line, column, base_project_version)
+  in
+  match parsed with
+  | Error message -> error message
+  | Ok (path, source, line, column, base_project_version) -> (
+      match Project.snapshot context.project with
+      | Error project_error_ -> project_error project_error_
+      | Ok snapshot -> (
+          if not (String.equal snapshot.version base_project_version) then
+            error ~status:409
+              "The project changed; reopen the document before locating \
+               definitions."
+          else
+            let target = Document.parse ~path source in
+            match
+              Project.resolve_documents ~cancelled context.project snapshot
+                target
+            with
+            | Error project_error_ -> project_error project_error_
+            | Ok documents -> (
+                match
+                  Evaluator.definition_at_with_cancel ~cancelled ~documents
+                    ~target ~line ~column
+                with
+                | Error message -> error ~status:503 message
+                | Ok info ->
+                    json
+                      (`Assoc
+                         [
+                           ( "definition",
+                             Option.fold ~none:`Null
+                               ~some:Evaluator.definition_info_to_json info );
+                           ("projectVersion", `String snapshot.version);
+                         ]))))
+
 let complete_response context ~cancelled body =
   let open Util in
   let parsed =
@@ -773,6 +818,9 @@ let route context ~cancelled method_ target headers body =
   | "POST", "/api/type-at" ->
       require_active_request context headers (fun () ->
           type_at_response context ~cancelled body)
+  | "POST", "/api/definition-at" ->
+      require_active_request context headers (fun () ->
+          definition_at_response context ~cancelled body)
   | "POST", "/api/complete" ->
       require_active_request context headers (fun () ->
           complete_response context ~cancelled body)

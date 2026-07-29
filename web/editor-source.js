@@ -45,6 +45,24 @@ const colors = {
   plum: "#87546c",
 };
 
+const setEditorMode = StateEffect.define();
+
+const editorModeField = StateField.define({
+  create() {
+    return "literate";
+  },
+  update(value, transaction) {
+    for (const effect of transaction.effects) {
+      if (effect.is(setEditorMode)) value = effect.value;
+    }
+    return value;
+  },
+  provide: (field) =>
+    EditorView.editorAttributes.from(field, (mode) => ({
+      class: mode === "source" ? "cm-raw-source" : "cm-literate-source",
+    })),
+});
+
 const embeddedTheme = EditorView.theme({
   "&": {
     backgroundColor: "transparent",
@@ -86,6 +104,17 @@ const embeddedTheme = EditorView.theme({
     borderBottom: "1px solid rgba(167, 67, 52, 0.7)",
     backgroundColor: "rgba(167, 67, 52, 0.08)",
     color: "#8f3f35",
+  },
+  "&.cm-raw-source": {
+    fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
+    fontSize: "13px",
+    lineHeight: "1.62",
+  },
+  "&.cm-raw-source .cm-content": {
+    padding: "18px 22px 60px",
+  },
+  "&.cm-raw-source .cm-block-results, &.cm-raw-source .cm-inline-result": {
+    display: "none",
   },
   ".cm-md-heading": {
     position: "relative",
@@ -619,6 +648,9 @@ class HeadingDraftAnchor extends WidgetType {
 }
 
 function markdownDecorations(view) {
+  if (view.state.field(editorModeField) === "source") {
+    return Decoration.none;
+  }
   const decorations = [];
   const wikiConfig = view.state.field(wikiConfigField);
   let parserState = null;
@@ -873,7 +905,10 @@ const markdownPresentation = ViewPlugin.fromClass(
         update.selectionSet ||
         update.focusChanged ||
         update.transactions.some((transaction) =>
-          transaction.effects.some((effect) => effect.is(setWikiConfig)),
+          transaction.effects.some(
+            (effect) =>
+              effect.is(setWikiConfig) || effect.is(setEditorMode),
+          ),
         )
       ) {
         this.decorations = markdownDecorations(update.view);
@@ -1432,6 +1467,8 @@ function mountEditor(
     onStateChange,
     onSelectionChange,
     onCompletionKey,
+    onDefinitionRequest,
+    sourceMode = "literate",
     wikiModules = [],
     onWikiNavigate,
   },
@@ -1439,10 +1476,13 @@ function mountEditor(
   if (editorState) {
     const view = new EditorView({ state: editorState, parent });
     view.dispatch({
-      effects: setWikiConfig.of({
-        modules: new Set(wikiModules),
-        onNavigate: onWikiNavigate,
-      }),
+      effects: [
+        setWikiConfig.of({
+          modules: new Set(wikiModules),
+          onNavigate: onWikiNavigate,
+        }),
+        setEditorMode.of(sourceMode),
+      ],
     });
     return view;
   }
@@ -1457,6 +1497,7 @@ function mountEditor(
     indentUnit.of("    "),
     blockResultsField,
     wikiConfigField,
+    editorModeField,
     Prec.highest(keymap.of([
       ...closeBracketsKeymap,
       {
@@ -1464,6 +1505,28 @@ function mountEditor(
         run: () => {
           onSave();
           return true;
+        },
+      },
+      {
+        key: "F12",
+        run: (view) => {
+          if (!onDefinitionRequest) return false;
+          return (
+            onDefinitionRequest(
+              view.state.selection.main.head,
+              "navigate",
+            ) !== false
+          );
+        },
+      },
+      {
+        key: "Alt-F12",
+        run: (view) => {
+          if (!onDefinitionRequest) return false;
+          return (
+            onDefinitionRequest(view.state.selection.main.head, "peek") !==
+            false
+          );
         },
       },
       {
@@ -1515,10 +1578,19 @@ function mountEditor(
       mousedown: (event, view) => {
         if (!(event.metaKey || event.ctrlKey)) return false;
         const link = event.target.closest?.("[data-wiki-module]");
-        if (!link || !view.dom.contains(link)) return false;
-        view.state
-          .field(wikiConfigField)
-          .onNavigate?.(link.dataset.wikiModule);
+        if (link && view.dom.contains(link)) {
+          view.state
+            .field(wikiConfigField)
+            .onNavigate?.(link.dataset.wikiModule);
+          event.preventDefault();
+          return true;
+        }
+        const position = view.posAtCoords({
+          x: event.clientX,
+          y: event.clientY,
+        });
+        if (position === null || !onDefinitionRequest) return false;
+        if (!onDefinitionRequest(position, "navigate")) return false;
         event.preventDefault();
         return true;
       },
@@ -1537,10 +1609,13 @@ function mountEditor(
     parent,
   });
   view.dispatch({
-    effects: setWikiConfig.of({
-      modules: new Set(wikiModules),
-      onNavigate: onWikiNavigate,
-    }),
+    effects: [
+      setWikiConfig.of({
+        modules: new Set(wikiModules),
+        onNavigate: onWikiNavigate,
+      }),
+      setEditorMode.of(sourceMode),
+    ],
   });
   return view;
 }
@@ -1548,6 +1623,11 @@ function mountEditor(
 export function mountMarkdownEditor(parent, options) {
   parent.classList.add("cm-literate-editor");
   return mountEditor(parent, options);
+}
+
+export function setMarkdownEditorMode(view, mode) {
+  if (!view || view.state.field(editorModeField) === mode) return;
+  view.dispatch({ effects: setEditorMode.of(mode) });
 }
 
 export function replaceEditorStateDocument(editorState, source) {

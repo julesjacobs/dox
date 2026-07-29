@@ -2,14 +2,24 @@ import {
   mountMarkdownEditor,
   mountModuleOutlineEditor,
   updateModuleOutlineEditor,
+  setMarkdownEditorMode,
   setMarkdownEditorEvaluation,
   setMarkdownEditorResultInvalidation,
   replaceEditorStateDocument,
-} from "./editor.bundle.js?v=20260729b";
+} from "./editor.bundle.js?v=20260729d";
 
 const app = document.querySelector("#app");
 
+function storedJson(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(key)) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 const state = {
+  projectRoot: null,
   project: null,
   projectVersion: null,
   projectRequestEpoch: 0,
@@ -46,9 +56,18 @@ const state = {
   requestController: null,
   evaluationController: null,
   sourceEditorView: null,
+  sourceMode:
+    localStorage.getItem("doclang:v2:editor-mode") === "source"
+      ? "source"
+      : "literate",
+  paneWidths: { sidebar: 220, inspector: 280 },
   showBuild: false,
   typeInfo: null,
   cursorPosition: null,
+  definitionInfo: null,
+  definitionGeneration: 0,
+  definitionController: null,
+  definitionTimer: null,
   completion: null,
   completionCache: new Map(),
   completionGeneration: 0,
@@ -217,10 +236,28 @@ function toast(message) {
   state.toastTimer = setTimeout(() => element.remove(), 3000);
 }
 
+function paneStorageKey() {
+  return `doclang:v2:pane-widths:${state.projectRoot || "default"}`;
+}
+
+function loadPaneWidths() {
+  const stored = storedJson(paneStorageKey(), {});
+  state.paneWidths = {
+    sidebar: Number.isFinite(stored.sidebar) ? stored.sidebar : 220,
+    inspector: Number.isFinite(stored.inspector) ? stored.inspector : 280,
+  };
+}
+
+function savePaneWidths() {
+  localStorage.setItem(paneStorageKey(), JSON.stringify(state.paneWidths));
+}
+
 async function initialize() {
   try {
     const session = await api("/api/session");
     state.sessionToken = session.token;
+    state.projectRoot = session.projectRoot;
+    loadPaneWidths();
     const project = await refreshProjectIndex({ forceOutline: true });
     const routeModule = decodeURIComponent(
       window.location.pathname.match(/^\/page\/(.+)$/)?.[1] || "",
@@ -388,6 +425,15 @@ function invalidateTypeLookup() {
   state.typeController = null;
   state.typeInfo = null;
   state.cursorPosition = null;
+  invalidateDefinitionLookup();
+}
+
+function invalidateDefinitionLookup() {
+  clearTimeout(state.definitionTimer);
+  state.definitionGeneration += 1;
+  state.definitionController?.abort();
+  state.definitionController = null;
+  state.definitionInfo = null;
 }
 
 function invalidateCompletion({ clearCache = false } = {}) {
@@ -920,18 +966,24 @@ function evaluationStatus() {
 function renderShell() {
   const existingSidebar = app.querySelector(".sidebar");
   app.innerHTML = `
-    <div class="workspace ${state.view === "document" ? "document-context" : ""}">
+    <div
+      class="workspace ${state.view === "document" ? "document-context" : ""} ${state.sourceMode === "source" ? "source-context" : ""}"
+      style="--sidebar-width: ${state.paneWidths.sidebar}px; --inspector-width: ${state.paneWidths.inspector}px"
+    >
       <header class="topbar">
         <div class="brand"><span class="brand-mark">D</span><span>Doclang</span></div>
         <div class="view-title">${escapeHtml(state.module || "")}</div>
         <div class="top-actions">
           <button class="button pane-toggle files-toggle" id="files-toggle" aria-label="Show project files">Files</button>
+          <button class="button secondary-action ${state.sourceMode === "source" ? "active" : ""}" id="source-mode-button" aria-pressed="${state.sourceMode === "source"}">${state.sourceMode === "source" ? "Document" : "Source"}</button>
           <button class="button" id="artifact-button" ${!state.document ? "disabled" : ""}>Build</button>
         </div>
       </header>
       <div class="body-grid">
         <aside class="sidebar">${renderSidebar()}</aside>
+        <div class="pane-resizer pane-resizer-left" data-pane-resizer="sidebar" role="separator" aria-label="Resize module pane" aria-orientation="vertical" tabindex="0"></div>
         <main class="main" id="main-pane">${renderMain()}</main>
+        <div class="pane-resizer pane-resizer-right" data-pane-resizer="inspector" role="separator" aria-label="Resize context pane" aria-orientation="vertical" tabindex="0"></div>
         <aside class="inspector">${renderInspector()}</aside>
       </div>
       ${
@@ -2087,8 +2139,8 @@ function renderView(view) {
 
 function renderDocument() {
   return `
-    <article class="document-shell">
-      <div class="literate-document-editor" data-document-editor aria-label="Editable Markdown and OCaml document"></div>
+    <article class="document-shell ${state.sourceMode === "source" ? "source-mode" : ""}">
+      <div class="literate-document-editor" data-document-editor aria-label="${state.sourceMode === "source" ? "Raw Markdown source editor" : "Editable Markdown and OCaml document"}"></div>
     </article>`;
 }
 
@@ -2399,6 +2451,24 @@ function renderDependencyContext() {
   </section>`;
 }
 
+function renderDefinitionPeek() {
+  const definition = state.definitionInfo;
+  if (!definition) return "";
+  const qualifiedName =
+    definition.module && !definition.name.startsWith(`${definition.module}.`)
+      ? `${definition.module}.${definition.name}`
+      : definition.name;
+  return `<section class="definition-peek">
+    <button type="button" data-definition-peek aria-label="Open ${escapeHtml(qualifiedName)}">
+      <span class="definition-peek-label">Definition</span>
+      <strong>${escapeHtml(qualifiedName)}</strong>
+      <span class="definition-peek-location">${escapeHtml(definition.path)} · line ${definition.line}</span>
+      <pre><code>${escapeHtml(definition.source)}</code>${definition.truncated ? '<span class="definition-peek-more">…</span>' : ""}</pre>
+      <span class="definition-peek-action">Open · F12</span>
+    </button>
+  </section>`;
+}
+
 function renderInspector() {
   if (!state.document || state.view !== "document") return "";
   const diagnostics = (state.evaluation?.diagnostics || []).filter(
@@ -2425,6 +2495,7 @@ function renderInspector() {
           </section>`
         : ""
     }
+    ${renderDefinitionPeek()}
     ${renderTraceFocus(traceTree, selectedTrace, typeInfo)}
     ${
       traceTree.roots.length
@@ -2450,6 +2521,7 @@ function renderInspector() {
     }
     ${
       !typeInfo &&
+      !state.definitionInfo &&
       !diagnostics.length &&
       !state.showBuild &&
       !traceTree.roots.length
@@ -2906,6 +2978,140 @@ function scheduleTypeLookup(editor, position) {
     state.typePending = request;
     startTypeLookup();
   }, 100);
+}
+
+function definitionRequestAt(editor, position) {
+  if (!editor || !state.document) return null;
+  const line = editor.state.doc.lineAt(position);
+  const block = state.document.blocks.find(
+    (item) =>
+      item.kind === "ocaml" &&
+      line.number >= item.lineStart &&
+      line.number <= item.lineEnd,
+  );
+  if (!block) return null;
+  const column = position - line.from;
+  const identifier = /[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*/g;
+  let match;
+  while ((match = identifier.exec(line.text))) {
+    if (column >= match.index && column <= match.index + match[0].length) {
+      return {
+        path: state.path,
+        source: state.document.source,
+        line: line.number,
+        column,
+        projectVersion: state.projectVersion,
+        token: match[0],
+      };
+    }
+  }
+  return null;
+}
+
+async function openDefinition(definition) {
+  if (!definition) return false;
+  if (
+    definition.module !== state.module &&
+    !(await loadDocument(definition.module, {
+      history: "push",
+      focus: "main",
+    }))
+  ) {
+    return false;
+  }
+  state.definitionInfo = definition;
+  refreshInspector();
+  const editor = state.sourceEditorView;
+  if (!editor) return false;
+  const line = editor.state.doc.line(
+    Math.min(Math.max(definition.line, 1), editor.state.doc.lines),
+  );
+  const anchor =
+    line.from + Math.min(Math.max(definition.column, 0), line.length);
+  state.suppressNextCompletionLookup = true;
+  editor.dispatch({
+    selection: {
+      anchor,
+      head: Math.min(line.to, anchor + definition.name.length),
+    },
+    scrollIntoView: true,
+  });
+  editor.focus();
+  return true;
+}
+
+async function performDefinitionLookup(request, mode, generation) {
+  const controller = new AbortController();
+  state.definitionController?.abort();
+  state.definitionController = controller;
+  try {
+    const payload = await api("/api/definition-at", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify({
+        path: request.path,
+        source: request.source,
+        line: request.line,
+        column: request.column,
+        baseProjectVersion: request.projectVersion,
+      }),
+    });
+    if (
+      generation !== state.definitionGeneration ||
+      request.path !== state.path ||
+      request.source !== state.document?.source
+    ) {
+      return false;
+    }
+    state.definitionInfo = payload.definition;
+    refreshInspector();
+    if (mode === "navigate" && payload.definition) {
+      return openDefinition(payload.definition);
+    }
+    return Boolean(payload.definition);
+  } catch (error) {
+    if (
+      error.name !== "AbortError" &&
+      generation === state.definitionGeneration
+    ) {
+      state.definitionInfo = null;
+      refreshInspector();
+    }
+    return false;
+  } finally {
+    if (state.definitionController === controller) {
+      state.definitionController = null;
+    }
+  }
+}
+
+function requestDefinition(editor, position, mode = "peek") {
+  clearTimeout(state.definitionTimer);
+  const request = definitionRequestAt(editor, position);
+  const generation = ++state.definitionGeneration;
+  state.definitionController?.abort();
+  state.definitionController = null;
+  if (!request) {
+    state.definitionInfo = null;
+    refreshInspector();
+    return false;
+  }
+  void performDefinitionLookup(request, mode, generation);
+  return true;
+}
+
+function scheduleDefinitionLookup(editor, position) {
+  clearTimeout(state.definitionTimer);
+  const request = definitionRequestAt(editor, position);
+  const generation = ++state.definitionGeneration;
+  state.definitionController?.abort();
+  state.definitionController = null;
+  state.definitionInfo = null;
+  if (!request) return;
+  state.definitionTimer = setTimeout(() => {
+    if (generation !== state.definitionGeneration) return;
+    void performDefinitionLookup(request, "peek", generation);
+  }, 120);
 }
 
 function completionContextAt(editor, position, { allowEmpty = false } = {}) {
@@ -3562,6 +3768,9 @@ function mountEmbeddedEditors() {
         });
       },
       onSave: save,
+      sourceMode: state.sourceMode,
+      onDefinitionRequest: (position, mode) =>
+        requestDefinition(state.sourceEditorView, position, mode),
       onStateChange: (editorState) => {
         const active = currentSession();
         if (active) active.editorState = editorState;
@@ -3590,6 +3799,7 @@ function mountEmbeddedEditors() {
           scheduleCompletion(state.sourceEditorView, position);
         }
         scheduleTypeLookup(state.sourceEditorView, position);
+        scheduleDefinitionLookup(state.sourceEditorView, position);
       },
       onBlur: () => {
         if (
@@ -3768,6 +3978,9 @@ async function openTrace(trace) {
 }
 
 function bindInspectorEvents() {
+  document
+    .querySelector("[data-definition-peek]")
+    ?.addEventListener("click", () => openDefinition(state.definitionInfo));
   document.querySelectorAll("[data-module-link]").forEach((button) => {
     button.addEventListener("click", () =>
       loadDocument(button.dataset.moduleLink, {
@@ -3818,8 +4031,111 @@ function bindInspectorEvents() {
   applySourceTraceHover();
 }
 
+function paneWidthLimits(pane) {
+  const viewport = window.innerWidth;
+  const other =
+    pane === "sidebar"
+      ? state.paneWidths.inspector
+      : state.paneWidths.sidebar;
+  return pane === "sidebar"
+    ? { minimum: 160, maximum: Math.max(160, Math.min(420, viewport - other - 410)) }
+    : { minimum: 220, maximum: Math.max(220, Math.min(520, viewport - other - 410)) };
+}
+
+function setPaneWidth(pane, width, { persist = false } = {}) {
+  const limits = paneWidthLimits(pane);
+  const next = Math.round(
+    Math.min(limits.maximum, Math.max(limits.minimum, width)),
+  );
+  state.paneWidths[pane] = next;
+  document
+    .querySelector(".workspace")
+    ?.style.setProperty(`--${pane}-width`, `${next}px`);
+  const separator = document.querySelector(
+    `[data-pane-resizer="${pane}"]`,
+  );
+  separator?.setAttribute("aria-valuemin", String(limits.minimum));
+  separator?.setAttribute("aria-valuemax", String(limits.maximum));
+  separator?.setAttribute("aria-valuenow", String(next));
+  if (persist) savePaneWidths();
+}
+
+function bindPaneResizers() {
+  document.querySelectorAll("[data-pane-resizer]").forEach((separator) => {
+    const pane = separator.dataset.paneResizer;
+    setPaneWidth(pane, state.paneWidths[pane]);
+    separator.addEventListener("pointerdown", (event) => {
+      if (window.matchMedia("(max-width: 1000px)").matches) return;
+      const startX = event.clientX;
+      const startWidth = state.paneWidths[pane];
+      separator.setPointerCapture(event.pointerId);
+      document.body.classList.add("resizing-panes");
+      const move = (moveEvent) => {
+        const delta = moveEvent.clientX - startX;
+        setPaneWidth(
+          pane,
+          startWidth + (pane === "sidebar" ? delta : -delta),
+        );
+      };
+      const finish = () => {
+        separator.removeEventListener("pointermove", move);
+        separator.removeEventListener("pointerup", finish);
+        separator.removeEventListener("pointercancel", finish);
+        document.body.classList.remove("resizing-panes");
+        savePaneWidths();
+      };
+      separator.addEventListener("pointermove", move);
+      separator.addEventListener("pointerup", finish);
+      separator.addEventListener("pointercancel", finish);
+      event.preventDefault();
+    });
+    separator.addEventListener("dblclick", () => {
+      setPaneWidth(pane, pane === "sidebar" ? 220 : 280, {
+        persist: true,
+      });
+    });
+    separator.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      const direction = event.key === "ArrowRight" ? 1 : -1;
+      const delta = direction * (event.shiftKey ? 32 : 12);
+      setPaneWidth(
+        pane,
+        state.paneWidths[pane] + (pane === "sidebar" ? delta : -delta),
+        { persist: true },
+      );
+      event.preventDefault();
+    });
+  });
+}
+
+function setSourceMode(mode) {
+  state.sourceMode = mode;
+  localStorage.setItem("doclang:v2:editor-mode", mode);
+  setMarkdownEditorMode(state.sourceEditorView, mode);
+  document
+    .querySelector(".workspace")
+    ?.classList.toggle("source-context", mode === "source");
+  document
+    .querySelector(".document-shell")
+    ?.classList.toggle("source-mode", mode === "source");
+  const editor = document.querySelector("[data-document-editor]");
+  editor?.setAttribute(
+    "aria-label",
+    mode === "source"
+      ? "Raw Markdown source editor"
+      : "Editable Markdown and OCaml document",
+  );
+  const button = document.querySelector("#source-mode-button");
+  if (button) {
+    button.textContent = mode === "source" ? "Document" : "Source";
+    button.classList.toggle("active", mode === "source");
+    button.setAttribute("aria-pressed", String(mode === "source"));
+  }
+}
+
 function bindEvents() {
   mountOutlineEditor();
+  bindPaneResizers();
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => {
       state.view = button.dataset.view;
@@ -3855,6 +4171,11 @@ function bindEvents() {
     });
   });
   document.querySelector("#save-button")?.addEventListener("click", save);
+  document
+    .querySelector("#source-mode-button")
+    ?.addEventListener("click", () =>
+      setSourceMode(state.sourceMode === "source" ? "literate" : "source"),
+    );
   document.querySelector("#artifact-button")?.addEventListener("click", () => {
     state.showBuild = !state.showBuild;
     refreshInspector();

@@ -57,6 +57,17 @@ type type_info = {
   end_column : int;
 }
 
+type definition_info = {
+  name : string;
+  kind : string;
+  module_path : string;
+  path : string;
+  line : int;
+  column : int;
+  source : string;
+  truncated : bool;
+}
+
 type completion_entry = {
   name : string;
   kind : string;
@@ -445,7 +456,7 @@ let source_column_of_merlin document line column =
   let source = compiler_source_line document line in
   source_indentation document line + utf16_column_of_utf8_byte source column
 
-let normalize_trace_event documents event =
+let normalize_trace_event documents (event : trace_event) =
   match
     List.find_opt
       (fun document -> String.equal document.Document.path event.path)
@@ -597,37 +608,57 @@ let rec namespace_alias_source entries =
             (namespace_alias_source nested))
   |> String.concat "\n"
 
+type merlin_document_segment = {
+  document : Document.t;
+  source : string;
+  content_line_offset : int;
+}
+
+let merlin_wrapped_document module_paths document =
+  let module_path =
+    Result.to_option (Module_path.of_source_path document.Document.path)
+  in
+  let aliases =
+    module_paths
+    |> List.filter (fun candidate ->
+        not (Option.equal String.equal module_path (Some candidate)))
+    |> List.map (fun candidate -> (Module_path.split candidate, candidate))
+    |> namespace_alias_source
+  in
+  let content = merlin_target_source document in
+  match module_path with
+  | Some module_path ->
+      let prefix =
+        Printf.sprintf "module %s = struct\n\n%s\n"
+          (Module_path.compiler_unit module_path)
+          aliases
+      in
+      {
+        document;
+        source = prefix ^ content ^ "\nend\n";
+        content_line_offset = newline_count prefix;
+      }
+  | None -> { document; source = content; content_line_offset = 0 }
+
 let merlin_source ~documents ~target =
   let module_paths =
     documents
     |> List.filter_map (fun (document : Document.t) ->
         Result.to_option (Module_path.of_source_path document.path))
   in
-  let wrapped document =
-    let module_path =
-      Result.to_option (Module_path.of_source_path document.Document.path)
-    in
-    let aliases =
-      module_paths
-      |> List.filter (fun candidate ->
-          not (Option.equal String.equal module_path (Some candidate)))
-      |> List.map (fun candidate -> (Module_path.split candidate, candidate))
-      |> namespace_alias_source
-    in
-    match Module_path.of_source_path document.Document.path with
-    | Ok module_path ->
-        Printf.sprintf "module %s = struct\n%s\n%s\n%s\nend\n"
-          (Module_path.compiler_unit module_path)
-          "" aliases
-          (merlin_target_source document)
-    | Error _ -> merlin_target_source document
-  in
   let imported_documents =
     documents
     |> List.filter (fun document ->
         not (String.equal document.Document.path target.Document.path))
   in
-  let imported = imported_documents |> List.map wrapped |> String.concat "\n" in
+  let imported_segments =
+    List.map (merlin_wrapped_document module_paths) imported_documents
+  in
+  let imported =
+    imported_segments
+    |> List.map (fun segment -> segment.source)
+    |> String.concat "\n"
+  in
   let alias_source =
     imported_documents
     |> List.filter_map (fun document ->
@@ -649,6 +680,41 @@ let merlin_source ~documents ~target =
     prelude ^ "\n" ^ imported ^ "\n" ^ alias_source ^ "\n" ^ local_namespaces
   in
   (prefix ^ merlin_target_source target, newline_count prefix)
+
+let merlin_source_with_segments ~documents ~target =
+  let source, target_line_offset = merlin_source ~documents ~target in
+  let module_paths =
+    documents
+    |> List.filter_map (fun (document : Document.t) ->
+        Result.to_option (Module_path.of_source_path document.path))
+  in
+  let imported_segments =
+    documents
+    |> List.filter (fun document ->
+        not (String.equal document.Document.path target.Document.path))
+    |> List.map (merlin_wrapped_document module_paths)
+  in
+  let first_imported_line = 1 + newline_count (prelude ^ "\n") in
+  let rec locate_segments line accumulator = function
+    | [] -> List.rev accumulator
+    | segment :: rest ->
+        let content_start = line + segment.content_line_offset in
+        let content_lines =
+          1 + newline_count (merlin_target_source segment.document)
+        in
+        let located =
+          (content_start, content_start + content_lines - 1, segment.document)
+        in
+        locate_segments
+          (line + newline_count segment.source + 1)
+          (located :: accumulator) rest
+  in
+  let imported = locate_segments first_imported_line [] imported_segments in
+  let target_start = target_line_offset + 1 in
+  let target_lines = 1 + newline_count (merlin_target_source target) in
+  ( source,
+    target_line_offset,
+    imported @ [ (target_start, target_start + target_lines - 1, target) ] )
 
 let type_at_with_cancel ~cancelled ~documents ~target ~line ~column =
   let source, line_offset = merlin_source ~documents ~target in
@@ -686,6 +752,167 @@ let type_at ~documents ~target ~line ~column =
   type_at_with_cancel
     ~cancelled:(fun () -> false)
     ~documents ~target ~line ~column
+
+let strip_common_indentation lines =
+  let indentation line =
+    let rec loop index =
+      if index < String.length line && Char.equal line.[index] ' ' then
+        loop (index + 1)
+      else index
+    in
+    loop 0
+  in
+  let common =
+    lines
+    |> List.filter (fun line -> not (String.equal (String.trim line) ""))
+    |> List.map indentation |> List.fold_left min max_int
+  in
+  let common = if common = max_int then 0 else common in
+  List.map
+    (fun line ->
+      String.sub line
+        (min common (String.length line))
+        (max 0 (String.length line - common)))
+    lines
+
+let definition_preview document (definition : Document.definition) =
+  let block_end =
+    document.Document.blocks
+    |> List.find_map (function
+      | Document.Code { id; position; _ }
+        when String.equal id definition.Document.block_id ->
+          Some position.line_end
+      | _ -> None)
+    |> Option.value ~default:definition.line
+  in
+  let next_definition =
+    document.definitions
+    |> List.filter_map (fun (candidate : Document.definition) ->
+        if
+          String.equal candidate.Document.block_id definition.block_id
+          && candidate.line > definition.line
+        then Some candidate.line
+        else None)
+    |> List.sort Int.compare
+    |> function
+    | [] -> None
+    | first :: _ -> Some first
+  in
+  let last_line =
+    min block_end (Option.value ~default:(block_end + 1) next_definition - 1)
+  in
+  let preview_last = min last_line (definition.line + 9) in
+  let all_lines = String.split_on_char '\n' document.source |> Array.of_list in
+  let lines =
+    List.init
+      (max 0 (preview_last - definition.line + 1))
+      (fun offset ->
+        let index = definition.line - 1 + offset in
+        if index >= 0 && index < Array.length all_lines then all_lines.(index)
+        else "")
+    |> strip_common_indentation
+  in
+  let source = String.concat "\n" lines |> String.trim in
+  let source, character_truncated =
+    if String.length source > 900 then
+      (String.sub source 0 900 |> String.trim, true)
+    else (source, false)
+  in
+  (source, preview_last < last_line || character_truncated)
+
+let definition_info_of_json ~documents ~target json =
+  let open Yojson.Safe.Util in
+  match json |> member "class" |> to_string_option with
+  | Some "return" -> (
+      match json |> member "value" with
+      | `Assoc _ as value -> (
+          match
+            ( value |> member "file" |> to_string_option,
+              value |> member "pos" |> member "line" |> to_int_option,
+              value |> member "pos" |> member "col" |> to_int_option )
+          with
+          | Some file, Some physical_line, Some column
+            when String.equal file target.Document.path -> (
+              let _, _, segments =
+                merlin_source_with_segments ~documents ~target
+              in
+              match
+                List.find_opt
+                  (fun (first, last, _) ->
+                    physical_line >= first && physical_line <= last)
+                  segments
+              with
+              | None -> Ok None
+              | Some (first, _, document) ->
+                  let line = physical_line - first + 1 in
+                  let definition =
+                    List.find_opt
+                      (fun (candidate : Document.definition) ->
+                        candidate.Document.line = line)
+                      document.Document.definitions
+                  in
+                  Option.fold ~none:(Ok None)
+                    ~some:(fun definition ->
+                      match Module_path.of_source_path document.path with
+                      | Error _ -> Ok None
+                      | Ok module_path ->
+                          let source, truncated =
+                            definition_preview document definition
+                          in
+                          Ok
+                            (Some
+                               {
+                                 name = definition.name;
+                                 kind = definition.kind;
+                                 module_path;
+                                 path = document.path;
+                                 line;
+                                 column =
+                                   source_column_of_merlin document line column;
+                                 source;
+                                 truncated;
+                               }))
+                    definition)
+          | _ -> Ok None)
+      | `String _ -> Ok None
+      | _ -> Error "Merlin returned an invalid definition location.")
+  | Some class_ ->
+      Error
+        (Printf.sprintf "Merlin returned %s: %s" class_
+           (json |> member "value" |> Yojson.Safe.to_string))
+  | None -> Error "Merlin returned an invalid response."
+
+let definition_at_with_cancel ~cancelled ~documents ~target ~line ~column =
+  let source, line_offset, _ = merlin_source_with_segments ~documents ~target in
+  let column =
+    max 0 (column - source_indentation target line)
+    |> utf8_byte_column_of_utf16 (compiler_source_line target line)
+  in
+  let result =
+    run_process ~stdin:source ~timeout_seconds:3. ~output_limit:262_144
+      ~cancelled (merlin ())
+      [
+        "single";
+        "locate";
+        "-position";
+        Printf.sprintf "%d:%d" (line + line_offset) column;
+        "-filename";
+        target.Document.path;
+      ]
+  in
+  if not (successful result.status) then
+    Error
+      (if String.equal (String.trim result.stderr) "" then
+         "Could not query the OCaml compiler service."
+       else String.trim result.stderr)
+  else
+    try
+      Yojson.Safe.from_string result.stdout
+      |> definition_info_of_json ~documents ~target
+    with
+    | Yojson.Json_error message -> Error ("Invalid Merlin response: " ^ message)
+    | Yojson.Safe.Util.Type_error (message, _) ->
+        Error ("Invalid Merlin response: " ^ message)
 
 let completion_entry_of_json json =
   let open Yojson.Safe.Util in
@@ -757,6 +984,19 @@ let type_info_to_json info =
       ("startColumn", `Int info.start_column);
       ("endLine", `Int info.end_line);
       ("endColumn", `Int info.end_column);
+    ]
+
+let definition_info_to_json (info : definition_info) =
+  `Assoc
+    [
+      ("name", `String info.name);
+      ("kind", `String info.kind);
+      ("module", `String info.module_path);
+      ("path", `String info.path);
+      ("line", `Int info.line);
+      ("column", `Int info.column);
+      ("source", `String info.source);
+      ("truncated", `Bool info.truncated);
     ]
 
 let completion_entry_to_json (entry : completion_entry) =
