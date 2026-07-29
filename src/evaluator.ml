@@ -122,6 +122,7 @@ let run_process ?cwd ?stdin ?(environment = []) ?(extra_output_paths = [])
     ?(timeout_seconds = 10.) ?(output_limit = 2_000_000)
     ?(cancelled = fun () -> false) program arguments =
   if cancelled () then raise Cancelled;
+  let profile_started = Unix.gettimeofday () in
   let stdout_path = Filename.temp_file "doclang-stdout-" ".txt" in
   let stderr_path = Filename.temp_file "doclang-stderr-" ".txt" in
   let stdin_path =
@@ -221,7 +222,24 @@ let run_process ?cwd ?stdin ?(environment = []) ?(extra_output_paths = [])
     let stdout = read_file_prefix stdout_path output_limit in
     let stderr = read_file_prefix stderr_path output_limit in
     cleanup_files ();
-    { status; stdout; stderr; timed_out; output_limited }
+    let result = { status; stdout; stderr; timed_out; output_limited } in
+    if Option.is_some (Sys.getenv_opt "DOCLANG_PROFILE") then
+      prerr_endline
+        ("DOCLANG_PROFILE "
+        ^ Yojson.Safe.to_string
+            (`Assoc
+               [
+                 ("phase", `String "process");
+                 ("program", `String program);
+                 ( "arguments",
+                   `List (List.map (fun value -> `String value) arguments) );
+                 ( "durationMs",
+                   `Int
+                     (int_of_float
+                        ((Unix.gettimeofday () -. profile_started) *. 1000.)) );
+                 ("success", `Bool (successful status));
+               ]));
+    result
   with error ->
     close stdin_fd;
     close stdout_fd;
@@ -787,6 +805,15 @@ let compiler () =
           match find_local_compiler (Sys.getcwd ()) 8 with
           | Some local -> local
           | None -> "ocamlc"))
+
+let ocamlrun () =
+  match Sys.getenv_opt "OCAMLRUN" with
+  | Some path -> path
+  | None ->
+      let candidate =
+        Filename.concat (Filename.dirname (compiler ())) "ocamlrun"
+      in
+      if Sys.file_exists candidate then candidate else "ocamlrun"
 
 let compiler_identity_value =
   lazy
@@ -1407,7 +1434,8 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
               let runtime =
                 run_process ~timeout_seconds:5. ~cancelled
                   ~environment:[ ("DOCLANG_EVENT_PATH", event_path) ]
-                  ~extra_output_paths:[ event_path ] executable []
+                  ~extra_output_paths:[ event_path ] (ocamlrun ())
+                  [ executable ]
               in
               let views, traces =
                 read_file_prefix event_path 2_000_000 |> parse_runtime_events

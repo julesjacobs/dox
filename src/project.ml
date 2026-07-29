@@ -128,6 +128,8 @@ let page snapshot module_path =
         (Not_found (Printf.sprintf "Page module %S was not found." module_path))
 
 let resolve_documents ?(cancelled = fun () -> false) project snapshot target =
+  ignore cancelled;
+  ignore project;
   let documents =
     snapshot.documents
     |> List.map (fun document ->
@@ -141,22 +143,11 @@ let resolve_documents ?(cancelled = fun () -> false) project snapshot target =
   let target_module =
     Result.to_option (Module_path.of_source_path target.path)
   in
-  let compiler_graph =
-    Compiler_workspace.analyze ?target:target_module ~cancelled
-      ~root:project.root
-      ~version:(version_of_documents documents)
-      page_index
-  in
-  let compiler_entry module_path =
-    List.find_opt
-      (fun (entry : Compiler_workspace.module_info) ->
-        String.equal entry.Compiler_workspace.module_path module_path)
-      compiler_graph.modules
-  in
+  let module_graph = Module_graph.build page_index in
   let dependencies module_path =
-    match compiler_entry module_path with
-    | Some entry -> entry.uses
-    | None -> []
+    Module_graph.dependencies module_graph module_path
+    @ Module_graph.conservative_dependencies page_index module_path
+    |> List.sort_uniq String.compare
   in
   let find path =
     if String.equal path target.Document.path then Ok target
@@ -193,7 +184,8 @@ let resolve_documents ?(cancelled = fun () -> false) project snapshot target =
       Ok (path :: visited, document :: ordered)
   in
   match target_module with
-  | Some module_path when Option.is_none (compiler_entry module_path) ->
+  | Some module_path
+    when Option.is_none (Page_index.find page_index module_path) ->
       Ok
         ( documents
         |> List.filter (fun document ->

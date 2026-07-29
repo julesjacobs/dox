@@ -200,6 +200,18 @@ let timestamp () =
     (int_of_float ((time -. Float.floor time) *. 1000.))
 
 let list_files root =
+  let ignored_directories =
+    [
+      ".doclang";
+      ".git";
+      ".opam";
+      "_build";
+      "_opam";
+      "_toolchain";
+      "node_modules";
+      "vendor";
+    ]
+  in
   let rec walk relative accumulator =
     let absolute =
       if String.equal relative "" then root else Filename.concat root relative
@@ -207,8 +219,7 @@ let list_files root =
     Sys.readdir absolute |> Array.to_list |> List.sort String.compare
     |> List.fold_left
          (fun accumulator name ->
-           if name = "_build" || name = ".git" || name = ".doclang" then
-             accumulator
+           if List.mem name ignored_directories then accumulator
            else
              let child_relative =
                if String.equal relative "" then name

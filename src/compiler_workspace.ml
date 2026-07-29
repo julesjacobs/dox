@@ -780,8 +780,15 @@ let analyze_pages ?target ?described ?(cancelled = fun () -> false) ~root pages
         match target with
         | None -> described
         | Some module_path ->
+            let module_paths = List.map (fun page -> page.module_path) pages in
+            let required =
+              module_path
+              :: (Module_path.ancestor_scope_bindings module_paths module_path
+                 |> List.concat_map snd)
+              |> List.sort_uniq String.compare
+            in
             List.filter
-              (fun entry -> String.equal entry.page.module_path module_path)
+              (fun entry -> List.mem entry.page.module_path required)
               described
       in
       let build_separately () =

@@ -359,6 +359,7 @@ let create_pages_response context body =
                ]))
 
 let dependencies_response context ~cancelled parameters =
+  ignore cancelled;
   match List.assoc_opt "module" parameters with
   | None -> error "Missing module query parameter."
   | Some module_path -> (
@@ -368,16 +369,12 @@ let dependencies_response context ~cancelled parameters =
           match Project.page snapshot module_path with
           | Error project_error_ -> project_error project_error_
           | Ok _ ->
-              let analysis =
-                Compiler_workspace.analyze ~cancelled ~root:context.project.root
-                  ~version:snapshot.version snapshot.page_index
-              in
               json
                 (`Assoc
                    [
                      ("projectVersion", `String snapshot.version);
                      ( "dependency",
-                       Compiler_workspace.module_json analysis module_path );
+                       Module_graph.to_json snapshot.module_graph module_path );
                    ])))
 
 let module_renames request =
@@ -461,6 +458,21 @@ let refactor_rewrite_response body =
 
 let evaluate_response context ~cancelled body =
   let open Util in
+  let profile phase started =
+    if Option.is_some (Sys.getenv_opt "DOCLANG_PROFILE") then
+      prerr_endline
+        ("DOCLANG_PROFILE "
+        ^ Yojson.Safe.to_string
+            (`Assoc
+               [
+                 ("phase", `String phase);
+                 ( "durationMs",
+                   `Int
+                     (int_of_float ((Unix.gettimeofday () -. started) *. 1000.))
+                 );
+               ]))
+  in
+  let request_started = Unix.gettimeofday () in
   match
     let* request = json_body body in
     let* path = string_member "path" request in
@@ -469,20 +481,25 @@ let evaluate_response context ~cancelled body =
     match Project.snapshot context.project with
     | Error project_error_ -> Error (Project.error_message project_error_)
     | Ok snapshot -> (
+        profile "snapshot" request_started;
         if not (String.equal snapshot.version base_project_version) then
           Error "The project changed; reload before evaluating this draft."
         else
           let document = Document.parse ~path source in
+          let resolve_started = Unix.gettimeofday () in
           match
             Project.resolve_documents ~cancelled context.project snapshot
               document
           with
           | Error project_error_ -> Error (Project.error_message project_error_)
           | Ok documents ->
+              profile "resolveDocuments" resolve_started;
+              let evaluation_started = Unix.gettimeofday () in
               let evaluation =
                 Evaluator.evaluate_documents ~project_version:snapshot.version
                   ~cancelled ~documents ~target:document ()
               in
+              profile "evaluateDocuments" evaluation_started;
               Ok (document, evaluation, snapshot.version))
   with
   | Error message -> error ~status:409 message
@@ -844,6 +861,7 @@ let accept_and_reap_workers socket workers =
 
 let serve ~root ~assets ~port =
   let project = Project.create root in
+  ignore (Evaluator.compiler_identity ());
   (match Project.recover_transactions project with
   | Ok () -> ()
   | Error error ->

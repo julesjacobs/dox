@@ -103,8 +103,21 @@ let build index =
                      Module_path.is_beneath ~namespace module_path)
                    namespaces)
         in
+        let ancestor_scoped =
+          Module_path.ancestor_scope_bindings modules page.module_path
+          |> List.filter_map (fun (component, dependencies) ->
+              let rewritten, _ = visible component in
+              try
+                ignore
+                  (Str.search_forward
+                     (Str.regexp ("\\b" ^ Str.quote component ^ "\\b"))
+                     rewritten 0);
+                Some dependencies
+              with Not_found -> None)
+          |> List.concat
+        in
         let dependencies =
-          typed
+          typed @ ancestor_scoped
           |> List.filter (fun value ->
               not (String.equal value page.Page_index.module_path))
           |> List.sort_uniq String.compare
@@ -126,6 +139,30 @@ let build index =
 
 let dependencies t module_path =
   Option.value ~default:[] (List.assoc_opt module_path t.forward)
+
+let conservative_dependencies index module_path =
+  match Page_index.find index module_path with
+  | None -> []
+  | Some page ->
+      let modules = Page_index.modules index in
+      let source =
+        page.document |> Document.program_source |> Module_path.code_mask
+        |> Module_path.rewrite_qualified_references ~modules
+      in
+      modules
+      |> List.filter (fun candidate ->
+          (not (String.equal candidate module_path))
+          &&
+            try
+              ignore
+                (Str.search_forward
+                   (Str.regexp
+                      ("\\b"
+                      ^ Str.quote (Module_path.compiler_unit candidate)
+                      ^ "\\b"))
+                   source 0);
+              true
+            with Not_found -> false)
 
 let dependents t module_path =
   Option.value ~default:[] (List.assoc_opt module_path t.reverse)

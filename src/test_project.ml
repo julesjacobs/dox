@@ -40,6 +40,15 @@ let () =
       (match Util.write_file path original with
       | Ok () -> ()
       | Error message -> fail message);
+      let vendor = Filename.concat directory "vendor" in
+      Unix.mkdir vendor 0o755;
+      (match
+         Util.write_file
+           (Filename.concat vendor "ignored.live.md")
+           "# Ignored dependency\n"
+       with
+      | Ok () -> ()
+      | Error message -> fail message);
       let project = Project.create directory in
       let grouped_before =
         Document.parse ~path:"grouped.live.md"
@@ -110,6 +119,9 @@ let () =
         | Ok snapshot -> snapshot
         | Error error -> fail (Project.error_message error)
       in
+      expect
+        (List.length snapshot.documents = 1)
+        "project snapshot traversed an ignored dependency directory";
       let draft = Document.parse ~path:"change.live.md" changed in
       let validation =
         Evaluator.evaluate ~project_version:snapshot.version draft
