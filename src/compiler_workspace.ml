@@ -44,6 +44,7 @@ let generated_pages index =
         generated_path = generated_path page.module_path;
         source =
           "open Doclang_prelude\n"
+          ^ Module_path.ancestor_open_source page.module_path
           ^ Document.compilation_source page.document
           ^ "\n"
           ^ Module_path.alias_source modules page.module_path;
@@ -52,7 +53,7 @@ let generated_pages index =
 let generated_aliases pages =
   let modules = List.map (fun page -> page.module_path) pages in
   let internal =
-    Module_path.alias_units modules
+    Module_path.alias_units modules @ Module_path.scope_alias_units modules
     |> List.filter (fun (unit_name, _) ->
         (not (String.equal unit_name "Doclang"))
         && not
@@ -126,14 +127,43 @@ let watcher_identity_path root =
 let dune_project =
   "(lang dune 3.12)\n(name doclang_workspace)\n(generate_opam_files false)\n"
 
-let pages_dune =
-  {|(library
+let pages_dune aliases =
+  let scope_modules =
+    aliases
+    |> List.filter_map (fun (path, _) ->
+        let base = Filename.basename path |> Filename.chop_extension in
+        if Util.starts_with ~prefix:"doclang_scope_for__" base then
+          Some (String.capitalize_ascii base)
+        else None)
+  in
+  match scope_modules with
+  | [] ->
+      {|(library
  (name doclang_pages)
  (wrapped false)
  (modes byte)
  (flags (:standard -w -33 -no-alias-deps))
  (libraries doclang_support))
 |}
+  | _ ->
+      let modules = String.concat " " scope_modules in
+      Printf.sprintf
+        {|(library
+ (name doclang_scopes)
+ (wrapped false)
+ (modes byte)
+ (modules %s)
+ (flags (:standard -w -33-49 -no-alias-deps)))
+
+(library
+ (name doclang_pages)
+ (wrapped false)
+ (modes byte)
+ (modules (:standard \ %s))
+ (flags (:standard -w -33 -no-alias-deps))
+ (libraries doclang_support doclang_scopes))
+|}
+        modules modules
 
 let support_dune =
   {|(library
@@ -270,12 +300,15 @@ let sync root pages =
   let pages_root = pages_directory root in
   let support = Filename.concat directory "support" in
   let open Result in
+  let aliases = generated_aliases pages in
   let* () = ensure_workspace_directories root in
   let* () =
     write_generated_file (Filename.concat directory "dune-project") dune_project
   in
   let* () =
-    write_generated_file (Filename.concat pages_root "dune") pages_dune
+    write_generated_file
+      (Filename.concat pages_root "dune")
+      (pages_dune aliases)
   in
   let* () =
     write_generated_file (Filename.concat support "dune") support_dune
@@ -285,7 +318,6 @@ let sync root pages =
       (Filename.concat support "doclang_prelude.ml")
       Evaluator.prelude
   in
-  let aliases = generated_aliases pages in
   let current_files =
     List.map (fun page -> page.generated_path) pages @ List.map fst aliases
   in
@@ -792,6 +824,51 @@ let analyze_pages ?target ?described ?(cancelled = fun () -> false) ~root pages
         |> List.map (fun (entry, (unit_name, _)) ->
             (unit_name, entry.page.module_path))
       in
+      let scope_to_units =
+        let module_paths = List.map (fun page -> page.module_path) pages in
+        pages
+        |> List.filter_map (fun page ->
+            match Module_path.namespace_prefixes page.module_path with
+            | [] -> None
+            | _ ->
+                let own_aliases =
+                  Module_path.alias_source module_paths page.module_path
+                in
+                let program_source =
+                  if
+                    (not (String.equal own_aliases ""))
+                    && Util.ends_with ~suffix:own_aliases page.source
+                  then
+                    String.sub page.source 0
+                      (String.length page.source - String.length own_aliases)
+                  else page.source
+                in
+                let masked = Module_path.code_mask program_source in
+                (* -no-alias-deps deliberately hides alias targets from the
+                   CMT. Recover only the page-scope bindings named by the
+                   program, rather than treating every sibling as a use. *)
+                let referenced component =
+                  try
+                    ignore
+                      (Str.search_forward
+                         (Str.regexp ("\\b" ^ Str.quote component ^ "\\b"))
+                         masked 0);
+                    true
+                  with Not_found -> false
+                in
+                Some
+                  ( Module_path.page_scope_unit page.module_path,
+                    Module_path.ancestor_scope_bindings module_paths
+                      page.module_path
+                    |> List.filter (fun (component, _) -> referenced component)
+                    |> List.concat_map snd
+                    |> List.sort_uniq String.compare
+                    |> List.map Module_path.compiler_unit ))
+      in
+      let expand_unit unit_name =
+        Option.value ~default:[ unit_name ]
+          (List.assoc_opt unit_name scope_to_units)
+      in
       let rec reachable_units known pending =
         match pending with
         | [] -> known
@@ -804,6 +881,7 @@ let analyze_pages ?target ?described ?(cancelled = fun () -> false) ~root pages
                   if String.equal candidate unit_name then Some imports
                   else None)
               |> Option.value ~default:[]
+              |> List.concat_map expand_unit
               |> List.filter (fun imported ->
                   List.mem_assoc imported unit_to_module)
             in
@@ -830,6 +908,7 @@ let analyze_pages ?target ?described ?(cancelled = fun () -> false) ~root pages
                   module_path = entry.page.module_path;
                   uses =
                     imports
+                    |> List.concat_map expand_unit
                     |> List.filter_map (fun unit_name ->
                         List.assoc_opt unit_name unit_to_module)
                     |> List.filter (fun dependency ->

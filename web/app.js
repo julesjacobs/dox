@@ -1003,7 +1003,45 @@ function outlineFingerprint(entries) {
     .join("\u0000");
 }
 
+function captureOutlineCursor() {
+  const view = state.outlineView;
+  if (!view) return null;
+  const position = Math.min(
+    state.outlineSelection,
+    view.state.doc.length,
+  );
+  const line = view.state.doc.lineAt(position);
+  const row = state.outlineLineMap.find(
+    (candidate) => candidate.sourceLine === line.number,
+  );
+  const modulePath =
+    row?.originTarget || row?.targetModule || row?.pageModule || null;
+  const path = row?.proposedPath || row?.path || null;
+  if (!modulePath && !path) return null;
+  return {
+    modulePath,
+    path,
+    column: position - line.from,
+  };
+}
+
+function outlinePositionForCursor(entries, cursor) {
+  if (!cursor) return null;
+  let offset = 0;
+  for (const entry of entries) {
+    if (
+      (cursor.modulePath && entry.pageModule === cursor.modulePath) ||
+      (cursor.path && entry.path === cursor.path)
+    ) {
+      return offset + Math.min(cursor.column, entry.text.length);
+    }
+    offset += entry.text.length + 1;
+  }
+  return null;
+}
+
 function installOutlineBase(project, entries, { keepDraft = false } = {}) {
+  const cursor = keepDraft ? null : captureOutlineCursor();
   const text = entries.map((entry) => entry.text).join("\n");
   state.outlineBase = {
     projectVersion: project.version,
@@ -1016,6 +1054,9 @@ function installOutlineBase(project, entries, { keepDraft = false } = {}) {
     state.outlineText = text;
     state.outlineDraftRows = entries;
     state.outlineLineMap = entries;
+    state.outlineSelection =
+      outlinePositionForCursor(entries, cursor) ??
+      Math.min(state.outlineSelection, text.length);
     state.outlineDraftError = null;
     state.outlineConflict = null;
     state.outlineFailedGeneration = null;
@@ -1473,7 +1514,7 @@ function scheduleOutlineCommit() {
   const activeRow = state.outlineDraftRows.find(
     (row) => row.sourceLine === cursorLine,
   );
-  if (activeRow?.changed && activeRow.originTarget) {
+  if (activeRow?.changed) {
     return;
   }
   const generation = state.outlineDraftGeneration;
@@ -1506,7 +1547,10 @@ function commitOutline(options = {}) {
   return promise;
 }
 
-async function performOutlineCommit({ reason = "explicit" } = {}) {
+async function performOutlineCommit({
+  reason = "explicit",
+  openModule = null,
+} = {}) {
   clearTimeout(state.outlineCommitTimer);
   state.outlineCommitTimer = null;
   if (state.outlineCommitting) {
@@ -1652,7 +1696,7 @@ async function performOutlineCommit({ reason = "explicit" } = {}) {
     );
     const newerDraft = draftAdvanced
       ? state.outlineText
-      : retainsInsertionRow || retainsActiveDraft
+      : !openModule && (retainsInsertionRow || retainsActiveDraft)
         ? submittedDraft
         : null;
     const newerRows =
@@ -1697,8 +1741,20 @@ async function performOutlineCommit({ reason = "explicit" } = {}) {
     state.outlineFailedGeneration = null;
     if (!state.outlineConflict) state.workspaceError = null;
     invalidateDependencyContext({ clear: true });
-    render();
-    if (state.module) void loadDependencyContext(state.module);
+    const openedModule = appliedMapping.reduce(
+      (modulePath, mapping) =>
+        modulePath === mapping.before ? mapping.after : modulePath,
+      openModule,
+    );
+    if (openedModule) {
+      await loadDocument(openedModule, {
+        history: "push",
+        focus: "main",
+      });
+    } else {
+      render();
+      if (state.module) void loadDependencyContext(state.module);
+    }
     return true;
   } catch (error) {
     if (authoritativeProject && appliedMapping.length) {
@@ -1885,7 +1941,17 @@ function mountOutlineEditor() {
         updateStatusOnly();
       });
     },
-    onCommit: (reason) => void commitOutline({ reason }),
+    onCommit: (reason, selection) => {
+      if (selection !== undefined) state.outlineSelection = selection;
+      const line =
+        state.outlineView?.state.doc.lineAt(state.outlineSelection).number || 1;
+      const row = outlineRowAtLine(line);
+      const openModule =
+        reason === "enter"
+          ? row?.targetModule || row?.originTarget || null
+          : null;
+      void commitOutline({ reason, openModule });
+    },
     onCancel: cancelOutlineDraft,
     onFocus: () => {
       if (!state.outlineFocusTransfer) state.outlineNavigationRun = false;

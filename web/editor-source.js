@@ -1693,6 +1693,11 @@ function insertOutlineSibling(view, onCommit) {
   const selection = view.state.selection.main;
   if (!selection.empty) return false;
   const line = view.state.doc.lineAt(selection.head);
+  const entry = view.state.field(outlineConfigField).lineMap[line.number - 1];
+  if (line.text.trim() && entry?.changed) {
+    onCommit?.("enter", selection.head);
+    return true;
+  }
   const indent = line.text.match(/^ */)?.[0] || "";
   let insertionPoint = line.to;
   for (let number = line.number + 1; number <= view.state.doc.lines; number += 1) {
@@ -1701,7 +1706,6 @@ function insertOutlineSibling(view, onCommit) {
     if (candidate.text.trim() && candidateIndent <= indent.length) break;
     insertionPoint = candidate.to;
   }
-  if (line.text.trim()) onCommit?.("enter");
   view.dispatch({
     changes: { from: insertionPoint, insert: `\n${indent}` },
     selection: { anchor: insertionPoint + 1 + indent.length },

@@ -310,6 +310,51 @@ let () =
       in
       expect qualified_evaluation.ok
         "qualified page modules did not compile and evaluate";
+      write directory "models/section.live.md"
+        "# Section\n\n    let parent_result = Statistics.mean [1; 2]\n";
+      write directory "models/section/consumer.live.md"
+        "# Consumer\n\n    let child_result = Statistics.mean [1; 2; 3]\n";
+      let nested_namespace_snapshot =
+        project_result (Project.snapshot project)
+      in
+      let evaluate_nested module_path =
+        let target =
+          project_result (Project.page nested_namespace_snapshot module_path)
+        in
+        Evaluator.evaluate_documents
+          ~project_version:nested_namespace_snapshot.version
+          ~documents:
+            (project_result
+               (Project.resolve_documents project nested_namespace_snapshot
+                  target))
+          ~target ()
+      in
+      expect (evaluate_nested "Models.Section").ok
+        "a page that became a namespace lost its ancestor imports";
+      expect (evaluate_nested "Models.Section.Consumer").ok
+        "a nested page lost imports from an ancestor namespace";
+      let nested_analysis =
+        Compiler_workspace.analyze ~target:"Models.Section.Consumer"
+          ~root:directory ~version:nested_namespace_snapshot.version
+          nested_namespace_snapshot.page_index
+      in
+      let nested_dependencies =
+        nested_analysis.modules
+        |> List.find_opt (fun (entry : Compiler_workspace.module_info) ->
+            String.equal entry.module_path "Models.Section.Consumer")
+        |> Option.map (fun (entry : Compiler_workspace.module_info) ->
+            entry.uses)
+        |> Option.value ~default:[]
+      in
+      expect
+        (nested_analysis.ok && List.mem "Models.Statistics" nested_dependencies)
+        ("compiler dependency analysis lost an ancestor-scope import: "
+        ^ String.concat ", " nested_dependencies
+        ^ " ("
+        ^ String.concat "; " nested_analysis.diagnostics
+        ^ ")");
+      Sys.remove (Filename.concat directory "models/section/consumer.live.md");
+      Sys.remove (Filename.concat directory "models/section.live.md");
       write directory "reports/shadow.live.md"
         "# Shadow\n\n\
         \    module Models = struct\n\

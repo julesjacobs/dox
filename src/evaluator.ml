@@ -561,13 +561,22 @@ let rec namespace_alias_source entries =
   in
   groups
   |> List.map (fun (component, children) ->
-      match children with
-      | [ ([], module_path) ] ->
+      let direct, nested =
+        List.partition (fun (rest, _) -> rest = []) children
+      in
+      match (direct, nested) with
+      | [ ([], module_path) ], [] ->
           Printf.sprintf "module %s = %s" component
             (Module_path.compiler_unit module_path)
       | _ ->
-          Printf.sprintf "module %s = struct\n%s\nend" component
-            (namespace_alias_source children))
+          let included =
+            match direct with
+            | [ ([], module_path) ] ->
+                "include " ^ Module_path.compiler_unit module_path ^ "\n"
+            | _ -> ""
+          in
+          Printf.sprintf "module %s = struct\n%s%s\nend" component included
+            (namespace_alias_source nested))
   |> String.concat "\n"
 
 let merlin_source ~documents ~target =
@@ -609,17 +618,17 @@ let merlin_source ~documents ~target =
         (Module_path.split module_path, module_path))
     |> namespace_alias_source
   in
-  let local_namespace =
+  let local_namespaces =
     match Module_path.of_source_path target.Document.path with
     | Error _ -> ""
-    | Ok module_path -> (
-        match List.rev (Module_path.split module_path) with
-        | _ :: namespace when namespace <> [] ->
-            "open " ^ (namespace |> List.rev |> String.concat ".") ^ "\n"
-        | _ -> "")
+    | Ok module_path ->
+        Module_path.namespace_prefixes module_path
+        |> List.map (fun namespace -> "open " ^ namespace)
+        |> String.concat "\n"
+        |> fun source -> if String.equal source "" then "" else source ^ "\n"
   in
   let prefix =
-    prelude ^ "\n" ^ imported ^ "\n" ^ alias_source ^ "\n" ^ local_namespace
+    prelude ^ "\n" ^ imported ^ "\n" ^ alias_source ^ "\n" ^ local_namespaces
   in
   (prefix ^ merlin_target_source target, newline_count prefix)
 
@@ -990,19 +999,8 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
         let source =
           match module_path with
           | None -> source
-          | Some module_path -> (
-              match List.rev (Module_path.split module_path) with
-              | _ :: namespace
-                when namespace <> []
-                     && not
-                          (List.mem
-                             (namespace |> List.rev |> String.concat ".")
-                             modules) ->
-                  "open "
-                  ^ Module_path.compiler_unit
-                      (namespace |> List.rev |> String.concat ".")
-                  ^ "\n" ^ source
-              | _ -> source)
+          | Some module_path ->
+              Module_path.ancestor_open_source module_path ^ source
         in
         let source =
           match module_path with
@@ -1017,7 +1015,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
         (document, path, source))
   in
   let aliases =
-    Module_path.alias_units modules
+    Module_path.alias_units modules @ Module_path.scope_alias_units modules
     |> List.filter (fun (unit_name, _) ->
         not
           (List.exists
@@ -1090,6 +1088,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
                                  "+unix";
                                  "-I";
                                  directory;
+                                 "-no-alias-deps";
                                  "-open";
                                  "Doclang";
                                  "-c";

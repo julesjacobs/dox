@@ -83,6 +83,9 @@ let compare = String.compare
 let compiler_unit value = "Doclang__" ^ (split value |> String.concat "__")
 let namespace_unit = function "" -> "Doclang" | value -> compiler_unit value
 
+let page_scope_unit value =
+  "Doclang_scope_for__" ^ (split value |> String.concat "__")
+
 let rec take count = function
   | _ when count <= 0 -> []
   | [] -> []
@@ -118,6 +121,69 @@ let alias_units modules =
   namespaces
   |> List.map (fun namespace ->
       (namespace_unit namespace, alias_source modules namespace))
+
+(* A page scope exposes siblings from each ancestor namespace, but omits the
+   branch containing the page. The omission prevents a page from importing
+   itself through its namespace alias. Inner bindings replace outer ones. *)
+let ancestor_scope_bindings modules module_path =
+  let components = split module_path in
+  namespace_prefixes module_path
+  |> List.mapi (fun index namespace ->
+      let branch = take (index + 2) components |> String.concat "." in
+      let prefix = split namespace in
+      let target_length = List.length prefix + 1 in
+      modules
+      |> List.filter_map (fun candidate ->
+          let candidate_components = split candidate in
+          if
+            List.length candidate_components < target_length
+            || take (List.length prefix) candidate_components <> prefix
+            || is_beneath ~namespace:branch candidate
+          then None
+          else
+            let component = List.nth candidate_components (target_length - 1) in
+            let target =
+              take target_length candidate_components |> String.concat "."
+            in
+            Some (component, target))
+      |> List.sort_uniq Stdlib.compare
+      |> List.map (fun (component, target) ->
+          let dependencies =
+            if List.mem target modules then [ target ]
+            else List.filter (is_beneath ~namespace:target) modules
+          in
+          (component, dependencies)))
+  |> List.fold_left
+       (fun visible bindings ->
+         List.fold_left
+           (fun visible (component, dependencies) ->
+             (component, dependencies) :: List.remove_assoc component visible)
+           visible bindings)
+       []
+
+let scope_alias_units modules =
+  modules
+  |> List.filter_map (fun module_path ->
+      match namespace_prefixes module_path with
+      | [] -> None
+      | namespaces ->
+          let components = split module_path in
+          let source =
+            namespaces
+            |> List.mapi (fun index namespace ->
+                let branch = take (index + 2) components |> String.concat "." in
+                modules
+                |> List.filter (fun candidate ->
+                    not (is_beneath ~namespace:branch candidate))
+                |> fun visible -> alias_source visible namespace)
+            |> String.concat ""
+          in
+          Some (page_scope_unit module_path, source))
+
+let ancestor_open_source module_path =
+  match namespace_prefixes module_path with
+  | [] -> ""
+  | _ -> "open " ^ page_scope_unit module_path ^ "\n"
 
 type lexical_state = {
   mutable comment_depth : int;
