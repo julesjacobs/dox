@@ -78,7 +78,14 @@ const state = {
   selectedTraceId: null,
   debugger: null,
   debugging: false,
+  debuggingBackground: false,
+  debugError: null,
   debugController: null,
+  traceAnchor: null,
+  tracePinned: false,
+  traceHistory: [],
+  traceHistoryIndex: -1,
+  previousDebugger: null,
   typeGeneration: 0,
   typeTimer: null,
   typeController: null,
@@ -485,11 +492,17 @@ async function loadDocument(
     modulePath = mapping?.get(modulePath) || modulePath;
   }
   if (!force && modulePath === state.module) return true;
-  if (!preserveDebugger) {
+  if (!preserveDebugger && modulePath !== state.module) {
     state.debugController?.abort();
     state.debugController = null;
     state.debugger = null;
     state.debugging = false;
+    state.debuggingBackground = false;
+    state.traceAnchor = null;
+    state.tracePinned = false;
+    state.traceHistory = [];
+    state.traceHistoryIndex = -1;
+    state.previousDebugger = null;
   }
   captureCurrentSession();
   const inheritedProvisional = state.provisionalNavigation;
@@ -526,6 +539,8 @@ async function loadDocument(
     void loadDependencyContext(modulePath);
     if (!cached.evaluation) {
       scheduleEvaluation(cached.document.source, { immediate: true });
+    } else if (!preserveDebugger) {
+      queueMicrotask(() => void startDebugger({ background: true }));
     }
     void revalidateCachedSession(cached, state.provisionalNavigation);
     if (focus === "main") {
@@ -2808,12 +2823,16 @@ function buildDebugCallModel(debuggerPayload, sources) {
   for (const root of roots.values()) {
     root.children.sort((left, right) => left.enterSequence - right.enterSequence);
   }
+  const callsBySite = new Map();
   for (const call of ordered) {
-    const siblings = call.parent?.children?.filter(
-      (candidate) =>
-        candidate.callsiteKey &&
-        candidate.callsiteKey === call.callsiteKey,
-    ) || [call];
+    if (!call.callsiteKey) continue;
+    if (!callsBySite.has(call.callsiteKey)) {
+      callsBySite.set(call.callsiteKey, []);
+    }
+    callsBySite.get(call.callsiteKey).push(call);
+  }
+  for (const call of ordered) {
+    const siblings = callsBySite.get(call.callsiteKey) || [call];
     call.occurrenceSiblings = siblings;
     call.occurrenceIndex = Math.max(0, siblings.indexOf(call));
   }
@@ -2859,6 +2878,35 @@ function callArguments(call) {
 function sourceIndent(lines, line) {
   const spaces = (lines[line - 1] || "").match(/^ */)?.[0].length || 0;
   return Math.max(0, spaces - 4) + 2;
+}
+
+function debugActivityForPath(debuggerState, path) {
+  const activity = new Map();
+  const add = (line) => {
+    if (!line || line < 1) return;
+    const current = activity.get(line) || {
+      line,
+      count: 0,
+      exceptions: 0,
+    };
+    current.count += 1;
+    activity.set(line, current);
+  };
+  for (const stop of debuggerState?.timeline || []) {
+    if (stop.path === path) add(stop.line);
+  }
+  for (const call of debuggerState?.model?.calls?.values() || []) {
+    if (call.path !== path || call.outcome !== "raise") continue;
+    const line = call.callsiteLine || call.line;
+    const current = activity.get(line) || {
+      line,
+      count: 1,
+      exceptions: 0,
+    };
+    current.exceptions += 1;
+    activity.set(line, current);
+  }
+  return [...activity.values()].sort((left, right) => left.line - right.line);
 }
 
 function projectionForDebugCall(call) {
@@ -2924,6 +2972,7 @@ function projectionForDebugCall(call) {
     }
     return {
       dimLines: [],
+      activity: debugActivityForPath(state.debugger, call.path),
       annotations: [...annotationGroups.values()].sort(
         (left, right) => left.line - right.line,
       ),
@@ -3103,6 +3152,7 @@ function projectionForDebugCall(call) {
   }
   return {
     dimLines,
+    activity: debugActivityForPath(state.debugger, call.path),
     annotations: [...annotations.entries()]
       .sort(([left], [right]) => left - right)
       .map(([line, items]) => ({
@@ -3132,9 +3182,329 @@ function groupedChildCalls(call) {
   return [...groups.values()];
 }
 
+function traceAnchorAtPosition(editor, position) {
+  if (!editor || !state.path) return null;
+  const line = editor.state.doc.lineAt(position);
+  const column = position - line.from;
+  const tokens = [
+    ...line.text.matchAll(
+      /(?:[A-Z][A-Za-z0-9_']*(?:\.[A-Z_a-z][A-Za-z0-9_']*)*|[a-z_][A-Za-z0-9_']*|[-+*/=<>:@^|&!?~]+)/g,
+    ),
+  ];
+  const token =
+    tokens.find(
+      (candidate) =>
+        column >= candidate.index &&
+        column <= candidate.index + candidate[0].length,
+    ) || null;
+  return {
+    path: state.path,
+    line: line.number,
+    column,
+    label: token?.[0] || line.text.trim() || `Line ${line.number}`,
+  };
+}
+
+function traceOwnerCall(occurrence, model) {
+  for (let current = occurrence?.rawParent; current; current = current.rawParent) {
+    if (current.kind === "function") {
+      return model.calls.get(current.id) || null;
+    }
+  }
+  return null;
+}
+
+function traceFocusForAnchor(debuggerState, anchor) {
+  if (!debuggerState?.model || !anchor) return null;
+  const calls = [...debuggerState.model.calls.values()].filter(
+    (call) =>
+      call.path === anchor.path &&
+      (call.line === anchor.line || call.callsiteLine === anchor.line),
+  );
+  const bindings = [...debuggerState.model.occurrences.values()].filter(
+    (occurrence) =>
+      occurrence.phase === "enter" &&
+      occurrence.kind !== "function" &&
+      occurrence.path === anchor.path &&
+      (occurrence.line === anchor.line ||
+        occurrence.endLine === anchor.line) &&
+      occurrence.value !== undefined,
+  );
+  const visits = (debuggerState.timeline || []).filter(
+    (stop) => stop.path === anchor.path && stop.line === anchor.line,
+  );
+  const observations = [
+    ...calls.map((call) => ({
+      id: `call:${call.id}`,
+      callId: call.id,
+      label: call.label,
+      value: displayDebugValue(call.value, call.returnType || call.type),
+      type: call.returnType || call.type,
+      outcome: call.outcome,
+      sequence: call.enterSequence,
+    })),
+    ...bindings.map((occurrence) => {
+      const owner = traceOwnerCall(occurrence, debuggerState.model);
+      return {
+        id: `binding:${occurrence.id}`,
+        callId: owner?.id || null,
+        label: occurrence.label,
+        value: displayDebugValue(
+          occurrence.value,
+          occurrence.returnType || occurrence.type,
+        ),
+        type: occurrence.returnType || occurrence.type,
+        outcome: occurrence.outcome,
+        sequence: occurrence.enterSequence,
+      };
+    }),
+  ].sort((left, right) => left.sequence - right.sequence);
+  const distinct = new Map();
+  for (const observation of observations) {
+    const key = `${observation.outcome || "return"}:${observation.value}`;
+    const group = distinct.get(key) || {
+      ...observation,
+      count: 0,
+      calls: [],
+    };
+    group.count += 1;
+    if (observation.callId) group.calls.push(observation.callId);
+    distinct.set(key, group);
+  }
+  const numeric = observations
+    .map((observation) => Number(observation.value))
+    .filter(Number.isFinite);
+  return {
+    anchor,
+    calls,
+    bindings,
+    visits,
+    observations,
+    distinct: [...distinct.values()].sort(
+      (left, right) => right.count - left.count,
+    ),
+    count: observations.length || visits.length,
+    exceptions: observations.filter(
+      (observation) => observation.outcome === "raise",
+    ).length,
+    range:
+      numeric.length > 1
+        ? [Math.min(...numeric), Math.max(...numeric)]
+        : null,
+  };
+}
+
+function projectionForTraceAnchor(anchor) {
+  if (!state.debugger || (anchor && anchor.path !== state.path)) return null;
+  return {
+    dimLines: [],
+    annotations: [],
+    links: [],
+    activity: debugActivityForPath(
+      state.debugger,
+      anchor?.path || state.path,
+    ),
+  };
+}
+
+function traceSnapshot() {
+  return {
+    path: state.path,
+    anchor: state.traceAnchor ? { ...state.traceAnchor } : null,
+    callId: state.debugger?.selectedCallId || null,
+  };
+}
+
+function sameTraceSnapshot(left, right) {
+  return (
+    left?.path === right?.path &&
+    left?.callId === right?.callId &&
+    left?.anchor?.path === right?.anchor?.path &&
+    left?.anchor?.line === right?.anchor?.line &&
+    left?.anchor?.column === right?.anchor?.column
+  );
+}
+
+function recordTraceVisit(snapshot = traceSnapshot()) {
+  if (!snapshot) return;
+  const current = state.traceHistory[state.traceHistoryIndex];
+  if (sameTraceSnapshot(current, snapshot)) return;
+  state.traceHistory = state.traceHistory.slice(
+    0,
+    state.traceHistoryIndex + 1,
+  );
+  state.traceHistory.push(snapshot);
+  state.traceHistoryIndex = state.traceHistory.length - 1;
+}
+
+function showOutputProvenance({ id = "", line = 0 } = {}) {
+  if (!state.debugger || !state.sourceEditorView) return;
+  if (state.traceHistoryIndex < 0) recordTraceVisit();
+  const labels = new Set(
+    [
+      id,
+      id.replace(/[-_]?(result|output|value)$/i, ""),
+      id.split(/[-_]/)[0],
+    ].filter(Boolean),
+  );
+  const occurrence = [
+    ...state.debugger.model.occurrences.values(),
+  ].find(
+    (candidate) =>
+      candidate.path === state.path &&
+      candidate.phase === "enter" &&
+      labels.has(candidate.label),
+  );
+  const targetLine =
+    occurrence?.endLine || occurrence?.line || Number(line) || 0;
+  if (!targetLine) return;
+  state.traceAnchor = {
+    path: state.path,
+    line: targetLine,
+    column: occurrence?.column || 0,
+    label: occurrence?.label || id || `Line ${targetLine}`,
+  };
+  state.debugger.selectedCallId = null;
+  recordTraceVisit();
+  setMarkdownEditorDebugPosition(state.sourceEditorView, null);
+  setMarkdownEditorDebugProjection(
+    state.sourceEditorView,
+    projectionForTraceAnchor(state.traceAnchor),
+  );
+  const sourceLine = state.sourceEditorView.state.doc.line(
+    Math.min(targetLine, state.sourceEditorView.state.doc.lines),
+  );
+  state.suppressNextSelectionLookup = true;
+  state.sourceEditorView.dispatch({
+    selection: {
+      anchor:
+        sourceLine.from +
+        Math.min(state.traceAnchor.column, sourceLine.length),
+    },
+    scrollIntoView: true,
+  });
+  state.suppressNextSelectionLookup = false;
+  refreshInspector();
+}
+
+function traceLensControls() {
+  const canGoBack = state.traceHistoryIndex > 0;
+  const canGoForward =
+    state.traceHistoryIndex + 1 < state.traceHistory.length;
+  return `<div class="trace-lens-controls">
+    <div class="trace-history-controls" aria-label="Trace navigation history">
+      <button type="button" data-trace-history="-1" ${canGoBack ? "" : "disabled"} aria-label="Back in trace history">‹</button>
+      <button type="button" data-trace-history="1" ${canGoForward ? "" : "disabled"} aria-label="Forward in trace history">›</button>
+    </div>
+    <button type="button" class="trace-pin ${state.tracePinned ? "active" : ""}" data-trace-pin aria-pressed="${state.tracePinned}" title="${state.tracePinned ? "Follow the caret" : "Keep this trace focus"}">${state.tracePinned ? "Pinned" : "Pin"}</button>
+  </div>`;
+}
+
+function renderTraceAggregate(debuggerState) {
+  const focus = traceFocusForAnchor(debuggerState, state.traceAnchor);
+  if (!focus) return "";
+  const summary = [
+    focus.count
+      ? `${focus.count} occurrence${focus.count === 1 ? "" : "s"}`
+      : "Not executed",
+    focus.distinct.length > 1 ? `${focus.distinct.length} values` : "",
+    focus.range ? `${focus.range[0]}…${focus.range[1]}` : "",
+    focus.exceptions ? `${focus.exceptions} raised` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const observations = focus.distinct.length
+    ? `<section class="trace-lens-section">
+        <h3>Observed</h3>
+        <div class="trace-value-groups">
+          ${focus.distinct
+            .slice(0, 8)
+            .map(
+              (group) =>
+                `<button type="button" ${group.calls[0] ? `data-debug-call="${escapeHtml(group.calls[0])}"` : "disabled"}>
+                  <code title="${escapeHtml(group.type || "")}">${escapeHtml(group.value)}</code>
+                  ${group.count > 1 ? `<span>${group.count}×</span>` : ""}
+                </button>`,
+            )
+            .join("")}
+        </div>
+      </section>`
+    : "";
+  const previousFocus = traceFocusForAnchor(
+    state.previousDebugger,
+    state.traceAnchor,
+  );
+  const runChange =
+    previousFocus &&
+    (previousFocus.count !== focus.count ||
+      previousFocus.distinct.length !== focus.distinct.length ||
+      previousFocus.exceptions !== focus.exceptions)
+      ? `<p class="trace-run-change" title="Compared with the previous execution">${previousFocus.count} → ${focus.count} occurrences${
+          previousFocus.distinct.length !== focus.distinct.length
+            ? ` · ${previousFocus.distinct.length} → ${focus.distinct.length} values`
+            : ""
+        }${
+          previousFocus.exceptions !== focus.exceptions
+            ? ` · ${previousFocus.exceptions} → ${focus.exceptions} raised`
+            : ""
+        }</p>`
+      : "";
+  const callGroups = new Map();
+  for (const call of focus.calls) {
+    const key = `${call.label}:${call.callsiteKey || call.line}`;
+    if (!callGroups.has(key)) callGroups.set(key, []);
+    callGroups.get(key).push(call);
+  }
+  const calls = callGroups.size
+    ? `<section class="trace-lens-section">
+        <h3>Calls</h3>
+        <div class="trace-call-groups">
+          ${[...callGroups.values()]
+            .map((group) => {
+              const call = group[0];
+              const outcomes = new Set(
+                group.map((item) =>
+                  displayDebugValue(
+                    item.value,
+                    item.returnType || item.type,
+                  ),
+                ),
+              );
+              return `<button type="button" data-debug-call="${escapeHtml(call.id)}">
+                <span>${escapeHtml(call.label)}</span>
+                <small>${group.length}× · ${outcomes.size} result${outcomes.size === 1 ? "" : "s"}</small>
+              </button>`;
+            })
+            .join("")}
+        </div>
+      </section>`
+    : "";
+  return `<section class="trace-lens ${debuggerState.stale ? "stale" : ""}">
+    ${traceLensControls()}
+    <div class="trace-lens-location">
+      <strong><code>${escapeHtml(focus.anchor.label)}</code></strong>
+      <span>${escapeHtml(summary)}</span>
+    </div>
+    ${
+      debuggerState.stale
+        ? '<button type="button" class="debugger-stale" data-debug-start>Code changed · refresh trace</button>'
+        : ""
+    }
+    ${runChange}
+    ${observations}
+    ${calls}
+    ${
+      !observations && !calls
+        ? '<p class="trace-lens-empty">No recorded activity at this source position.</p>'
+        : ""
+    }
+  </section>`;
+}
+
 function renderDebugger() {
   if (!state.evaluation?.ok) return "";
   if (state.debugging) {
+    if (state.debuggingBackground) return "";
     return `<section class="debugger-panel debugger-loading" aria-live="polite">
       <span class="debugger-pulse"></span>
       <span>Reconstructing calls…</span>
@@ -3142,11 +3512,12 @@ function renderDebugger() {
   }
   const debuggerState = state.debugger;
   if (!debuggerState) {
-    return `<section class="debugger-launch">
-      <button type="button" data-debug-start>
-        <span>Explore execution</span>
-      </button>
-    </section>`;
+    return state.debugError
+      ? `<button type="button" class="debugger-stale" data-debug-start title="${escapeHtml(state.debugError)}">Trace unavailable · retry</button>`
+      : "";
+  }
+  if (!debuggerState.selectedCallId) {
+    return renderTraceAggregate(debuggerState);
   }
   const call =
     debuggerState.model?.calls.get(debuggerState.selectedCallId) ||
@@ -3164,12 +3535,34 @@ function renderDebugger() {
     occurrenceSiblings[call.occurrenceIndex - 1] || null;
   const nextOccurrence =
     occurrenceSiblings[call.occurrenceIndex + 1] || null;
+  const callValue = (candidate) =>
+    `${candidate?.outcome}:${displayDebugValue(
+      candidate?.value,
+      candidate?.returnType || candidate?.type,
+    )}`;
+  const previousChange =
+    occurrenceSiblings
+      .slice(0, call.occurrenceIndex)
+      .reverse()
+      .find((candidate) => callValue(candidate) !== callValue(call)) || null;
+  const nextChange =
+    occurrenceSiblings
+      .slice(call.occurrenceIndex + 1)
+      .find((candidate) => callValue(candidate) !== callValue(call)) || null;
   const occurrenceNavigation =
     call.kind !== "root" && occurrenceSiblings.length > 1
       ? `<div class="debugger-occurrences" aria-label="Callsite occurrences">
           <button type="button" data-debug-call="${escapeHtml(previousOccurrence?.id || "")}" ${previousOccurrence ? "" : "disabled"} aria-label="Previous occurrence">‹</button>
           <span>${occurrencePosition} of ${occurrenceSiblings.length}</span>
           <button type="button" data-debug-call="${escapeHtml(nextOccurrence?.id || "")}" ${nextOccurrence ? "" : "disabled"} aria-label="Next occurrence">›</button>
+        </div>`
+      : "";
+  const changeNavigation =
+    previousChange || nextChange
+      ? `<div class="debugger-changes" aria-label="Value changes">
+          <span>Change</span>
+          <button type="button" data-debug-call="${escapeHtml(previousChange?.id || "")}" ${previousChange ? "" : "disabled"} aria-label="Previous different result">‹</button>
+          <button type="button" data-debug-call="${escapeHtml(nextChange?.id || "")}" ${nextChange ? "" : "disabled"} aria-label="Next different result">›</button>
         </div>`
       : "";
   const parameters = call.parameters?.length
@@ -3213,17 +3606,18 @@ function renderDebugger() {
           )
           .join("")}
       </section>`
-    : '<p class="debugger-empty">This call made no recorded Dox calls.</p>';
+    : "";
   return `<section class="debugger-panel ${debuggerState.stale ? "stale" : ""}">
     <div class="debugger-head">
       <nav class="debugger-breadcrumb" aria-label="Selected call">${breadcrumb}</nav>
-      <button type="button" class="debugger-close" data-debug-close aria-label="Close debugger" title="Close debugger">×</button>
+      ${traceLensControls()}
     </div>
     <div class="debugger-location">
       <strong>${escapeHtml(call.label)}</strong>
-      <span>${call.kind === "root" ? "Top-level execution" : escapeHtml(call.path)}</span>
+      ${call.kind === "root" ? "<span>Top-level execution</span>" : ""}
     </div>
     ${occurrenceNavigation}
+    ${changeNavigation}
     ${
       debuggerState.stale
         ? '<button type="button" class="debugger-stale" data-debug-start>Code changed · reconstruct calls</button>'
@@ -3258,7 +3652,6 @@ function renderInspector() {
     return `
       ${renderDebugger()}
       ${diagnosticsHtml}
-      ${renderDependencyContext()}
     `;
   }
   const typeInfo = state.typeInfo;
@@ -3616,10 +4009,18 @@ function updateSource(source, { evaluate = true } = {}) {
     state.traceContext = null;
     state.selectedTraceId = null;
     state.hoveredObservationSite = null;
+    state.debugController?.abort();
+    state.debugController = null;
+    state.debugging = false;
+    state.debuggingBackground = false;
     if (state.debugger) {
       state.debugger.stale = true;
+      state.debugger.selectedCallId = null;
       setMarkdownEditorDebugPosition(state.sourceEditorView, null);
-      setMarkdownEditorDebugProjection(state.sourceEditorView, null);
+      setMarkdownEditorDebugProjection(
+        state.sourceEditorView,
+        projectionForTraceAnchor(state.traceAnchor),
+      );
     }
   } else {
     cancelPendingEvaluation();
@@ -3730,6 +4131,26 @@ function scheduleTypeLookup(editor, position) {
   );
   state.cursorPosition = block ? cursor : null;
   state.typeInfo = null;
+  if (!state.tracePinned) {
+    const anchor = block ? traceAnchorAtPosition(editor, position) : null;
+    const changed =
+      anchor?.path !== state.traceAnchor?.path ||
+      anchor?.line !== state.traceAnchor?.line ||
+      anchor?.label !== state.traceAnchor?.label;
+    state.traceAnchor = anchor;
+    if (state.debugger) {
+      state.debugger.selectedCallId = null;
+      setMarkdownEditorDebugPosition(state.sourceEditorView, null);
+      setMarkdownEditorDebugProjection(
+        state.sourceEditorView,
+        projectionForTraceAnchor(anchor),
+      );
+    }
+    if (changed) {
+      state.traceHistory = [];
+      state.traceHistoryIndex = -1;
+    }
+  }
   refreshInspector();
   if (!block) {
     state.typePending = null;
@@ -4330,6 +4751,7 @@ function scheduleEvaluation(
       } else {
         render();
       }
+      void startDebugger({ background: true });
     } catch (error) {
       if (
         state.pendingEvaluation !== request ||
@@ -4521,6 +4943,7 @@ function mountEmbeddedEditors() {
       onDefinitionRequest: (position, mode) =>
         requestDefinition(state.sourceEditorView, position, mode),
       onDebugNavigate: (callId) => void showDebugCall(callId),
+      onOutputNavigate: showOutputProvenance,
       onStateChange: (editorState) => {
         const active = currentSession();
         if (active) active.editorState = editorState;
@@ -4708,9 +5131,15 @@ function selectSourceSpan(trace) {
   state.suppressNextSelectionLookup = false;
 }
 
-async function showDebugCall(callId, { scroll = true } = {}) {
+async function showDebugCall(
+  callId,
+  { scroll = true, recordHistory = true } = {},
+) {
   const debuggerState = state.debugger;
   if (!debuggerState) return;
+  if (recordHistory && state.traceHistoryIndex < 0) {
+    recordTraceVisit();
+  }
   const previousCall =
     debuggerState.model.calls.get(debuggerState.selectedCallId) ||
     debuggerState.model.roots.get(debuggerState.selectedCallId);
@@ -4748,6 +5177,13 @@ async function showDebugCall(callId, { scroll = true } = {}) {
     previousCall?.line === call.line &&
     previousCall?.column === call.column;
   debuggerState.selectedCallId = callId;
+  state.traceAnchor = {
+    path: call.path,
+    line: call.line,
+    column: call.column || 0,
+    label: call.label,
+  };
+  if (recordHistory) recordTraceVisit();
   refreshInspector();
   const inspector = document.querySelector(".inspector");
   if (inspector) inspector.scrollTop = 0;
@@ -4774,7 +5210,7 @@ async function showDebugCall(callId, { scroll = true } = {}) {
   }
 }
 
-async function startDebugger() {
+async function startDebugger({ background = false } = {}) {
   if (
     state.debugging ||
     !state.document ||
@@ -4782,7 +5218,9 @@ async function startDebugger() {
     state.evaluationInvalidation
   ) {
     if (state.evaluationInvalidation) {
-      toast("Wait for the current OCaml evaluation before debugging.");
+      if (!background) {
+        toast("Wait for the current OCaml evaluation before debugging.");
+      }
     }
     return;
   }
@@ -4790,7 +5228,9 @@ async function startDebugger() {
   const controller = new AbortController();
   state.debugController = controller;
   state.debugging = true;
-  refreshInspector();
+  state.debuggingBackground = background;
+  state.debugError = null;
+  if (!background) refreshInspector();
   try {
     const payload = await api("/api/debug", {
       method: "POST",
@@ -4802,6 +5242,7 @@ async function startDebugger() {
       }),
     });
     if (state.debugController !== controller) return;
+    const previousDebugger = state.debugger;
     state.debugger = {
       ...payload.debugger,
       sources: { [state.path]: state.document.source },
@@ -4811,23 +5252,73 @@ async function startDebugger() {
       state.debugger,
       state.debugger.sources,
     );
-    const root =
-      state.debugger.model.roots.get(`root:${state.path}`) ||
-      state.debugger.model.roots.values().next().value;
-    state.debugger.selectedCallId =
-      root?.id || state.debugger.model.calls.values().next().value?.id;
+    state.previousDebugger = previousDebugger;
+    state.debugger.selectedCallId = null;
+    if (!state.traceAnchor || state.traceAnchor.path !== state.path) {
+      const editor = state.sourceEditorView;
+      state.traceAnchor = editor && state.cursorPosition
+        ? traceAnchorAtPosition(editor, editor.state.selection.main.head)
+        : null;
+    }
     state.debugging = false;
+    state.debuggingBackground = false;
+    setMarkdownEditorDebugPosition(state.sourceEditorView, null);
+    setMarkdownEditorDebugProjection(
+      state.sourceEditorView,
+      projectionForTraceAnchor(state.traceAnchor),
+    );
+    refreshInspector();
     state.debugController = null;
-    await showDebugCall(state.debugger.selectedCallId, { scroll: false });
   } catch (error) {
     if (state.debugController !== controller || error.name === "AbortError") {
       return;
     }
     state.debugging = false;
+    state.debuggingBackground = false;
     state.debugController = null;
-    refreshInspector();
-    toast(error.message);
+    state.debugError = error.message;
+    if (!background) {
+      refreshInspector();
+      toast(error.message);
+    } else {
+      refreshInspector();
+    }
   }
+}
+
+async function restoreTraceVisit(index) {
+  const snapshot = state.traceHistory[index];
+  if (!snapshot || !state.debugger) return;
+  if (snapshot.path !== state.path) {
+    const modulePath = state.project.documents.find(
+      (document) => document.path === snapshot.path,
+    )?.module;
+    if (
+      !modulePath ||
+      !(await loadDocument(modulePath, {
+        preserveTrace: true,
+        preserveDebugger: true,
+        history: "push",
+      }))
+    ) {
+      return;
+    }
+  }
+  state.traceHistoryIndex = index;
+  state.traceAnchor = snapshot.anchor;
+  if (snapshot.callId) {
+    await showDebugCall(snapshot.callId, {
+      recordHistory: false,
+    });
+    return;
+  }
+  state.debugger.selectedCallId = null;
+  setMarkdownEditorDebugPosition(state.sourceEditorView, null);
+  setMarkdownEditorDebugProjection(
+    state.sourceEditorView,
+    projectionForTraceAnchor(state.traceAnchor),
+  );
+  refreshInspector();
 }
 
 async function openTrace(trace) {
@@ -4878,14 +5369,27 @@ function bindInspectorEvents() {
       void showDebugCall(button.dataset.debugCall),
     );
   });
-  document.querySelector("[data-debug-close]")?.addEventListener("click", () => {
-    state.debugController?.abort();
-    state.debugController = null;
-    state.debugging = false;
-    state.debugger = null;
-    setMarkdownEditorDebugPosition(state.sourceEditorView, null);
-    setMarkdownEditorDebugProjection(state.sourceEditorView, null);
+  document.querySelector("[data-trace-pin]")?.addEventListener("click", () => {
+    state.tracePinned = !state.tracePinned;
+    if (!state.tracePinned && state.sourceEditorView) {
+      state.traceAnchor = traceAnchorAtPosition(
+        state.sourceEditorView,
+        state.sourceEditorView.state.selection.main.head,
+      );
+      if (state.debugger) state.debugger.selectedCallId = null;
+      setMarkdownEditorDebugProjection(
+        state.sourceEditorView,
+        projectionForTraceAnchor(state.traceAnchor),
+      );
+    }
     refreshInspector();
+  });
+  document.querySelectorAll("[data-trace-history]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index =
+        state.traceHistoryIndex + Number(button.dataset.traceHistory);
+      void restoreTraceVisit(index);
+    });
   });
   document
     .querySelector("[data-definition-peek]")

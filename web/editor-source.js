@@ -147,6 +147,34 @@ class DebugAnnotationsWidget extends WidgetType {
   }
 }
 
+class TraceActivityWidget extends WidgetType {
+  constructor(activity) {
+    super();
+    this.activity = activity;
+  }
+
+  eq(other) {
+    return JSON.stringify(this.activity) === JSON.stringify(other.activity);
+  }
+
+  toDOM() {
+    const marker = document.createElement("span");
+    marker.className = `cm-trace-activity${this.activity.exceptions ? " has-exception" : ""}`;
+    marker.textContent = this.activity.exceptions
+      ? "!"
+      : `${this.activity.count}×`;
+    marker.title = [
+      `${this.activity.count} recorded occurrence${this.activity.count === 1 ? "" : "s"}`,
+      this.activity.exceptions
+        ? `${this.activity.exceptions} exception${this.activity.exceptions === 1 ? "" : "s"}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    return marker;
+  }
+}
+
 function debugProjectionDecorations(state, projection) {
   if (!projection) return Decoration.none;
   const decorations = [];
@@ -165,6 +193,15 @@ function debugProjectionDecorations(state, projection) {
         widget: new DebugAnnotationsWidget(group.items, group.indent),
         side: 1,
       }).range(state.doc.line(group.line).to),
+    );
+  }
+  for (const activity of projection.activity || []) {
+    if (activity.line < 1 || activity.line > state.doc.lines) continue;
+    decorations.push(
+      Decoration.widget({
+        widget: new TraceActivityWidget(activity),
+        side: -1,
+      }).range(state.doc.line(activity.line).from),
     );
   }
   for (const link of projection.links || []) {
@@ -308,8 +345,8 @@ const embeddedTheme = EditorView.theme({
     overflow: "visible",
     color: "#76817b",
     fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
-    fontSize: "0.77em",
-    lineHeight: "1.62",
+    fontSize: "1em",
+    lineHeight: "inherit",
     pointerEvents: "auto",
     whiteSpace: "nowrap",
   },
@@ -383,6 +420,25 @@ const embeddedTheme = EditorView.theme({
   },
   ".cm-debug-annotation-separator": {
     color: "#b3b8b5",
+  },
+  ".cm-trace-activity": {
+    position: "absolute",
+    zIndex: "1",
+    display: "inline-block",
+    minWidth: "3ch",
+    transform: "translateX(calc(-100% - 9px))",
+    color: "#9aa29d",
+    fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
+    fontSize: "9px",
+    fontWeight: "500",
+    lineHeight: "2.25",
+    textAlign: "right",
+    whiteSpace: "nowrap",
+    pointerEvents: "none",
+  },
+  ".cm-trace-activity.has-exception": {
+    color: "#a55449",
+    fontWeight: "700",
   },
   ".cm-debug-call-link": {
     borderRadius: "3px",
@@ -597,6 +653,12 @@ const embeddedTheme = EditorView.theme({
     gridTemplateColumns: "10px minmax(0, 1fr)",
     gap: "8px",
     padding: "3px 0 4px",
+  },
+  ".cm-block-result-row[data-debug-output], .cm-inline-result[data-debug-output-line]": {
+    cursor: "pointer",
+  },
+  ".cm-block-result-row[data-debug-output]:hover": {
+    color: "#315e51",
   },
   ".cm-block-result-mark": {
     color: "#a3aaa6",
@@ -1227,10 +1289,23 @@ const markdownPresentation = ViewPlugin.fromClass(
   { decorations: (plugin) => plugin.decorations },
 );
 
-function appendResultRow(parent, { kind = "output", marker = "›", text = "", type = "" }) {
+function appendResultRow(
+  parent,
+  {
+    kind = "output",
+    marker = "›",
+    text = "",
+    type = "",
+    outputId = "",
+  },
+) {
   if (!text && kind !== "html") return;
   const row = document.createElement("div");
   row.className = `cm-block-result-row cm-block-result-${kind}`;
+  if (outputId) {
+    row.dataset.debugOutput = outputId;
+    row.title = "Show where this value was produced";
+  }
 
   const mark = document.createElement("span");
   mark.className = "cm-block-result-mark";
@@ -1303,12 +1378,14 @@ class BlockResultsWidget extends WidgetType {
           marker: "=",
           text: value,
           type,
+          outputId: view.id,
         });
       } else if (view.kind === "html") {
         appendResultRow(container, {
           kind: "html",
           marker: "↗",
           text: view.content,
+          outputId: view.id,
         });
       } else if (view.kind === "link") {
         const [label = "", url = ""] = view.content.split("\x1f");
@@ -1316,12 +1393,14 @@ class BlockResultsWidget extends WidgetType {
           kind: "value",
           marker: "↗",
           text: `${label} — ${url}`,
+          outputId: view.id,
         });
       } else {
         appendResultRow(container, {
           kind: "value",
           marker: "=",
           text: view.content,
+          outputId: view.id,
         });
       }
     }
@@ -1337,6 +1416,10 @@ class BlockResultsWidget extends WidgetType {
 
   withInvalidation(invalidated) {
     return new BlockResultsWidget(this.group, invalidated);
+  }
+
+  ignoreEvent() {
+    return false;
   }
 }
 
@@ -1356,6 +1439,7 @@ class InlineResultWidget extends WidgetType {
   toDOM() {
     const result = document.createElement("span");
     result.className = `cm-inline-result${this.result.error ? " cm-inline-result-error" : ""}${this.invalidated ? " cm-result-invalidated" : ""}`;
+    result.dataset.debugOutputLine = String(this.result.line || "");
     result.textContent = this.result.error ? "!" : this.result.value;
     const description = this.result.error || this.result.type;
     if (this.invalidated) {
@@ -1378,6 +1462,10 @@ class InlineResultWidget extends WidgetType {
 
   withInvalidation(invalidated) {
     return new InlineResultWidget(this.result, this.index, invalidated);
+  }
+
+  ignoreEvent() {
+    return false;
   }
 }
 
@@ -1778,6 +1866,7 @@ function mountEditor(
     onCompletionKey,
     onDefinitionRequest,
     onDebugNavigate,
+    onOutputNavigate,
     sourceMode = "literate",
     wikiModules = [],
     onWikiNavigate,
@@ -1891,6 +1980,24 @@ function mountEditor(
         const debugCall = event.target.closest?.("[data-debug-call]");
         if (debugCall && view.dom.contains(debugCall)) {
           onDebugNavigate?.(debugCall.dataset.debugCall);
+          event.preventDefault();
+          return true;
+        }
+        const output = event.target.closest?.("[data-debug-output]");
+        if (output && view.dom.contains(output)) {
+          onOutputNavigate?.({
+            id: output.dataset.debugOutput,
+          });
+          event.preventDefault();
+          return true;
+        }
+        const inlineOutput = event.target.closest?.(
+          "[data-debug-output-line]",
+        );
+        if (inlineOutput && view.dom.contains(inlineOutput)) {
+          onOutputNavigate?.({
+            line: Number(inlineOutput.dataset.debugOutputLine),
+          });
           event.preventDefault();
           return true;
         }

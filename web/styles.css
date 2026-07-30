@@ -339,6 +339,143 @@ button {
   gap: 6px;
 }
 
+.trace-lens {
+  margin: -5px 0 19px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 0 16px;
+}
+
+.trace-lens.stale > :not(.debugger-stale) {
+  opacity: 0.42;
+}
+
+.trace-lens-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-height: 25px;
+}
+
+.trace-history-controls {
+  display: flex;
+}
+
+.trace-history-controls button,
+.trace-pin {
+  min-width: 23px;
+  height: 23px;
+  border: 0;
+  border-radius: 5px;
+  padding: 0 5px;
+  background: transparent;
+  color: #7d8782;
+  cursor: pointer;
+  font: 10px/1 var(--mono);
+}
+
+.trace-history-controls button {
+  font-size: 14px;
+}
+
+.trace-history-controls button:hover:not(:disabled),
+.trace-pin:hover,
+.trace-pin.active {
+  background: color-mix(in srgb, var(--mint) 62%, transparent);
+  color: var(--ink);
+}
+
+.trace-history-controls button:disabled {
+  opacity: 0.22;
+  cursor: default;
+}
+
+.trace-lens-location {
+  display: grid;
+  gap: 2px;
+  margin: 5px 0 9px;
+}
+
+.trace-lens-location strong {
+  overflow: hidden;
+  font: 600 11px/1.4 var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-lens-location span {
+  color: var(--muted);
+  font: 9.5px/1.4 var(--mono);
+}
+
+.trace-lens-section {
+  margin-top: 10px;
+}
+
+.trace-lens-section h3 {
+  margin: 0 0 4px;
+  color: #7c8680;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.trace-value-groups,
+.trace-call-groups {
+  display: grid;
+  gap: 2px;
+}
+
+.trace-value-groups button,
+.trace-call-groups button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 4px;
+  padding: 3px 4px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font: 10px/1.4 var(--mono);
+  text-align: left;
+}
+
+.trace-value-groups button:hover:not(:disabled),
+.trace-call-groups button:hover {
+  background: var(--mint);
+}
+
+.trace-value-groups code,
+.trace-call-groups span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-value-groups span,
+.trace-call-groups small {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font: 9px/1.4 var(--mono);
+}
+
+.trace-run-change {
+  margin: 4px 0 8px;
+  color: #6e7973;
+  font: 9px/1.45 var(--mono);
+}
+
+.trace-lens-empty {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 9.5px;
+}
+
 .debugger-close {
   width: 25px;
   height: 25px;
@@ -472,6 +609,41 @@ button {
 }
 
 .debugger-occurrences button:disabled {
+  opacity: 0.22;
+  cursor: default;
+}
+
+.debugger-changes {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  margin-top: 3px;
+  color: var(--muted);
+  font: 9px/1.4 var(--mono);
+}
+
+.debugger-changes span {
+  margin-right: 3px;
+}
+
+.debugger-changes button {
+  width: 22px;
+  height: 20px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #66716b;
+  cursor: pointer;
+  font: 13px/1 var(--mono);
+}
+
+.debugger-changes button:hover:not(:disabled) {
+  background: var(--mint);
+  color: var(--ink);
+}
+
+.debugger-changes button:disabled {
   opacity: 0.22;
   cursor: default;
 }
