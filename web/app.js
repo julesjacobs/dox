@@ -970,19 +970,16 @@ function renderShell() {
       class="workspace ${state.view === "document" ? "document-context" : ""} ${state.sourceMode === "source" ? "source-context" : ""}"
       style="--sidebar-width: ${state.paneWidths.sidebar}px; --inspector-width: ${state.paneWidths.inspector}px"
     >
-      <header class="topbar">
-        <div class="brand"><span class="brand-mark">D</span><span>Dox</span></div>
-        <div class="view-title">${escapeHtml(state.module || "")}</div>
-        <div class="top-actions">
-          <button class="button pane-toggle files-toggle" id="files-toggle" aria-label="Show project files">Files</button>
-          <button class="button secondary-action ${state.sourceMode === "source" ? "active" : ""}" id="source-mode-button" aria-pressed="${state.sourceMode === "source"}">${state.sourceMode === "source" ? "Document" : "Source"}</button>
-          <button class="button" id="artifact-button" ${!state.document ? "disabled" : ""}>Build</button>
-        </div>
-      </header>
       <div class="body-grid">
         <aside class="sidebar">${renderSidebar()}</aside>
         <div class="pane-resizer pane-resizer-left" data-pane-resizer="sidebar" role="separator" aria-label="Resize module pane" aria-orientation="vertical" tabindex="0"></div>
-        <main class="main" id="main-pane">${renderMain()}</main>
+        <main class="main" id="main-pane">
+          <div class="main-actions">
+            <button class="button pane-toggle files-toggle" id="files-toggle" aria-label="Show project files">Files</button>
+            <button class="button secondary-action ${state.sourceMode === "source" ? "active" : ""}" id="source-mode-button" aria-pressed="${state.sourceMode === "source"}">${state.sourceMode === "source" ? "Document" : "Source"}</button>
+          </div>
+          ${renderMain()}
+        </main>
         <div class="pane-resizer pane-resizer-right" data-pane-resizer="inspector" role="separator" aria-label="Resize context pane" aria-orientation="vertical" tabindex="0"></div>
         <aside class="inspector">${renderInspector()}</aside>
       </div>
@@ -1001,10 +998,10 @@ function renderShell() {
 
 function renderSidebar() {
   if (!state.project?.documents.length) {
-    return `<div class="pane-heading"><p class="pane-label">Modules</p></div><div class="module-outline-host" data-module-outline></div>`;
+    return `<div class="sidebar-brand">Dox</div><div class="module-outline-host" data-module-outline></div>`;
   }
   return `
-    <div class="pane-heading"><p class="pane-label">Modules</p></div>
+    <div class="sidebar-brand">Dox</div>
     <div class="module-outline-host" data-module-outline aria-label="Editable module outline"></div>
   `;
 }
@@ -4176,11 +4173,6 @@ function bindEvents() {
     ?.addEventListener("click", () =>
       setSourceMode(state.sourceMode === "source" ? "literate" : "source"),
     );
-  document.querySelector("#artifact-button")?.addEventListener("click", () => {
-    state.showBuild = !state.showBuild;
-    refreshInspector();
-    if (state.showBuild) document.querySelector("#artifact-form input")?.focus();
-  });
   document.querySelector("#new-document")?.addEventListener("click", createDocument);
   document.querySelector("#files-toggle")?.addEventListener("click", () => {
     const workspace = document.querySelector(".workspace");
