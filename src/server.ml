@@ -436,7 +436,7 @@ let refactor_apply_response context body =
                  ("projectVersion", `String snapshot.version);
                ]))
 
-let refactor_rewrite_response body =
+let refactor_rewrite_response context body =
   let open Util in
   match
     let* request = json_body body in
@@ -446,15 +446,30 @@ let refactor_rewrite_response body =
     Ok (path, source, renames)
   with
   | Error message -> error message
-  | Ok (path, source, renames) ->
-      let document = Document.parse ~path source in
-      json
-        (`Assoc
-           [
-             ( "source",
-               `String (Project.rewrite_document_module_paths renames document)
-             );
-           ])
+  | Ok (path, source, renames) -> (
+      match Project.snapshot context.project with
+      | Error error -> project_error error
+      | Ok snapshot ->
+          let module_paths =
+            Page_index.modules snapshot.page_index
+            |> List.map (fun module_path ->
+                Option.value ~default:module_path
+                  (List.find_map
+                     (fun rename ->
+                       if String.equal rename.Project.after module_path then
+                         Some rename.before
+                       else None)
+                     renames))
+          in
+          let document = Document.parse ~path source in
+          json
+            (`Assoc
+               [
+                 ( "source",
+                   `String
+                     (Project.rewrite_document_module_paths ~module_paths
+                        renames document) );
+               ]))
 
 let evaluate_response context ~cancelled body =
   let open Util in
@@ -847,7 +862,7 @@ let route context ~cancelled method_ target headers body =
           refactor_apply_response context body)
   | "POST", "/api/refactor/rewrite" ->
       require_active_request context headers (fun () ->
-          refactor_rewrite_response body)
+          refactor_rewrite_response context body)
   | "POST", "/api/artifact" ->
       require_active_request context headers (fun () ->
           artifact_response context body)

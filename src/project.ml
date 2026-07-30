@@ -1357,7 +1357,63 @@ let rewrite_ocaml_line renames state source =
   loop 0;
   Buffer.contents buffer
 
-let rewrite_document_module_paths renames document =
+let module_path_beneath namespace module_path =
+  if String.equal namespace "" then Some module_path
+  else
+    let prefix = namespace ^ "." in
+    if Util.starts_with ~prefix module_path then
+      Some
+        (String.sub module_path (String.length prefix)
+           (String.length module_path - String.length prefix))
+    else None
+
+let contextual_module_renames ~module_paths ~module_path renames =
+  let visible = Module_path.ancestor_scope_bindings module_paths module_path in
+  let visible_dependency component before =
+    List.assoc_opt component visible
+    |> Option.value ~default:[]
+    |> List.exists (fun dependency ->
+        Module_path.is_beneath ~namespace:dependency before
+        || Module_path.is_beneath ~namespace:before dependency)
+  in
+  let local_renames =
+    Module_path.namespace_prefixes module_path
+    |> List.concat_map (fun namespace ->
+        renames
+        |> List.filter_map (fun rename ->
+            match module_path_beneath namespace rename.before with
+            | None -> None
+            | Some before ->
+                let component =
+                  match String.split_on_char '.' before with
+                  | first :: _ -> first
+                  | [] -> before
+                in
+                if
+                  String.equal before ""
+                  || not (visible_dependency component rename.before)
+                then None
+                else
+                  let after =
+                    Option.value ~default:rename.after
+                      (module_path_beneath namespace rename.after)
+                  in
+                  Some { before; after }))
+  in
+  renames @ local_renames
+  |> List.sort_uniq (fun left right ->
+      let before = String.compare left.before right.before in
+      if before <> 0 then before else String.compare left.after right.after)
+
+let rewrite_document_module_paths ~module_paths renames document =
+  let module_path =
+    match Module_path.of_source_path document.Document.path with
+    | Ok module_path -> module_path
+    | Error _ -> document.Document.path
+  in
+  let code_renames =
+    contextual_module_renames ~module_paths ~module_path renames
+  in
   let lines = Document.lines_with_endings document.Document.source in
   let code_lines = Hashtbl.create 32 in
   List.iter
@@ -1391,7 +1447,7 @@ let rewrite_document_module_paths renames document =
   |> List.mapi (fun index line ->
       let line_number = index + 1 in
       if Hashtbl.mem code_lines line_number then
-        rewrite_ocaml_line renames state line
+        rewrite_ocaml_line code_renames state line
       else
         let references =
           Option.value ~default:[] (Hashtbl.find_opt references line_number)
@@ -1458,6 +1514,7 @@ let refactor_preview_id snapshot renames =
 let refactor_preview snapshot renames =
   let* () = validate_module_renames snapshot renames in
   let transformed_documents =
+    let module_paths = Page_index.modules snapshot.page_index in
     snapshot.documents
     |> List.map (fun document ->
         let module_path =
@@ -1478,7 +1535,7 @@ let refactor_preview snapshot renames =
         in
         Document.parse
           ~path:(Module_path.source_path target_module)
-          (rewrite_document_module_paths renames document))
+          (rewrite_document_module_paths ~module_paths renames document))
   in
   let* transformed_index =
     Page_index.build transformed_documents
@@ -1496,9 +1553,12 @@ let refactor_preview snapshot renames =
            ^ String.concat "\n" compiler_analysis.diagnostics))
   in
   let rewritten =
+    let module_paths = Page_index.modules snapshot.page_index in
     snapshot.documents
     |> List.filter_map (fun document ->
-        let source = rewrite_document_module_paths renames document in
+        let source =
+          rewrite_document_module_paths ~module_paths renames document
+        in
         let module_path =
           match
             Page_index.find_source snapshot.page_index document.Document.path
@@ -1572,6 +1632,7 @@ let apply_module_refactor project ~expected_project_version ~expected_preview_id
           else
             let* preview = refactor_preview snapshot renames in
             let transformed =
+              let module_paths = Page_index.modules snapshot.page_index in
               snapshot.documents
               |> List.map (fun document ->
                   let module_path =
@@ -1592,7 +1653,9 @@ let apply_module_refactor project ~expected_project_version ~expected_preview_id
                          renames)
                   in
                   let path = Module_path.source_path target_module in
-                  let source = rewrite_document_module_paths renames document in
+                  let source =
+                    rewrite_document_module_paths ~module_paths renames document
+                  in
                   (document, path, source))
             in
             let documents =

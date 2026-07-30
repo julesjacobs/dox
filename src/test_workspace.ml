@@ -46,6 +46,25 @@ let () =
   expect
     (Result.is_error (Module_path.validate "Models.Bad-Name"))
     "invalid module component was accepted";
+  let sibling_reference =
+    Document.parse ~path:"examples/multi_file.ml.md"
+      "# Multi file\n\n    let result = Library.mean [1; 2]\n"
+  in
+  let rewritten_sibling_reference =
+    Project.rewrite_document_module_paths
+      ~module_paths:[ "Examples.Library"; "Examples.Multi_file" ]
+      [ { Project.before = "Examples.Library"; after = "Examples.Librarys" } ]
+      sibling_reference
+  in
+  expect
+    (try
+       ignore
+         (Str.search_forward
+            (Str.regexp_string "Librarys.mean")
+            rewritten_sibling_reference 0);
+       true
+     with Not_found -> false)
+    "a module refactor did not rewrite its short sibling alias";
   expect
     (Compiler_workspace.safe_generated_file "models/statistics.ml"
     && not
