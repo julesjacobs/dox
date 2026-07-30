@@ -6,20 +6,37 @@ type page = {
 
 type t = {
   pages : page list;
+  order : Module_path.t list;
   namespaces : string list;
   diagnostics : string list;
 }
 
-let build_internal ~strict documents =
+let normalize_order pages requested =
+  let modules = List.map (fun page -> page.module_path) pages in
+  let rec keep_known seen = function
+    | [] -> List.rev seen
+    | module_path :: rest ->
+        if List.mem module_path modules && not (List.mem module_path seen) then
+          keep_known (module_path :: seen) rest
+        else keep_known seen rest
+  in
+  let ordered = keep_known [] requested in
+  ordered
+  @ List.filter (fun module_path -> not (List.mem module_path ordered)) modules
+
+let build_internal ~strict ~order documents =
   let rec add seen_pages seen_namespaces pages diagnostics = function
     | [] ->
+        let pages =
+          List.sort
+            (fun left right ->
+              Module_path.compare left.module_path right.module_path)
+            pages
+        in
         Ok
           {
-            pages =
-              List.sort
-                (fun left right ->
-                  Module_path.compare left.module_path right.module_path)
-                pages;
+            pages;
+            order = normalize_order pages order;
             namespaces = List.sort_uniq String.compare seen_namespaces;
             diagnostics = List.rev diagnostics;
           }
@@ -50,8 +67,10 @@ let build_internal ~strict documents =
   in
   add [] [] [] [] documents
 
-let build documents = build_internal ~strict:true documents
-let build_migrating documents = build_internal ~strict:false documents
+let build ?(order = []) documents = build_internal ~strict:true ~order documents
+
+let build_migrating ?(order = []) documents =
+  build_internal ~strict:false ~order documents
 
 let find t module_path =
   List.find_opt (fun page -> String.equal page.module_path module_path) t.pages
@@ -60,24 +79,28 @@ let find_source t source_path =
   List.find_opt (fun page -> String.equal page.source_path source_path) t.pages
 
 let modules t = List.map (fun page -> page.module_path) t.pages
+let order t = t.order
 let has_namespace t value = List.mem value t.namespaces
 
 let line_entries t =
   let rec emit depth prefix pages =
     let groups = Hashtbl.create 16 in
+    let component_order = ref [] in
     List.iter
-      (fun (components, page) ->
-        match components with
+      (fun (parts, page) ->
+        match parts with
         | [] -> ()
         | component :: rest ->
+            if not (Hashtbl.mem groups component) then
+              component_order := component :: !component_order;
             let existing =
               Option.value ~default:[] (Hashtbl.find_opt groups component)
             in
             Hashtbl.replace groups component ((rest, page) :: existing))
       pages;
-    Hashtbl.to_seq_keys groups |> List.of_seq |> List.sort String.compare
+    List.rev !component_order
     |> List.concat_map (fun component ->
-        let members = Hashtbl.find groups component in
+        let members = List.rev (Hashtbl.find groups component) in
         let here =
           List.find_map (function [], page -> Some page | _ -> None) members
         in
@@ -107,7 +130,8 @@ let line_entries t =
         in
         line :: emit (depth + 1) path descendants)
   in
-  t.pages
+  t.order
+  |> List.filter_map (fun module_path -> find t module_path)
   |> List.map (fun page -> (Module_path.split page.module_path, page))
   |> emit 0 ""
 

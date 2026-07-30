@@ -137,6 +137,22 @@ let () =
   expect
     (Page_index.line_entries reordered = Page_index.line_entries no_index)
     "reordering child inputs changed the canonical outline or row attachments";
+  let manually_ordered =
+    result
+      (Page_index.build
+         ~order:[ "Catalog.Zeta"; "Catalog.Alpha" ]
+         no_index_documents)
+  in
+  let manually_ordered_paths =
+    Page_index.line_entries manually_ordered
+    |> List.map (fun entry ->
+        Yojson.Safe.Util.member "path" entry |> Yojson.Safe.Util.to_string)
+  in
+  expect
+    (Page_index.modules manually_ordered = [ "Catalog.Alpha"; "Catalog.Zeta" ]
+    && Page_index.order manually_ordered = [ "Catalog.Zeta"; "Catalog.Alpha" ]
+    && manually_ordered_paths = [ "Catalog"; "Catalog.Zeta"; "Catalog.Alpha" ])
+    "manual page order changed module identity or was lost in the outline";
   let last_child_before =
     result
       (Page_index.build

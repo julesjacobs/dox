@@ -38,6 +38,28 @@ let metadata_directory project = Filename.concat project.root ".dox"
 let lock_path project =
   Filename.concat (metadata_directory project) "project.lock"
 
+let page_order_path project = Filename.concat project.root ".dox-order"
+
+let read_page_order project =
+  let path = page_order_path project in
+  if not (Sys.file_exists path) then []
+  else
+    match Util.read_file path with
+    | Error _ -> []
+    | Ok source ->
+        let rec collect seen order = function
+          | [] -> List.rev order
+          | line :: rest ->
+              let module_path = String.trim line in
+              if
+                String.equal module_path ""
+                || List.mem module_path seen
+                || Result.is_error (Module_path.validate module_path)
+              then collect seen order rest
+              else collect (module_path :: seen) (module_path :: order) rest
+        in
+        collect [] [] (String.split_on_char '\n' source)
+
 let recover_before_read = ref (fun (_ : t) -> Ok ())
 
 let document_paths project =
@@ -75,12 +97,14 @@ let snapshot_unlocked project =
         | Error error -> Error error)
   in
   let rec capture attempts =
+    let order = read_page_order project in
     let paths = document_paths project in
     let* documents = read [] paths in
     let current_paths = document_paths project in
     let stable_paths = paths = current_paths in
+    let stable_order = order = read_page_order project in
     let stable_documents =
-      stable_paths
+      stable_paths && stable_order
       && List.for_all
            (fun captured ->
              match read_document_file project captured.Document.path with
@@ -90,7 +114,7 @@ let snapshot_unlocked project =
     in
     if stable_documents then
       let* page_index =
-        Page_index.build_migrating documents
+        Page_index.build_migrating ~order documents
         |> Result.map_error (fun message -> Invalid message)
       in
       let module_graph = Module_graph.build page_index in
@@ -141,7 +165,9 @@ let resolve_documents ?(cancelled = fun () -> false) project snapshot target =
         else document)
   in
   let* page_index =
-    Page_index.build_migrating documents
+    Page_index.build_migrating
+      ~order:(Page_index.order snapshot.page_index)
+      documents
     |> Result.map_error (fun message -> Invalid message)
   in
   let target_module =
@@ -270,6 +296,46 @@ let to_json project =
   match snapshot project with
   | Ok snapshot -> Ok (snapshot_to_json project snapshot)
   | Error error -> Error error
+
+let set_page_order project ~module_paths ~base_project_version ~base_order =
+  match Util.ensure_directory (metadata_directory project) with
+  | Error message -> Error (Io message)
+  | Ok () ->
+      Util.with_file_lock (lock_path project) (fun () ->
+          let* () = !recover_before_read project in
+          let* snapshot = snapshot_unlocked project in
+          if not (String.equal snapshot.version base_project_version) then
+            Error
+              (Conflict "The project changed before the pages were reordered.")
+          else
+            let current_order = Page_index.order snapshot.page_index in
+            if base_order <> [] && current_order <> base_order then
+              Error
+                (Conflict
+                   "The page order changed while the outline was being edited.")
+            else
+              let modules = Page_index.modules snapshot.page_index in
+              let unique = List.sort_uniq Module_path.compare module_paths in
+              if
+                List.length unique <> List.length module_paths
+                || List.sort Module_path.compare unique
+                   <> List.sort Module_path.compare modules
+              then
+                Error
+                  (Invalid
+                     "A page order must contain every page module exactly once.")
+              else if current_order = module_paths then Ok snapshot
+              else
+                let source =
+                  match module_paths with
+                  | [] -> ""
+                  | _ -> String.concat "\n" module_paths ^ "\n"
+                in
+                let* () =
+                  Util.write_file_atomic (page_order_path project) source
+                  |> Result.map_error (fun message -> Io message)
+                in
+                snapshot_unlocked project)
 
 let source_by_block document =
   document.Document.blocks
@@ -958,7 +1024,9 @@ let save_document project ~path ~source ~base_version ~base_project_version
                 replace_document before_snapshot.documents after
               in
               let* page_index =
-                Page_index.build_migrating after_documents
+                Page_index.build_migrating
+                  ~order:(Page_index.order before_snapshot.page_index)
+                  after_documents
                 |> Result.map_error (fun message -> Invalid message)
               in
               let module_graph = Module_graph.build page_index in
@@ -1086,7 +1154,9 @@ let create_document project ~path ~source ~base_project_version ~principal =
                 let document = Document.parse ~path source in
                 let documents = document :: before_snapshot.documents in
                 let* page_index =
-                  Page_index.build documents
+                  Page_index.build
+                    ~order:(Page_index.order before_snapshot.page_index)
+                    documents
                   |> Result.map_error (fun message -> Invalid message)
                 in
                 let module_graph = Module_graph.build page_index in
@@ -1175,6 +1245,17 @@ let create_document project ~path ~source ~base_project_version ~principal =
                     } ))
 
 type module_rename = { before : string; after : string }
+
+let rename_page_order renames order =
+  List.map
+    (fun module_path ->
+      Option.value ~default:module_path
+        (List.find_map
+           (fun rename ->
+             if String.equal rename.before module_path then Some rename.after
+             else None)
+           renames))
+    order
 
 let identifier_character = function
   | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' | '\'' -> true
@@ -1538,7 +1619,9 @@ let refactor_preview snapshot renames =
           (rewrite_document_module_paths ~module_paths renames document))
   in
   let* transformed_index =
-    Page_index.build transformed_documents
+    Page_index.build
+      ~order:(rename_page_order renames (Page_index.order snapshot.page_index))
+      transformed_documents
     |> Result.map_error (fun message -> Invalid message)
   in
   let compiler_analysis =
@@ -1674,7 +1757,11 @@ let apply_module_refactor project ~expected_project_version ~expected_preview_id
                 transformed
             in
             let* page_index =
-              Page_index.build documents
+              Page_index.build
+                ~order:
+                  (rename_page_order renames
+                     (Page_index.order snapshot.page_index))
+                documents
               |> Result.map_error (fun message -> Invalid message)
             in
             let original_paths =
@@ -1958,7 +2045,9 @@ let create_pages project ~module_paths ~base_project_version ~principal =
               @ before_snapshot.documents
             in
             let* page_index =
-              Page_index.build documents
+              Page_index.build
+                ~order:(Page_index.order before_snapshot.page_index)
+                documents
               |> Result.map_error (fun message -> Invalid message)
             in
             let intent_id =

@@ -24,12 +24,17 @@ The left pane is an editable module outline.
 - `Enter` commits an edited module name and opens it.
 - `Enter` on an unchanged module creates a sibling.
 - `Tab` and `Shift–Tab` change nesting.
+- `Option–Up` and `Option–Down` (`Alt` elsewhere) move a page and its
+  descendants among siblings.
 - `Escape` cancels an edit.
 
 Module components begin with a capital letter because they are OCaml module
 names. Moving or renaming a module updates code references and wiki links.
 Write a page link as `[[Project.Analysis]]`; use `Command–Enter` or
 `Control–Enter` while the cursor is inside it to navigate.
+
+The visible order is stored in `.dox-order`, a plain list of module paths that
+can be reviewed and merged with the rest of the Git-backed workspace.
 
 ## Compiler context
 

@@ -358,6 +358,40 @@ let create_pages_response context body =
                  ("projectVersion", `String snapshot.version);
                ]))
 
+let page_order_response context body =
+  let open Util in
+  let strings field request =
+    let* values = list_member field request in
+    let rec collect result = function
+      | [] -> Ok (List.rev result)
+      | `String value :: rest -> collect (value :: result) rest
+      | _ -> Error (Printf.sprintf "Expected %s to contain only strings." field)
+    in
+    collect [] values
+  in
+  let parsed =
+    let* request = json_body body in
+    let* module_paths = strings "modules" request in
+    let* base_order = strings "baseOrder" request in
+    let* base_project_version = string_member "baseProjectVersion" request in
+    Ok (module_paths, base_order, base_project_version)
+  in
+  match parsed with
+  | Error message -> error message
+  | Ok (module_paths, base_order, base_project_version) -> (
+      match
+        Project.set_page_order context.project ~module_paths
+          ~base_project_version ~base_order
+      with
+      | Error project_error_ -> project_error project_error_
+      | Ok snapshot ->
+          json
+            (`Assoc
+               [
+                 ("project", Project.snapshot_to_json context.project snapshot);
+                 ("projectVersion", `String snapshot.version);
+               ]))
+
 let dependencies_response context ~cancelled parameters =
   ignore cancelled;
   match List.assoc_opt "module" parameters with
@@ -854,6 +888,9 @@ let route context ~cancelled method_ target headers body =
   | "POST", "/api/pages" ->
       require_active_request context headers (fun () ->
           create_pages_response context body)
+  | "PUT", "/api/page-order" ->
+      require_active_request context headers (fun () ->
+          page_order_response context body)
   | "POST", "/api/refactor/preview" ->
       require_active_request context headers (fun () ->
           refactor_preview_response context body)

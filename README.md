@@ -84,6 +84,12 @@ let average =
 Dune and the compiler-derived dependency graph determine build order,
 incremental rebuilds, cycles, and the transitive evaluation closure.
 
+The module outline is manually ordered. `Option–Up` and `Option–Down`
+(`Alt–Up` and `Alt–Down` elsewhere) move the current page and its descendants
+among siblings; ordinary outline text edits can reorder several pages at once.
+The order is stored as module paths in the Git-tracked `.dox-order` file and
+does not affect OCaml module identity.
+
 ## Observed execution
 
 A single `@` opts a value, function, or expression into the execution trace:

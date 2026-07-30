@@ -430,6 +430,36 @@ let () =
         | Ok snapshot -> snapshot
         | Error error -> fail (Project.error_message error)
       in
+      let original_order = Page_index.order imported_snapshot.page_index in
+      let reversed_order = List.rev original_order in
+      let reordered_snapshot =
+        match
+          Project.set_page_order project ~module_paths:reversed_order
+            ~base_project_version:imported_snapshot.version
+            ~base_order:original_order
+        with
+        | Ok snapshot -> snapshot
+        | Error error -> fail (Project.error_message error)
+      in
+      expect
+        (Page_index.order reordered_snapshot.page_index = reversed_order
+        && Util.read_file (Filename.concat directory ".dox-order")
+           = Ok (String.concat "\n" reversed_order ^ "\n"))
+        "manual page order was not persisted as Git-readable module paths";
+      let reloaded_order =
+        match Project.snapshot (Project.create directory) with
+        | Ok snapshot -> Page_index.order snapshot.page_index
+        | Error error -> fail (Project.error_message error)
+      in
+      expect
+        (reloaded_order = reversed_order)
+        "manual page order did not survive a fresh project snapshot";
+      expect
+        (Result.is_error
+           (Project.set_page_order project ~module_paths:original_order
+              ~base_project_version:imported_snapshot.version
+              ~base_order:original_order))
+        "a stale page-order edit overwrote a newer order";
       expect
         (Result.is_error
            (Project.create_document project ~path:"./noncanonical.ml.md"

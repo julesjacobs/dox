@@ -1859,6 +1859,84 @@ function changeOutlineIndent(view, delta) {
   return true;
 }
 
+function moveOutlineSubtree(view, direction, onCommit) {
+  const selection = view.state.selection.main;
+  if (!selection.empty) return false;
+  const sourceLines = view.state.doc.toString().split("\n");
+  const line = view.state.doc.lineAt(selection.head);
+  const start = line.number - 1;
+  if (!sourceLines[start]?.trim()) return true;
+  const depth = outlineDepth(sourceLines[start]);
+  const blockEnd = (from) => {
+    let index = from + 1;
+    while (index < sourceLines.length) {
+      const text = sourceLines[index];
+      if (text.trim() && outlineDepth(text) <= depth) break;
+      index += 1;
+    }
+    return index;
+  };
+  const end = blockEnd(start);
+  let replacement;
+  let movedStart;
+  if (direction < 0) {
+    let previous = start - 1;
+    while (previous >= 0) {
+      const text = sourceLines[previous];
+      if (!text.trim() || outlineDepth(text) > depth) {
+        previous -= 1;
+        continue;
+      }
+      if (outlineDepth(text) < depth) return true;
+      break;
+    }
+    if (previous < 0) return true;
+    replacement = [
+      ...sourceLines.slice(start, end),
+      ...sourceLines.slice(previous, start),
+    ];
+    sourceLines.splice(previous, end - previous, ...replacement);
+    movedStart = previous;
+  } else {
+    let next = end;
+    while (next < sourceLines.length && !sourceLines[next].trim()) next += 1;
+    if (
+      next >= sourceLines.length ||
+      outlineDepth(sourceLines[next]) < depth
+    ) {
+      return true;
+    }
+    if (outlineDepth(sourceLines[next]) > depth) return true;
+    const nextEnd = blockEnd(next);
+    const nextBlock = sourceLines.slice(next, nextEnd);
+    replacement = [
+      ...nextBlock,
+      ...sourceLines.slice(start, end),
+    ];
+    sourceLines.splice(start, nextEnd - start, ...replacement);
+    movedStart = start + nextBlock.length;
+  }
+  const column = selection.head - line.from;
+  const movedLine = sourceLines[movedStart] || "";
+  const position =
+    sourceLines
+      .slice(0, movedStart)
+      .reduce((length, text) => length + text.length + 1, 0) +
+    Math.min(column, movedLine.length);
+  view.dispatch({
+    changes: {
+      from: 0,
+      to: view.state.doc.length,
+      insert: sourceLines.join("\n"),
+    },
+    selection: { anchor: position },
+    scrollIntoView: true,
+    userEvent: "move.line",
+  });
+  queueMicrotask(() => onCommit?.("reorder", position));
+  return true;
+}
+
 export function mountModuleOutlineEditor(
   parent,
   {
@@ -1914,6 +1992,14 @@ export function mountModuleOutlineEditor(
         },
         { key: "Tab", run: (view) => changeOutlineIndent(view, 2) },
         { key: "Shift-Tab", run: (view) => changeOutlineIndent(view, -2) },
+        {
+          key: "Alt-ArrowUp",
+          run: (view) => moveOutlineSubtree(view, -1, onCommit),
+        },
+        {
+          key: "Alt-ArrowDown",
+          run: (view) => moveOutlineSubtree(view, 1, onCommit),
+        },
         {
           key: "Escape",
           run: () => {

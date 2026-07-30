@@ -6,7 +6,7 @@ import {
   setMarkdownEditorEvaluation,
   setMarkdownEditorResultInvalidation,
   replaceEditorStateDocument,
-} from "./editor.bundle.js?v=20260729k";
+} from "./editor.bundle.js?v=20260729l";
 
 const app = document.querySelector("#app");
 
@@ -1675,9 +1675,13 @@ async function performOutlineCommit({
   const renamedTo = new Set(renames.map(({ after }) => after));
   const deleted = removed.filter((modulePath) => !renamedFrom.has(modulePath));
   const created = added.filter((modulePath) => !renamedTo.has(modulePath));
+  const orderChanged =
+    previous.length !== next.length ||
+    previous.some((modulePath, index) => modulePath !== next[index]);
   if (
     !removed.length &&
     !added.length &&
+    !orderChanged &&
     state.outlineText !== state.outlineCommittedText
   ) {
     if (!submittedDraft.split("\n").some((line) => !line.trim())) {
@@ -1758,6 +1762,29 @@ async function performOutlineCommit({
       }
     } else {
       authoritativeProject = state.project;
+    }
+
+    const authoritativeOrder = outlineModules(
+      normalizeOutlineEntries(authoritativeProject),
+    );
+    const shouldPersistOrder =
+      authoritativeOrder.length !== next.length ||
+      authoritativeOrder.some(
+        (modulePath, index) => modulePath !== next[index],
+      );
+    const structuralOrderChange = renames.length > 0 || created.length > 0;
+    if (shouldPersistOrder || structuralOrderChange) {
+      releaseProjectMutation ??= await acquireProjectMutation();
+      const payload = await api("/api/page-order", {
+        method: "PUT",
+        signal: controller.signal,
+        body: JSON.stringify({
+          modules: next,
+          baseOrder: structuralOrderChange ? [] : authoritativeOrder,
+          baseProjectVersion: authoritativeProject.version,
+        }),
+      });
+      authoritativeProject = payload.project;
     }
 
     const draftAdvanced = state.outlineDraftGeneration > submittedGeneration;
