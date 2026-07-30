@@ -123,13 +123,13 @@ cannot read or mutate the workspace.
 Type-check and evaluate one document:
 
 ```sh
-dune exec dox -- check examples/welcome.ml.md
+dune exec dox -- check welcome.ml.md
 ```
 
 Compile a `unit -> unit` entry value:
 
 ```sh
-dune exec dox -- artifact examples/welcome.ml.md main _artifacts/welcome
+dune exec dox -- artifact welcome.ml.md main _artifacts/welcome
 ```
 
 The workspace Build control performs the same operation and records a manifest
@@ -181,9 +181,8 @@ evaluation supervisor provides time and output bounds; it is not an OS security
 sandbox. Code that deliberately creates a detached process can outlive an
 evaluation.
 
-Cross-document OCaml modules, managed long-running services, compiler-resolved
-dependency graphs, replay debugging, multi-user permissions, and an external
-agent protocol remain future work.
+Managed long-running services, replay debugging, multi-user permissions, and
+an external agent protocol remain future work.
 
 The complete design is saved in
 [`docs/high-level-design.md`](docs/high-level-design.md).
