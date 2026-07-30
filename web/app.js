@@ -93,8 +93,6 @@ const state = {
   outlineDraftGeneration: 0,
   outlineSubmittedGeneration: 0,
   outlineFailedGeneration: null,
-  outlineCommitTimer: null,
-  outlineCommitQueued: false,
   outlineConflict: null,
   outlineNavigationRun: false,
   outlineFocusTransfer: false,
@@ -1604,39 +1602,13 @@ function rebaseOutlineRowsThroughMapping(rows, mapping, authoritativeRows) {
   });
 }
 
-function scheduleOutlineCommit() {
-  clearTimeout(state.outlineCommitTimer);
-  state.outlineCommitTimer = null;
-  if (
-    state.outlineDraftError ||
-    state.outlineConflict ||
-    state.outlineText === state.outlineCommittedText
-  ) {
-    return;
-  }
-  const cursorLine =
-    state.outlineView?.state.doc.lineAt(state.outlineSelection).number || 1;
-  const cursorText =
-    state.outlineView?.state.doc.line(cursorLine).text || "";
-  if (!cursorText.trim()) return;
-  const activeRow = state.outlineDraftRows.find(
-    (row) => row.sourceLine === cursorLine,
-  );
-  if (activeRow?.changed) {
-    return;
-  }
-  const generation = state.outlineDraftGeneration;
-  state.outlineCommitTimer = setTimeout(() => {
-    if (generation === state.outlineDraftGeneration) {
-      void commitOutline({ reason: "idle" });
-    }
-  }, 900);
-}
-
 function commitOutline(options = {}) {
   if (state.outlineCommitPromise) {
-    state.outlineCommitQueued = true;
-    return state.outlineCommitPromise;
+    const activeCommit = state.outlineCommitPromise;
+    return activeCommit.then((committed) => {
+      if (!committed) return false;
+      return commitOutline(options);
+    });
   }
   const promise = performOutlineCommit(options);
   state.outlineCommitPromise = promise;
@@ -1659,10 +1631,7 @@ async function performOutlineCommit({
   reason = "explicit",
   openModule = null,
 } = {}) {
-  clearTimeout(state.outlineCommitTimer);
-  state.outlineCommitTimer = null;
   if (state.outlineCommitting) {
-    state.outlineCommitQueued = true;
     return false;
   }
   if (state.outlineDraftError) {
@@ -1721,7 +1690,6 @@ async function performOutlineCommit({
   }
   state.outlineCommitting = true;
   state.outlineSubmittedGeneration = submittedGeneration;
-  state.outlineCommitQueued = false;
   const controller = new AbortController();
   state.outlineCommitController = controller;
   let authoritativeProject = null;
@@ -1912,11 +1880,6 @@ async function performOutlineCommit({
       state.outlineCommitController = null;
     }
     state.outlineCommitting = false;
-    const queued = state.outlineCommitQueued;
-    state.outlineCommitQueued = false;
-    if (queued && state.outlineDraftGeneration > submittedGeneration) {
-      scheduleOutlineCommit();
-    }
   }
 }
 
@@ -1981,8 +1944,6 @@ async function openOutlineModule(row, kind) {
 }
 
 function cancelOutlineDraft() {
-  clearTimeout(state.outlineCommitTimer);
-  state.outlineCommitTimer = null;
   state.outlineConflict = null;
   state.outlineDraftError = null;
   installProjectSnapshot(state.project, { forceOutline: true });
@@ -2054,7 +2015,6 @@ function mountOutlineEditor() {
         });
       }
       scheduleOutlineEditorSync();
-      scheduleOutlineCommit();
     },
     onSelectionChange: (selection) => {
       state.outlineSelection = selection.head;
@@ -2062,7 +2022,6 @@ function mountOutlineEditor() {
     onNavigate: (selection, update, kind) => {
       if (!selection.empty || update.view.composing) return;
       const line = update.state.doc.lineAt(selection.head);
-      scheduleOutlineCommit();
       const row = outlineRowAtLine(line.number);
       void openOutlineModule(row, kind).catch((error) => {
         state.workspaceError = error.message;

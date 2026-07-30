@@ -10,15 +10,17 @@ Indent a line to start an OCaml block. Definitions remain available to later blo
 
 Write an inline OCaml expression followed by an equals sign to see its value, for example `1 + 2 =`. The result is displayed by the editor and is not inserted into the file.
 
-Use `Source` in the top bar to switch the same editor to raw Markdown. The cursor, selection, undo history, and scroll position are preserved when switching modes.
+Use `Source` in the upper-right corner to switch the same editor to raw Markdown. The cursor, selection, undo history, and scroll position are preserved when switching modes.
 
 ## Pages and modules
 
-The left pane is the module outline. Move through it with the arrow keys or click a module to open its page.
+The left pane is the module outline. Typing changes only the stable draft; it never renames files between keystrokes. A valid draft is committed when you finish the interaction.
 
-- Press `Enter` on a module to create a sibling.
+- Press `Enter` after editing a module to commit the change and open its page.
+- Press `Enter` on an unchanged module to create a sibling.
+- Move to another module with the arrow keys or click it to commit the current draft and open that page.
+- Leaving the module outline commits a valid draft without changing pages.
 - Press `Tab` or `Shift–Tab` while editing to change nesting.
-- Press `Enter` to finish a module path.
 - Press `Escape` to cancel an edit.
 
 Module components begin with a capital letter because they are OCaml module names. Moving or renaming a module updates references across the workspace.
