@@ -4,9 +4,11 @@ import {
   updateModuleOutlineEditor,
   setMarkdownEditorMode,
   setMarkdownEditorEvaluation,
+  setMarkdownEditorDebugPosition,
+  setMarkdownEditorDebugProjection,
   setMarkdownEditorResultInvalidation,
   replaceEditorStateDocument,
-} from "./editor.bundle.js?v=20260729o";
+} from "./editor.bundle.js?v=20260730s";
 
 const app = document.querySelector("#app");
 
@@ -74,6 +76,9 @@ const state = {
   completionRequestKey: null,
   suppressNextCompletionLookup: false,
   selectedTraceId: null,
+  debugger: null,
+  debugging: false,
+  debugController: null,
   typeGeneration: 0,
   typeTimer: null,
   typeController: null,
@@ -463,6 +468,7 @@ async function loadDocument(
   {
     force = false,
     preserveTrace = false,
+    preserveDebugger = false,
     history = "push",
     focus = "main",
     projectRetry = 0,
@@ -479,6 +485,12 @@ async function loadDocument(
     modulePath = mapping?.get(modulePath) || modulePath;
   }
   if (!force && modulePath === state.module) return true;
+  if (!preserveDebugger) {
+    state.debugController?.abort();
+    state.debugController = null;
+    state.debugger = null;
+    state.debugging = false;
+  }
   captureCurrentSession();
   const inheritedProvisional = state.provisionalNavigation;
   const previousModule =
@@ -566,6 +578,7 @@ async function loadDocument(
         return loadDocument(modulePath, {
           force: true,
           preserveTrace,
+          preserveDebugger,
           history,
           focus,
           projectRetry: projectRetry + 1,
@@ -2499,6 +2512,734 @@ function renderDefinitionPeek() {
   </section>`;
 }
 
+function sourceFunctionRange(source, call) {
+  const lines = source.split("\n");
+  const start = Math.min(Math.max(call.line || 1, 1), lines.length);
+  const definition = lines[start - 1] || "";
+  const definitionIndent = definition.match(/^ */)?.[0].length || 0;
+  let blockEnd = lines.length;
+  for (let number = start + 1; number <= lines.length; number += 1) {
+    const text = lines[number - 1];
+    if (
+      definition.startsWith("    ") &&
+      text.trim() &&
+      !text.startsWith("    ")
+    ) {
+      blockEnd = number - 1;
+      break;
+    }
+    if (/^```/.test(text.trim())) {
+      blockEnd = number - 1;
+      break;
+    }
+  }
+  let end = blockEnd;
+  for (let number = start + 1; number <= blockEnd; number += 1) {
+    const text = lines[number - 1];
+    if (!text.trim()) continue;
+    const indent = text.match(/^ */)?.[0].length || 0;
+    const content = text.trimStart();
+    if (
+      indent <= definitionIndent &&
+      /^(?:let|and|type|module|exception|class|external)\b/.test(content)
+    ) {
+      end = number - 1;
+      break;
+    }
+  }
+  while (end > start && !(lines[end - 1] || "").trim()) end -= 1;
+  return { start, end };
+}
+
+function traceEventOccurrences(events) {
+  const occurrences = new Map();
+  for (const event of events || []) {
+    const occurrence = occurrences.get(event.occurrenceId) || {
+      id: event.occurrenceId,
+      children: [],
+      parameters: [],
+    };
+    if (event.phase === "enter") {
+      Object.assign(occurrence, event, { enterSequence: event.sequence });
+    } else if (event.phase === "parameter") {
+      occurrence.parameters.push({
+        name: event.label,
+        type: event.type,
+        value: event.detail,
+        sequence: event.sequence,
+      });
+    } else {
+      occurrence.outcome = event.phase;
+      occurrence.value = event.detail;
+      occurrence.returnType = event.type;
+      occurrence.endSequence = event.sequence;
+    }
+    occurrences.set(event.occurrenceId, occurrence);
+  }
+  for (const occurrence of occurrences.values()) {
+    occurrence.rawParent = occurrence.parentId
+      ? occurrences.get(occurrence.parentId) || null
+      : null;
+    occurrence.rawParent?.children.push(occurrence);
+    occurrence.parameters.sort((left, right) => left.sequence - right.sequence);
+  }
+  return occurrences;
+}
+
+function localMatchesParameters(stop, parameters) {
+  return parameters.every((parameter) =>
+    stop.locals?.some(
+      (local) =>
+        local.name === parameter.name &&
+        (local.value === parameter.value ||
+          local.value?.includes(parameter.value) ||
+          parameter.value?.includes(local.value)),
+    ),
+  );
+}
+
+function nearestFunction(occurrence, calls) {
+  let parent = occurrence?.rawParent;
+  while (parent) {
+    if (parent.kind === "function") return calls.get(parent.id) || null;
+    parent = parent.rawParent;
+  }
+  return null;
+}
+
+function buildDebugCallModel(debuggerPayload, sources) {
+  const timeline = debuggerPayload.timeline || [];
+  const occurrences = traceEventOccurrences(debuggerPayload.callEvents || []);
+  const calls = new Map();
+  const roots = new Map();
+  const rootFor = (path) => {
+    const id = `root:${path}`;
+    if (!roots.has(id)) {
+      roots.set(id, {
+        id,
+        kind: "root",
+        label:
+          state.project?.documents.find((document) => document.path === path)
+            ?.module || path,
+        path,
+        children: [],
+        parameters: [],
+      });
+    }
+    return roots.get(id);
+  };
+
+  const ordered = [...occurrences.values()]
+    .filter((occurrence) => occurrence.phase === "enter" && occurrence.kind === "function")
+    .sort((left, right) => left.enterSequence - right.enterSequence)
+    .map((occurrence) => {
+      const call = {
+        ...occurrence,
+        children: [],
+        values: [],
+        range: sources[occurrence.path]
+          ? sourceFunctionRange(sources[occurrence.path], occurrence)
+          : { start: occurrence.line, end: occurrence.line + 120 },
+      };
+      calls.set(call.id, call);
+      return call;
+    });
+
+  for (const call of ordered) {
+    const parent = nearestFunction(call, calls) || rootFor(call.path);
+    call.parent = parent;
+    parent.children.push(call);
+  }
+
+  let searchFrom = 0;
+  for (const call of ordered) {
+    const functionParent =
+      call.parent?.kind === "function" ? call.parent : null;
+    const minimumDepth = functionParent?.startStop?.frames?.length
+      ? functionParent.startStop.frames.length + 1
+      : 0;
+    const inBody = (stop) =>
+      stop.path === call.path &&
+      stop.line >= call.range.start &&
+      stop.line <= call.range.end &&
+      (stop.frames?.length || 0) >= minimumDepth;
+    let index = timeline.findIndex(
+      (stop, candidate) =>
+        candidate >= searchFrom &&
+        inBody(stop) &&
+        localMatchesParameters(stop, call.parameters),
+    );
+    if (index < 0) {
+      index = timeline.findIndex(
+        (stop, candidate) => candidate >= searchFrom && inBody(stop),
+      );
+    }
+    if (index < 0) {
+      index = timeline.findIndex(
+        (stop) =>
+          inBody(stop) && localMatchesParameters(stop, call.parameters),
+      );
+    }
+    call.startIndex = index;
+    if (index >= 0) {
+      call.startStop = timeline[index];
+      call.stackDepth = timeline[index].frames?.length || 0;
+      const previous = timeline[index - 1];
+      if (previous?.path === call.path) call.callsiteStop = previous;
+      const callsite = call.callsiteStop;
+      if (callsite) {
+        call.callsiteLine = callsite.line;
+        call.callsiteColumn = callsite.column;
+        call.callsiteKey = [
+          call.path,
+          callsite.line,
+          callsite.column,
+          call.label,
+        ].join(":");
+      }
+      searchFrom = index + 1;
+    }
+  }
+
+  for (let index = 0; index < ordered.length; index += 1) {
+    const call = ordered[index];
+    const nextOutside = ordered
+      .slice(index + 1)
+      .find(
+        (candidate) =>
+          candidate.enterSequence > (call.endSequence ?? call.enterSequence) &&
+          candidate.startIndex >= 0,
+      );
+    call.endIndex = nextOutside
+      ? Math.max(call.startIndex, nextOutside.startIndex - 1)
+      : timeline.length - 1;
+  }
+
+  for (const call of ordered) {
+    const source = sources[call.path];
+    const bindingParent =
+      call.rawParent?.kind === "binding" ? call.rawParent : null;
+    if (source && bindingParent) {
+      const lines = source.split("\n");
+      const start = Math.max(1, bindingParent.line || 1);
+      const end = Math.min(
+        lines.length,
+        bindingParent.endLine || bindingParent.line || start,
+      );
+      for (let line = start; line <= end; line += 1) {
+        const span = findIdentifierSpan(
+          source,
+          line,
+          call.label,
+          call.callsiteColumn || 0,
+        );
+        if (!span) continue;
+        call.callsiteLine = span.line;
+        call.callsiteColumn = span.column;
+        break;
+      }
+    }
+    if (source && call.callsiteLine) {
+      const span = findIdentifierSpan(
+        source,
+        call.callsiteLine,
+        call.label,
+        call.callsiteColumn || 0,
+      );
+      if (span) call.callsiteColumn = span.column;
+    }
+    if (call.callsiteLine) {
+      call.callsiteKey = [
+        call.path,
+        call.callsiteLine,
+        call.callsiteColumn || 0,
+        call.label,
+      ].join(":");
+    }
+  }
+
+  for (const occurrence of occurrences.values()) {
+    if (
+      occurrence.phase !== "enter" ||
+      occurrence.kind === "function" ||
+      occurrence.value === undefined
+    ) {
+      continue;
+    }
+    const owner = nearestFunction(occurrence, calls);
+    if (!owner) continue;
+    owner.values.push({
+      name: occurrence.label,
+      value: occurrence.value,
+      type: occurrence.returnType || occurrence.type,
+      line: occurrence.endLine || occurrence.line,
+      sequence: occurrence.enterSequence,
+    });
+  }
+
+  for (const call of ordered) {
+    const descendantRanges = call.children
+      .filter((child) => child.startIndex >= 0)
+      .map((child) => [child.startIndex, child.endIndex]);
+    const ownStops = [];
+    if (call.startIndex >= 0) {
+      for (let index = call.startIndex; index <= call.endIndex; index += 1) {
+        if (
+          descendantRanges.some(
+            ([start, end]) => index >= start && index <= end,
+          )
+        ) {
+          continue;
+        }
+        const stop = timeline[index];
+        if (
+          stop.path === call.path &&
+          stop.line >= call.range.start &&
+          stop.line <= call.range.end &&
+          (stop.frames?.length || 0) >= call.stackDepth
+        ) {
+          ownStops.push(stop);
+        }
+      }
+    }
+    call.ownStops = ownStops;
+  }
+
+  for (const root of roots.values()) {
+    root.children.sort((left, right) => left.enterSequence - right.enterSequence);
+  }
+  for (const call of ordered) {
+    const siblings = call.parent?.children?.filter(
+      (candidate) =>
+        candidate.callsiteKey &&
+        candidate.callsiteKey === call.callsiteKey,
+    ) || [call];
+    call.occurrenceSiblings = siblings;
+    call.occurrenceIndex = Math.max(0, siblings.indexOf(call));
+  }
+  return { calls, roots, occurrences };
+}
+
+function findIdentifierSpan(source, lineNumber, name, preferredColumn = 0) {
+  const line = source.split("\n")[lineNumber - 1] || "";
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const matcher = new RegExp(`\\b${escaped}\\b`, "g");
+  const matches = [...line.matchAll(matcher)];
+  if (!matches.length) return null;
+  const match = matches.reduce((best, candidate) =>
+    Math.abs((candidate.index || 0) - preferredColumn) <
+    Math.abs((best.index || 0) - preferredColumn)
+      ? candidate
+      : best,
+  );
+  return {
+    line: lineNumber,
+    column: match.index,
+    endColumn: match.index + name.length,
+  };
+}
+
+function debugResultType(type = "") {
+  const pieces = type.split(/\s*->\s*/);
+  return pieces[pieces.length - 1]?.trim() || type;
+}
+
+function displayDebugValue(value, type = "") {
+  if (!/^<value(?:\s|>)/.test(value || "")) return value ?? "";
+  const resultType = debugResultType(type);
+  return resultType ? `${resultType} value` : "value";
+}
+
+function callArguments(call) {
+  return (call.parameters || [])
+    .map((parameter) => displayDebugValue(parameter.value, parameter.type))
+    .join(" ");
+}
+
+function sourceIndent(lines, line) {
+  const spaces = (lines[line - 1] || "").match(/^ */)?.[0].length || 0;
+  return Math.max(0, spaces - 4) + 2;
+}
+
+function projectionForDebugCall(call) {
+  if (!call || call.path !== state.path) return null;
+  const source = state.document?.source || "";
+  const lines = source.split("\n");
+  if (call.kind === "root") {
+    const links = [];
+    const occupied = new Set();
+    const annotationGroups = new Map();
+    const callsiteGroups = new Map();
+    for (const child of call.children || []) {
+      if (!child.callsiteKey || child.callsiteLine < 1) continue;
+      if (!callsiteGroups.has(child.callsiteKey)) {
+        callsiteGroups.set(child.callsiteKey, []);
+      }
+      callsiteGroups.get(child.callsiteKey).push(child);
+    }
+    for (const children of callsiteGroups.values()) {
+      const child = children[0];
+      const callerFrame =
+        child.callsiteStop ||
+        child.startStop?.frames?.find(
+        (frame, index) => index > 0 && frame.path === call.path,
+      );
+      const callsiteLine = child.callsiteLine || callerFrame?.line;
+      if (!callsiteLine) continue;
+      const span = findIdentifierSpan(
+        source,
+        callsiteLine,
+        child.label,
+        child.callsiteColumn || callerFrame?.column || 0,
+      );
+      const key = span && `${span.line}:${span.column}:${span.endColumn}`;
+      if (!span || occupied.has(key)) continue;
+      occupied.add(key);
+      links.push({
+        ...span,
+        callId: child.id,
+        label: child.label,
+        kind: "child",
+      });
+      const result = displayDebugValue(
+        child.value,
+        child.returnType || child.type,
+      );
+      if (!annotationGroups.has(child.callsiteLine)) {
+        annotationGroups.set(child.callsiteLine, {
+          line: child.callsiteLine,
+          indent: sourceIndent(lines, child.callsiteLine),
+          items: [],
+        });
+      }
+      annotationGroups.get(child.callsiteLine).items.push({
+        kind: "call",
+        name: child.label,
+        value: `${callArguments(child)} → ${result}`.trim(),
+        type: child.returnType || child.type,
+        callId: child.id,
+        occurrenceIndex: 1,
+        occurrenceTotal: children.length,
+      });
+    }
+    return {
+      dimLines: [],
+      annotations: [...annotationGroups.values()].sort(
+        (left, right) => left.line - right.line,
+      ),
+      links,
+    };
+  }
+  const range = sourceFunctionRange(source, call);
+  call.range = range;
+  const executed = new Set(call.ownStops?.map((stop) => stop.line) || []);
+  executed.add(call.line);
+  const dimLines = [];
+  for (let number = range.start; number <= range.end; number += 1) {
+    const text = lines[number - 1] || "";
+    if (text.trim() && !executed.has(number)) dimLines.push(number);
+  }
+
+  const annotations = new Map();
+  const addAnnotation = (line, item) => {
+    if (!annotations.has(line)) annotations.set(line, []);
+    if (
+      !annotations
+        .get(line)
+        .some(
+          (existing) =>
+            existing.kind === item.kind &&
+            existing.name === item.name &&
+            existing.callId === item.callId,
+        )
+    ) {
+      annotations.get(line).push(item);
+    }
+  };
+  for (const parameter of call.parameters || []) {
+    addAnnotation(call.line, {
+      ...parameter,
+      kind: "value",
+      value: displayDebugValue(parameter.value, parameter.type),
+    });
+  }
+  for (const value of call.values || []) {
+    addAnnotation(value.line, {
+      ...value,
+      kind: "value",
+      value: displayDebugValue(value.value, value.type),
+    });
+  }
+  const declared = new Map();
+  for (let number = range.start; number <= range.end; number += 1) {
+    const text = lines[number - 1] || "";
+    for (const match of text.matchAll(/\b(?:let|and)\s+(?:rec\s+)?@?([a-z_][\w']*)/g)) {
+      if (match[1] !== call.label) {
+        declared.set(match[1], { line: number, kind: "binding" });
+      }
+    }
+    const arrow = text.indexOf("->");
+    if (arrow >= 0) {
+      for (const match of text
+        .slice(0, arrow)
+        .matchAll(/\b([a-z_][\w']*)\b/g)) {
+        if (!["fun", "function", "when"].includes(match[1])) {
+          declared.set(match[1], { line: number, kind: "pattern" });
+        }
+      }
+    }
+  }
+  const seen = new Set(call.parameters?.map((parameter) => parameter.name));
+  for (const stop of call.ownStops || []) {
+    for (const local of stop.locals || []) {
+      if (
+        seen.has(local.name) ||
+        local.value === "<fun>" ||
+        !declared.has(local.name)
+      ) {
+        continue;
+      }
+      seen.add(local.name);
+      const declaration = declared.get(local.name);
+      addAnnotation(declaration?.line || stop.line, {
+        ...local,
+        kind: "value",
+        value: displayDebugValue(local.value, local.type),
+      });
+    }
+  }
+
+  const links = [];
+  const parentSpan = findIdentifierSpan(
+    source,
+    call.line,
+    call.label,
+    call.column,
+  );
+  if (parentSpan && call.parent) {
+    links.push({
+      ...parentSpan,
+      callId: call.parent.id,
+      label: call.parent.label,
+      kind: "parent",
+    });
+  }
+  const occupiedChildLinks = new Set();
+  const childGroups = new Map();
+  for (const child of call.children || []) {
+    const key = child.callsiteKey || `${child.id}`;
+    if (!childGroups.has(key)) childGroups.set(key, []);
+    childGroups.get(key).push(child);
+  }
+  for (const children of childGroups.values()) {
+    const child = children[0];
+    const callerFrame =
+      child.callsiteStop ||
+      child.startStop?.frames?.find(
+      (frame, index) =>
+        index > 0 &&
+        frame.path === call.path &&
+        frame.line >= range.start &&
+        frame.line <= range.end,
+      );
+    const fallbackStop = (call.ownStops || []).find((stop) => {
+      const text = lines[stop.line - 1] || "";
+      return new RegExp(`\\b${child.label}\\b`).test(text);
+    });
+    const line = child.callsiteLine || callerFrame?.line || fallbackStop?.line;
+    if (!line) continue;
+    const span = findIdentifierSpan(
+      source,
+      line,
+      child.label,
+      child.callsiteColumn || callerFrame?.column || 0,
+    );
+    if (span) {
+      const key = `${span.line}:${span.column}:${span.endColumn}`;
+      if (occupiedChildLinks.has(key)) continue;
+      occupiedChildLinks.add(key);
+      links.push({
+        ...span,
+        callId: child.id,
+        label: child.label,
+        kind: "child",
+      });
+      const result = displayDebugValue(
+        child.value,
+        child.returnType || child.type,
+      );
+      addAnnotation(span.line, {
+        kind: "call",
+        name: child.label,
+        value: `${callArguments(child)} → ${result}`.trim(),
+        type: child.returnType || child.type,
+        callId: child.id,
+        occurrenceIndex: 1,
+        occurrenceTotal: children.length,
+      });
+    }
+  }
+  const lastExecuted = Math.max(call.line, ...executed);
+  const returnLine = Math.min(
+    Math.max(lastExecuted, range.start),
+    range.end,
+  );
+  const returnedValue = displayDebugValue(
+    call.value,
+    call.returnType || call.type,
+  );
+  const duplicatesTailCall = (annotations.get(returnLine) || []).some(
+    (item) =>
+      item.kind === "call" &&
+      item.value.endsWith(`→ ${returnedValue}`),
+  );
+  if (call.value !== undefined && !duplicatesTailCall) {
+    addAnnotation(returnLine, {
+      kind: call.outcome === "raise" ? "raise" : "return",
+      name: call.outcome === "raise" ? "raise" : "return",
+      value: returnedValue,
+      type: call.returnType || call.type,
+    });
+  }
+  return {
+    dimLines,
+    annotations: [...annotations.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([line, items]) => ({
+        line,
+        indent: sourceIndent(lines, line),
+        items,
+      })),
+    links,
+  };
+}
+
+function debugCallBreadcrumb(call) {
+  const calls = [];
+  for (let current = call; current; current = current.parent) {
+    calls.push(current);
+  }
+  return calls.reverse();
+}
+
+function groupedChildCalls(call) {
+  const groups = new Map();
+  for (const child of call.children || []) {
+    const key = child.callsiteKey || child.id;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(child);
+  }
+  return [...groups.values()];
+}
+
+function renderDebugger() {
+  if (!state.evaluation?.ok) return "";
+  if (state.debugging) {
+    return `<section class="debugger-panel debugger-loading" aria-live="polite">
+      <span class="debugger-pulse"></span>
+      <span>Reconstructing calls…</span>
+    </section>`;
+  }
+  const debuggerState = state.debugger;
+  if (!debuggerState) {
+    return `<section class="debugger-launch">
+      <button type="button" data-debug-start>
+        <span>Explore execution</span>
+      </button>
+    </section>`;
+  }
+  const call =
+    debuggerState.model?.calls.get(debuggerState.selectedCallId) ||
+    debuggerState.model?.roots.get(debuggerState.selectedCallId);
+  if (!call) return "";
+  const breadcrumb = debugCallBreadcrumb(call)
+    .map(
+      (ancestor, index, path) =>
+        `<button type="button" data-debug-call="${escapeHtml(ancestor.id)}" ${index === path.length - 1 ? 'aria-current="page"' : ""}>${escapeHtml(ancestor.kind === "root" ? "Program" : ancestor.label)}</button>`,
+    )
+    .join('<span aria-hidden="true">›</span>');
+  const occurrenceSiblings = call.occurrenceSiblings || [call];
+  const occurrencePosition = (call.occurrenceIndex || 0) + 1;
+  const previousOccurrence =
+    occurrenceSiblings[call.occurrenceIndex - 1] || null;
+  const nextOccurrence =
+    occurrenceSiblings[call.occurrenceIndex + 1] || null;
+  const occurrenceNavigation =
+    call.kind !== "root" && occurrenceSiblings.length > 1
+      ? `<div class="debugger-occurrences" aria-label="Callsite occurrences">
+          <button type="button" data-debug-call="${escapeHtml(previousOccurrence?.id || "")}" ${previousOccurrence ? "" : "disabled"} aria-label="Previous occurrence">‹</button>
+          <span>${occurrencePosition} of ${occurrenceSiblings.length}</span>
+          <button type="button" data-debug-call="${escapeHtml(nextOccurrence?.id || "")}" ${nextOccurrence ? "" : "disabled"} aria-label="Next occurrence">›</button>
+        </div>`
+      : "";
+  const parameters = call.parameters?.length
+    ? `<section class="debugger-values">
+        <h3>Arguments</h3>
+        ${call.parameters
+          .map(
+            (parameter) => `<div class="debugger-value">
+              <span>${escapeHtml(parameter.name)}</span>
+              <code title="${escapeHtml(parameter.type)}">${escapeHtml(displayDebugValue(parameter.value, parameter.type))}</code>
+            </div>`,
+          )
+          .join("")}
+      </section>`
+    : "";
+  const result =
+    call.kind !== "root" && call.value !== undefined
+      ? `<div class="debugger-result ${call.outcome === "raise" ? "raised" : ""}">
+          <span>${call.outcome === "raise" ? "Raised" : "Returned"}</span>
+          <code title="${escapeHtml(call.returnType || call.type || "")}">${escapeHtml(displayDebugValue(call.value, call.returnType || call.type))}</code>
+        </div>`
+      : "";
+  const childGroups = groupedChildCalls(call);
+  const children = childGroups.length
+    ? `<section class="debugger-stack debugger-calls">
+        <h3>Calls from here</h3>
+        ${childGroups
+          .map(
+            (group) => {
+              const child = group[0];
+              const arguments_ = callArguments(child);
+              const value = displayDebugValue(
+                child.value,
+                child.returnType || child.type,
+              );
+              return `<button type="button" data-debug-call="${escapeHtml(child.id)}">
+              <span>${escapeHtml(child.label)}${arguments_ ? ` <small>${escapeHtml(arguments_)}</small>` : ""}</span>
+              <small>${group.length > 1 ? `${group.length} calls` : `${child.outcome === "raise" ? "raised " : "→ "}${escapeHtml(value)}`}</small>
+            </button>`;
+            },
+          )
+          .join("")}
+      </section>`
+    : '<p class="debugger-empty">This call made no recorded Dox calls.</p>';
+  return `<section class="debugger-panel ${debuggerState.stale ? "stale" : ""}">
+    <div class="debugger-head">
+      <nav class="debugger-breadcrumb" aria-label="Selected call">${breadcrumb}</nav>
+      <button type="button" class="debugger-close" data-debug-close aria-label="Close debugger" title="Close debugger">×</button>
+    </div>
+    <div class="debugger-location">
+      <strong>${escapeHtml(call.label)}</strong>
+      <span>${call.kind === "root" ? "Top-level execution" : escapeHtml(call.path)}</span>
+    </div>
+    ${occurrenceNavigation}
+    ${
+      debuggerState.stale
+        ? '<button type="button" class="debugger-stale" data-debug-start>Code changed · reconstruct calls</button>'
+        : ""
+    }
+    ${parameters}
+    ${result}
+    ${children}
+    ${
+      debuggerState.truncated
+        ? '<p class="debugger-note">Execution capture was capped; later calls may be absent.</p>'
+        : ""
+    }
+  </section>`;
+}
+
 function renderInspector() {
   if (!state.document || state.view !== "document") return "";
   const diagnostics = (state.evaluation?.diagnostics || []).filter(
@@ -2513,10 +3254,18 @@ function renderInspector() {
   if (state.completion) {
     return `${renderCompletion()}${diagnosticsHtml}`;
   }
+  if (state.debugging || state.debugger) {
+    return `
+      ${renderDebugger()}
+      ${diagnosticsHtml}
+      ${renderDependencyContext()}
+    `;
+  }
   const typeInfo = state.typeInfo;
   const traceTree = traceOccurrences();
   const selectedTrace = traceTree.occurrences.get(state.selectedTraceId);
   return `
+    ${renderDebugger()}
     ${
       typeInfo && !traceTree.roots.length
         ? `<section class="cursor-type">
@@ -2867,6 +3616,11 @@ function updateSource(source, { evaluate = true } = {}) {
     state.traceContext = null;
     state.selectedTraceId = null;
     state.hoveredObservationSite = null;
+    if (state.debugger) {
+      state.debugger.stale = true;
+      setMarkdownEditorDebugPosition(state.sourceEditorView, null);
+      setMarkdownEditorDebugProjection(state.sourceEditorView, null);
+    }
   } else {
     cancelPendingEvaluation();
     state.evaluationPlan = nextPlan;
@@ -3766,6 +4520,7 @@ function mountEmbeddedEditors() {
       sourceMode: state.sourceMode,
       onDefinitionRequest: (position, mode) =>
         requestDefinition(state.sourceEditorView, position, mode),
+      onDebugNavigate: (callId) => void showDebugCall(callId),
       onStateChange: (editorState) => {
         const active = currentSession();
         if (active) active.editorState = editorState;
@@ -3825,6 +4580,14 @@ function mountEmbeddedEditors() {
       blocks: state.document.blocks,
       path: state.path,
     });
+    setMarkdownEditorDebugPosition(state.sourceEditorView, null);
+    const selectedCall =
+      state.debugger?.model?.calls.get(state.debugger.selectedCallId) ||
+      state.debugger?.model?.roots.get(state.debugger?.selectedCallId);
+    setMarkdownEditorDebugProjection(
+      state.sourceEditorView,
+      projectionForDebugCall(selectedCall),
+    );
     if (state.evaluationInvalidation) {
       setMarkdownEditorResultInvalidation(
         state.sourceEditorView,
@@ -3945,10 +4708,142 @@ function selectSourceSpan(trace) {
   state.suppressNextSelectionLookup = false;
 }
 
+async function showDebugCall(callId, { scroll = true } = {}) {
+  const debuggerState = state.debugger;
+  if (!debuggerState) return;
+  const previousCall =
+    debuggerState.model.calls.get(debuggerState.selectedCallId) ||
+    debuggerState.model.roots.get(debuggerState.selectedCallId);
+  let call =
+    debuggerState.model.calls.get(callId) ||
+    debuggerState.model.roots.get(callId);
+  if (!call) return;
+  if (call.path !== state.path) {
+    const modulePath = state.project.documents.find(
+      (document) => document.path === call.path,
+    )?.module;
+    if (
+      !modulePath ||
+      !(await loadDocument(modulePath, {
+        preserveTrace: true,
+        preserveDebugger: true,
+        history: "push",
+      }))
+    ) {
+      return;
+    }
+    debuggerState.sources[state.path] = state.document.source;
+    debuggerState.model = buildDebugCallModel(
+      debuggerState,
+      debuggerState.sources,
+    );
+    call =
+      debuggerState.model.calls.get(callId) ||
+      debuggerState.model.roots.get(callId);
+    if (!call) return;
+  }
+  const sameSourceLocation =
+    previousCall?.kind !== "root" &&
+    previousCall?.path === call.path &&
+    previousCall?.line === call.line &&
+    previousCall?.column === call.column;
+  debuggerState.selectedCallId = callId;
+  refreshInspector();
+  const inspector = document.querySelector(".inspector");
+  if (inspector) inspector.scrollTop = 0;
+  setMarkdownEditorDebugPosition(state.sourceEditorView, null);
+  setMarkdownEditorDebugProjection(
+    state.sourceEditorView,
+    projectionForDebugCall(call),
+  );
+  if (scroll && call.kind !== "root" && state.sourceEditorView) {
+    const view = state.sourceEditorView;
+    const line = view.state.doc.line(
+      Math.min(Math.max(call.line, 1), view.state.doc.lines),
+    );
+    if (!sameSourceLocation) {
+      state.suppressNextSelectionLookup = true;
+      view.dispatch({
+        selection: {
+          anchor: line.from + Math.min(call.column || 0, line.length),
+        },
+        scrollIntoView: true,
+      });
+      state.suppressNextSelectionLookup = false;
+    }
+  }
+}
+
+async function startDebugger() {
+  if (
+    state.debugging ||
+    !state.document ||
+    !state.evaluation?.ok ||
+    state.evaluationInvalidation
+  ) {
+    if (state.evaluationInvalidation) {
+      toast("Wait for the current OCaml evaluation before debugging.");
+    }
+    return;
+  }
+  state.debugController?.abort();
+  const controller = new AbortController();
+  state.debugController = controller;
+  state.debugging = true;
+  refreshInspector();
+  try {
+    const payload = await api("/api/debug", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify({
+        path: state.path,
+        source: state.document.source,
+        baseProjectVersion: state.projectVersion,
+      }),
+    });
+    if (state.debugController !== controller) return;
+    state.debugger = {
+      ...payload.debugger,
+      sources: { [state.path]: state.document.source },
+      stale: false,
+    };
+    state.debugger.model = buildDebugCallModel(
+      state.debugger,
+      state.debugger.sources,
+    );
+    const root =
+      state.debugger.model.roots.get(`root:${state.path}`) ||
+      state.debugger.model.roots.values().next().value;
+    state.debugger.selectedCallId =
+      root?.id || state.debugger.model.calls.values().next().value?.id;
+    state.debugging = false;
+    state.debugController = null;
+    await showDebugCall(state.debugger.selectedCallId, { scroll: false });
+  } catch (error) {
+    if (state.debugController !== controller || error.name === "AbortError") {
+      return;
+    }
+    state.debugging = false;
+    state.debugController = null;
+    refreshInspector();
+    toast(error.message);
+  }
+}
+
 async function openTrace(trace) {
   if (!trace) return;
   invalidateTypeLookup();
   state.selectedTraceId = trace.occurrenceId;
+  if (state.debugger) {
+    let occurrence = state.debugger.model.occurrences.get(trace.occurrenceId);
+    while (occurrence && occurrence.kind !== "function") {
+      occurrence = occurrence.rawParent;
+    }
+    if (occurrence && state.debugger.model.calls.has(occurrence.id)) {
+      await showDebugCall(occurrence.id);
+      return;
+    }
+  }
   if (trace.path !== state.path) {
     const context = state.evaluation?.traces?.length
       ? state.evaluation
@@ -3958,7 +4853,10 @@ async function openTrace(trace) {
     )?.module;
     if (
       modulePath &&
-      (await loadDocument(modulePath, { preserveTrace: true }))
+      (await loadDocument(modulePath, {
+        preserveTrace: true,
+        preserveDebugger: true,
+      }))
     ) {
       state.traceContext = context;
       state.selectedTraceId = trace.occurrenceId;
@@ -3972,6 +4870,23 @@ async function openTrace(trace) {
 }
 
 function bindInspectorEvents() {
+  document.querySelectorAll("[data-debug-start]").forEach((button) => {
+    button.addEventListener("click", () => void startDebugger());
+  });
+  document.querySelectorAll("[data-debug-call]").forEach((button) => {
+    button.addEventListener("click", () =>
+      void showDebugCall(button.dataset.debugCall),
+    );
+  });
+  document.querySelector("[data-debug-close]")?.addEventListener("click", () => {
+    state.debugController?.abort();
+    state.debugController = null;
+    state.debugging = false;
+    state.debugger = null;
+    setMarkdownEditorDebugPosition(state.sourceEditorView, null);
+    setMarkdownEditorDebugProjection(state.sourceEditorView, null);
+    refreshInspector();
+  });
   document
     .querySelector("[data-definition-peek]")
     ?.addEventListener("click", () => openDefinition(state.definitionInfo));

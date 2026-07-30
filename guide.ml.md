@@ -67,6 +67,27 @@ The context pane groups calls into a compact execution tree. Select an
 occurrence to see its parameters and observed values, or click it to return to
 the exact source span. [[Demos.Tracing]] is the smallest complete example.
 
+## Debugging
+
+Choose `Explore execution` in the context pane to reconstruct the dynamic call
+graph for the current page and its dependencies.
+
+- Select a call in the context pane to inspect that particular invocation.
+- Compact annotations appear directly after the source line that produced
+  them. Function arguments follow the header, pattern variables follow the
+  selected pattern, and local values follow the completed binding.
+- A called function's result follows its callsite and opens that child call.
+  Repeated callsites are grouped; the context pane moves between individual
+  occurrences.
+- The selected function's result follows the expression that returned it.
+- Source lines that did not run in the selected call are subdued.
+- Select a called function in the source to open that child call. Use the
+  breadcrumb in the context pane, or select the current function's name, to
+  return to an ancestor.
+
+The call graph is tied to the exact compiled program. Editing executable OCaml
+marks it as stale; reconstruct it from the context pane.
+
 ## Workspace
 
 Git provides history and collaboration; Dox does not add a second history

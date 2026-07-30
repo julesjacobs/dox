@@ -473,4 +473,53 @@ let () =
          && String.equal event.detail "7")
        exception_evaluation.traces)
     "the parent observation did not continue after a caught exception";
+  let debug_document =
+    Document.parse ~path:"debug.ml.md"
+      "# Debug\n\n\
+      \    let add x y =\n\
+      \      let total =\n\
+      \        x + y in\n\
+      \      total\n\
+      \    let answer = add 2 3\n"
+  in
+  let debug_result =
+    Debugger.start ~documents:[ debug_document ] ~target:debug_document ()
+  in
+  expect
+    (match debug_result with
+    | Error _ -> false
+    | Ok json ->
+        let open Yojson.Safe.Util in
+        let timeline = json |> member "timeline" |> to_list in
+        let calls = json |> member "callEvents" |> to_list in
+        timeline <> []
+        && List.exists
+             (fun event ->
+               event |> member "phase" |> to_string = "enter"
+               && event |> member "kind" |> to_string = "function"
+               && event |> member "label" |> to_string = "add")
+             calls
+        && List.exists
+             (fun event ->
+               event |> member "phase" |> to_string = "return"
+               && event |> member "kind" |> to_string = "function"
+               && event |> member "label" |> to_string = "add"
+               && event |> member "detail" |> to_string = "5")
+             calls
+        && List.exists
+             (fun event ->
+               event |> member "phase" |> to_string = "return"
+               && event |> member "kind" |> to_string = "binding"
+               && event |> member "label" |> to_string = "total"
+               && event |> member "detail" |> to_string = "5"
+               && event |> member "endLine" |> to_int = 5)
+             calls
+        && List.exists
+             (fun stop ->
+               stop |> member "locals" |> to_list
+               |> List.exists (fun local ->
+                   local |> member "name" |> to_string = "x"
+                   && local |> member "value" |> to_string = "2"))
+             timeline)
+    "bytecode debugger did not capture a source timeline with local bindings";
   print_endline "evaluator tests passed"

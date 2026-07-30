@@ -55,6 +55,187 @@ const colors = {
 };
 
 const setEditorMode = StateEffect.define();
+const setDebugPosition = StateEffect.define();
+const setDebugProjection = StateEffect.define();
+
+class DebugAnnotationsWidget extends WidgetType {
+  constructor(items, indent = 0) {
+    super();
+    this.items = items;
+    this.indent = indent;
+  }
+
+  eq(other) {
+    return (
+      this.indent === other.indent &&
+      JSON.stringify(this.items) === JSON.stringify(other.items)
+    );
+  }
+
+  toDOM() {
+    const row = document.createElement("span");
+    row.className = "cm-debug-annotations";
+    this.items.forEach((item, index) => {
+      if (index > 0) {
+        const separator = document.createElement("span");
+        separator.className = "cm-debug-annotation-separator";
+        separator.textContent = "·";
+        row.append(separator);
+      }
+      const value = document.createElement(
+        item.kind === "call" ? "button" : "span",
+      );
+      value.className = `cm-debug-annotation cm-debug-annotation-${item.kind || "value"}`;
+      if (item.callId) {
+        value.dataset.debugCall = item.callId;
+        value.type = "button";
+        value.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        });
+      }
+      if (item.name) {
+        const name = document.createElement("span");
+        name.className = "cm-debug-annotation-name";
+        name.textContent = item.name;
+        const nameSeparator = document.createElement("span");
+        nameSeparator.className = "cm-debug-annotation-name-separator";
+        nameSeparator.textContent = ["call", "return", "raise"].includes(
+          item.kind,
+        )
+          ? "\u00a0"
+          : "\u00a0=\u00a0";
+        value.append(name, nameSeparator);
+      }
+      const code = document.createElement("code");
+      code.textContent = item.value;
+      code.title = [item.type, item.fullValue]
+        .filter(Boolean)
+        .join("\n");
+      value.append(code);
+      if (item.occurrenceTotal > 1) {
+        const occurrence = document.createElement("span");
+        occurrence.className = "cm-debug-annotation-occurrence";
+        occurrence.textContent = `${item.occurrenceIndex} of ${item.occurrenceTotal}`;
+        value.append(occurrence);
+      }
+      if (item.kind !== "call") {
+        value.tabIndex = 0;
+        value.title = item.type
+          ? `${item.name || "value"}: ${item.type}`
+          : "Expand value";
+        value.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        });
+        value.addEventListener("click", () => {
+          value.classList.toggle("expanded");
+        });
+        value.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          value.classList.toggle("expanded");
+        });
+      }
+      row.append(value);
+    });
+    return row;
+  }
+
+  ignoreEvent() {
+    return false;
+  }
+}
+
+function debugProjectionDecorations(state, projection) {
+  if (!projection) return Decoration.none;
+  const decorations = [];
+  for (const number of projection.dimLines || []) {
+    if (number < 1 || number > state.doc.lines) continue;
+    decorations.push(
+      Decoration.line({ class: "cm-debug-not-run" }).range(
+        state.doc.line(number).from,
+      ),
+    );
+  }
+  for (const group of projection.annotations || []) {
+    if (group.line < 1 || group.line > state.doc.lines) continue;
+    decorations.push(
+      Decoration.widget({
+        widget: new DebugAnnotationsWidget(group.items, group.indent),
+        side: 1,
+      }).range(state.doc.line(group.line).to),
+    );
+  }
+  for (const link of projection.links || []) {
+    if (link.line < 1 || link.line > state.doc.lines) continue;
+    const line = state.doc.line(link.line);
+    const from = line.from + Math.min(Math.max(link.column, 0), line.length);
+    const to =
+      line.from +
+      Math.min(Math.max(link.endColumn, link.column + 1), line.length);
+    if (to <= from) continue;
+    decorations.push(
+      Decoration.mark({
+        class: `cm-debug-call-link cm-debug-call-link-${link.kind}`,
+        attributes: {
+          "data-debug-call": link.callId,
+          title:
+            link.kind === "parent"
+              ? "Return to the caller"
+              : `Open this call to ${link.label}`,
+        },
+      }).range(from, to),
+    );
+  }
+  return Decoration.set(decorations, true);
+}
+
+const debugProjectionField = StateField.define({
+  create: () => Decoration.none,
+  update(value, transaction) {
+    value = value.map(transaction.changes);
+    for (const effect of transaction.effects) {
+      if (effect.is(setDebugProjection)) {
+        value = debugProjectionDecorations(transaction.state, effect.value);
+      }
+    }
+    return value;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+const debugPositionField = StateField.define({
+  create: () => Decoration.none,
+  update(value, transaction) {
+    value = value.map(transaction.changes);
+    for (const effect of transaction.effects) {
+      if (!effect.is(setDebugPosition)) continue;
+      const position = effect.value;
+      if (!position) {
+        value = Decoration.none;
+        continue;
+      }
+      const line = transaction.state.doc.line(
+        Math.min(Math.max(position.line, 1), transaction.state.doc.lines),
+      );
+      const from =
+        line.from + Math.min(Math.max(position.column || 0, 0), line.length);
+      const to = Math.min(line.to, from + 1);
+      const decorations = [
+        Decoration.line({ class: "cm-debug-line" }).range(line.from),
+      ];
+      if (to > from) {
+        decorations.push(
+          Decoration.mark({ class: "cm-debug-position" }).range(from, to),
+        );
+      }
+      value = Decoration.set(decorations, true);
+    }
+    return value;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
 
 const editorModeField = StateField.define({
   create() {
@@ -100,6 +281,123 @@ const embeddedTheme = EditorView.theme({
   },
   ".cm-activeLine": {
     backgroundColor: "transparent",
+  },
+  ".cm-debug-line": {
+    backgroundColor: "rgba(214, 163, 72, 0.105)",
+    boxShadow: "inset 2px 0 #c08b3e",
+  },
+  ".cm-debug-position": {
+    backgroundColor: "rgba(214, 163, 72, 0.28)",
+    borderRadius: "2px",
+  },
+  ".cm-debug-not-run": {
+    opacity: "0.28",
+    filter: "grayscale(0.5)",
+  },
+  ".cm-debug-annotations": {
+    position: "absolute",
+    zIndex: "2",
+    display: "inline-flex",
+    alignItems: "baseline",
+    gap: "5px",
+    boxSizing: "border-box",
+    width: "max-content",
+    minWidth: "0",
+    marginLeft: "1.25ch",
+    padding: "0",
+    overflow: "visible",
+    color: "#76817b",
+    fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
+    fontSize: "0.77em",
+    lineHeight: "1.62",
+    pointerEvents: "auto",
+    whiteSpace: "nowrap",
+  },
+  ".cm-debug-annotations:has(.cm-debug-annotation.expanded)": {
+    zIndex: "5",
+    overflow: "visible",
+    borderRadius: "3px",
+    backgroundColor: "rgba(250, 249, 245, 0.97)",
+    boxShadow: "0 2px 10px rgba(32, 40, 36, 0.08)",
+  },
+  ".cm-debug-annotation": {
+    display: "inline-flex",
+    alignItems: "baseline",
+    minWidth: "0",
+    maxWidth: "42ch",
+    border: "0",
+    borderRadius: "3px",
+    padding: "0",
+    background: "transparent",
+    color: "inherit",
+    font: "inherit",
+    textAlign: "left",
+    whiteSpace: "nowrap",
+  },
+  ".cm-debug-annotation-name": {
+    flex: "0 0 auto",
+    color: "#9a7a4d",
+  },
+  ".cm-debug-annotation-name-separator": {
+    flex: "0 0 auto",
+    whiteSpace: "pre",
+  },
+  ".cm-debug-annotation code": {
+    display: "inline-block",
+    overflow: "hidden",
+    minWidth: "0",
+    maxWidth: "32ch",
+    color: "#53635b",
+    font: "inherit",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  ".cm-debug-annotation.expanded": {
+    maxWidth: "none",
+    whiteSpace: "normal",
+  },
+  ".cm-debug-annotation.expanded code": {
+    overflow: "visible",
+    whiteSpace: "pre-wrap",
+  },
+  ".cm-debug-annotation-return .cm-debug-annotation-name": {
+    color: "#557263",
+  },
+  ".cm-debug-annotation-raise .cm-debug-annotation-name, .cm-debug-annotation-raise code": {
+    color: "#9a4f45",
+  },
+  ".cm-debug-annotation-call": {
+    cursor: "pointer",
+  },
+  ".cm-debug-annotation-call:hover": {
+    color: colors.green,
+  },
+  ".cm-debug-annotation-call .cm-debug-annotation-name": {
+    color: "#536e62",
+  },
+  ".cm-debug-annotation-occurrence": {
+    flex: "0 0 auto",
+    marginLeft: "6px",
+    color: "#99a19d",
+    fontSize: "0.82em",
+  },
+  ".cm-debug-annotation-separator": {
+    color: "#b3b8b5",
+  },
+  ".cm-debug-call-link": {
+    borderRadius: "3px",
+    cursor: "pointer",
+    textDecoration: "underline",
+    textDecorationColor: "rgba(77, 111, 95, 0.34)",
+    textDecorationThickness: "1px",
+    textUnderlineOffset: "3px",
+  },
+  ".cm-debug-call-link:hover": {
+    backgroundColor: "rgba(40, 95, 78, 0.1)",
+    textDecorationColor: "rgba(40, 95, 78, 0.7)",
+  },
+  ".cm-debug-call-link-parent": {
+    textDecorationColor: "rgba(182, 128, 60, 0.42)",
   },
   "&.cm-focused .cm-activeLine": {
     backgroundColor: "rgba(255, 255, 255, 0.28)",
@@ -1479,6 +1777,7 @@ function mountEditor(
     onSelectionChange,
     onCompletionKey,
     onDefinitionRequest,
+    onDebugNavigate,
     sourceMode = "literate",
     wikiModules = [],
     onWikiNavigate,
@@ -1507,6 +1806,8 @@ function mountEditor(
     inlineBacktickLanguageData,
     indentUnit.of("    "),
     blockResultsField,
+    debugPositionField,
+    debugProjectionField,
     wikiConfigField,
     editorModeField,
     Prec.highest(keymap.of([
@@ -1587,6 +1888,12 @@ function mountEditor(
       keydown: (event, view) =>
         handleWikiInput(event, view) || completeHeadingOnKeydown(event, view),
       mousedown: (event, view) => {
+        const debugCall = event.target.closest?.("[data-debug-call]");
+        if (debugCall && view.dom.contains(debugCall)) {
+          onDebugNavigate?.(debugCall.dataset.debugCall);
+          event.preventDefault();
+          return true;
+        }
         if (!(event.metaKey || event.ctrlKey)) return false;
         const link = event.target.closest?.("[data-wiki-module]");
         if (link && view.dom.contains(link)) {
@@ -1639,6 +1946,16 @@ export function mountMarkdownEditor(parent, options) {
 export function setMarkdownEditorMode(view, mode) {
   if (!view || view.state.field(editorModeField) === mode) return;
   view.dispatch({ effects: setEditorMode.of(mode) });
+}
+
+export function setMarkdownEditorDebugPosition(view, position) {
+  if (!view) return;
+  view.dispatch({ effects: setDebugPosition.of(position) });
+}
+
+export function setMarkdownEditorDebugProjection(view, projection) {
+  if (!view) return;
+  view.dispatch({ effects: setDebugProjection.of(projection) });
 }
 
 export function replaceEditorStateDocument(editorState, source) {

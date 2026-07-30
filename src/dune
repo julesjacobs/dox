@@ -18,6 +18,7 @@
   module_graph
   diff
   evaluator
+  debugger
   compiler_workspace
   project
   server
@@ -41,6 +42,7 @@
   module_graph
   diff
   evaluator
+  debugger
   compiler_workspace
   project
   server)
@@ -48,7 +50,14 @@
 
 (test
  (name test_evaluator)
- (modules test_evaluator util module_path observation document evaluator)
+ (modules
+  test_evaluator
+  util
+  module_path
+  observation
+  document
+  evaluator
+  debugger)
  (libraries unix str yojson))
 
 (test

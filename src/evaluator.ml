@@ -1072,12 +1072,15 @@ let artifact_builder_identity () =
     ("dox-artifact-v2\000" ^ compiler_identity () ^ "\000unix.cma\000"
    ^ artifact_prelude)
 
-let remove_temp_directory directory =
+let rec remove_temp_directory directory =
   (try
      Sys.readdir directory
      |> Array.iter (fun name ->
-         try Sys.remove (Filename.concat directory name)
-         with Sys_error _ -> ())
+         let path = Filename.concat directory name in
+         try
+           if Sys.is_directory path then remove_temp_directory path
+           else Sys.remove path
+         with Sys_error _ | Unix.Unix_error _ -> ())
    with Sys_error _ -> ());
   try Unix.rmdir directory with Unix.Unix_error _ -> ()
 
@@ -1245,8 +1248,8 @@ let instrumented_compilation_source evaluation_id documents target =
   let sources = List.map document_source documents in
   (sources, List.rev !markers, List.rev !inline_markers)
 
-let compile_document_units ?(prelude_source = prelude) ?entry ~directory
-    ~sources ~target ~cancelled () =
+let compile_document_units ?(prelude_source = prelude) ?entry
+    ?(environment = []) ~directory ~sources ~target ~cancelled () =
   let unit_name document =
     match Module_path.of_source_path document.Document.path with
     | Ok module_path -> Module_path.compiler_unit module_path
@@ -1313,8 +1316,8 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
                    Result.bind result (fun () -> Util.write_file path source))
                  (Ok ())))
   in
-  let compile arguments =
-    run_process ~cwd:directory ~timeout_seconds:12. ~cancelled
+  let compile ?(environment = []) arguments =
+    run_process ~cwd:directory ~environment ~timeout_seconds:12. ~cancelled
       ~output_limit:1_000_000 (compiler ()) arguments
   in
   match write_result with
@@ -1349,7 +1352,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
                          (fun (succeeded, failed, warnings) item ->
                            let _, path, _ = item in
                            let result =
-                             compile
+                             compile ~environment
                                [
                                  "-g";
                                  "-I";
