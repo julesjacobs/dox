@@ -46,6 +46,17 @@ let () =
   expect
     (Result.is_error (Module_path.validate "Models.Bad-Name"))
     "invalid module component was accepted";
+  expect
+    (String.equal
+       (Module_path.rewrite_qualified_references
+          ~modules:[ "Project"; "Project.Dataset" ]
+          "let before = Project.Dataset.readings\n\
+           module Project = struct end\n\
+           let after = Project.Dataset.readings\n")
+       "let before = Dox__Project__Dataset.readings\n\
+        module Project = struct end\n\
+        let after = Project.Dataset.readings\n")
+    "qualified reference rewriting changed a declaration or missed a page";
   let sibling_reference =
     Document.parse ~path:"examples/multi_file.ml.md"
       "# Multi file\n\n    let result = Library.mean [1; 2]\n"
@@ -342,8 +353,10 @@ let () =
         "qualified page modules did not compile and evaluate";
       write directory "models/section.ml.md"
         "# Section\n\n    let parent_result = Statistics.mean [1; 2]\n";
+      write directory "models/section/provider.ml.md"
+        "# Provider\n\n    let value = 42\n";
       write directory "models/section/consumer.ml.md"
-        "# Consumer\n\n    let child_result = Statistics.mean [1; 2; 3]\n";
+        "# Consumer\n\n    let child_result = Models.Section.Provider.value\n";
       let nested_namespace_snapshot =
         project_result (Project.snapshot project)
       in
@@ -362,7 +375,7 @@ let () =
       expect (evaluate_nested "Models.Section").ok
         "a page that became a namespace lost its ancestor imports";
       expect (evaluate_nested "Models.Section.Consumer").ok
-        "a nested page lost imports from an ancestor namespace";
+        "a nested page could not use a qualified sibling below a parent page";
       let nested_analysis =
         Compiler_workspace.analyze ~target:"Models.Section.Consumer"
           ~root:directory ~version:nested_namespace_snapshot.version
@@ -377,13 +390,15 @@ let () =
         |> Option.value ~default:[]
       in
       expect
-        (nested_analysis.ok && List.mem "Models.Statistics" nested_dependencies)
-        ("compiler dependency analysis lost an ancestor-scope import: "
+        (nested_analysis.ok
+        && List.mem "Models.Section.Provider" nested_dependencies)
+        ("compiler dependency analysis lost a qualified sibling import: "
         ^ String.concat ", " nested_dependencies
         ^ " ("
         ^ String.concat "; " nested_analysis.diagnostics
         ^ ")");
       Sys.remove (Filename.concat directory "models/section/consumer.ml.md");
+      Sys.remove (Filename.concat directory "models/section/provider.ml.md");
       Sys.remove (Filename.concat directory "models/section.ml.md");
       write directory "reports/shadow.ml.md"
         "# Shadow\n\n\

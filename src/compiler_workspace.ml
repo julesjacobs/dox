@@ -37,7 +37,11 @@ let generated_path module_path =
 let generated_pages index =
   let modules = Page_index.modules index in
   index.pages
-  |> List.map (fun page ->
+  |> List.map (fun (page : Page_index.page) ->
+      let source =
+        Document.compilation_source page.document
+        |> Module_path.rewrite_qualified_references ~modules
+      in
       {
         module_path = page.Page_index.module_path;
         source_path = page.source_path;
@@ -45,8 +49,7 @@ let generated_pages index =
         source =
           "open Dox_prelude\n"
           ^ Module_path.ancestor_open_source page.module_path
-          ^ Document.compilation_source page.document
-          ^ "\n"
+          ^ source ^ "\n"
           ^ Module_path.alias_source modules page.module_path;
       })
 

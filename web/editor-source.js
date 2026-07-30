@@ -18,6 +18,7 @@ import {
 import { setDiagnostics } from "@codemirror/lint";
 import { oCaml } from "@codemirror/legacy-modes/mode/mllike";
 import {
+  Annotation,
   EditorState,
   Prec,
   StateEffect,
@@ -35,6 +36,14 @@ import {
   keymap,
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
+import {
+  indentOutlineSubtree,
+  moveOutlineSibling,
+  moveOutlineSubtree,
+  outdentOutlineSubtree,
+  outlineDepth,
+  outlineSubtreeEnd,
+} from "./outline-tree.mjs";
 
 const colors = {
   ink: "#202824",
@@ -1726,6 +1735,61 @@ const outlineTheme = EditorView.theme({
     textDecoration: "underline wavy #a94436",
     textUnderlineOffset: "3px",
   },
+  ".cm-outline-drag-handle": {
+    position: "absolute",
+    zIndex: "8",
+    left: "0",
+    width: "15px",
+    height: "18px",
+    border: "0",
+    borderRadius: "5px",
+    opacity: "0",
+    pointerEvents: "none",
+    cursor: "grab",
+    backgroundImage:
+      "radial-gradient(circle, rgba(58, 74, 67, .55) 0 1px, transparent 1.15px)",
+    backgroundPosition: "2px 2px",
+    backgroundSize: "5px 5px",
+    transition: "opacity 80ms ease, background-color 80ms ease",
+  },
+  ".cm-outline-drag-handle.cm-visible": {
+    opacity: "1",
+    pointerEvents: "auto",
+  },
+  ".cm-outline-drag-handle:hover": {
+    backgroundColor: "rgba(40, 95, 78, .075)",
+  },
+  ".cm-outline-dragging .cm-outline-drag-handle": {
+    cursor: "grabbing",
+  },
+  ".cm-outline-drop-indicator": {
+    position: "absolute",
+    zIndex: "7",
+    right: "9px",
+    height: "1.5px",
+    borderRadius: "2px",
+    pointerEvents: "none",
+    backgroundColor: "rgba(40, 95, 78, .72)",
+    boxShadow: "0 0 0 1px rgba(248, 247, 243, .72)",
+  },
+  ".cm-outline-drop-indicator::before": {
+    content: '""',
+    position: "absolute",
+    top: "-2px",
+    left: "-2px",
+    width: "5px",
+    height: "5px",
+    borderRadius: "50%",
+    backgroundColor: "rgba(40, 95, 78, .82)",
+  },
+  ".cm-outline-drop-parent": {
+    position: "absolute",
+    zIndex: "0",
+    right: "8px",
+    borderRadius: "6px 0 0 6px",
+    pointerEvents: "none",
+    backgroundColor: "rgba(40, 95, 78, .075)",
+  },
 });
 
 const setOutlineConfig = StateEffect.define();
@@ -1746,11 +1810,6 @@ const outlineConfigField = StateField.define({
     return value;
   },
 });
-
-function outlineDepth(text) {
-  const spaces = text.match(/^ */)?.[0].length || 0;
-  return spaces / 2;
-}
 
 function outlineDecorations(view) {
   const {
@@ -1820,121 +1879,265 @@ function insertOutlineSibling(view, onCommit) {
   return true;
 }
 
-function changeOutlineIndent(view, delta) {
-  const selection = view.state.selection.main;
-  const line = view.state.doc.lineAt(selection.head);
-  const spaces = line.text.match(/^ */)?.[0].length || 0;
-  if (delta < 0 && spaces < 2) return true;
-  if (delta > 0) {
-    let previous = line.number - 1;
-    while (previous > 0 && !view.state.doc.line(previous).text.trim()) {
-      previous -= 1;
-    }
-    if (previous === 0) return true;
-  }
-  const lines = [line];
-  for (let number = line.number + 1; number <= view.state.doc.lines; number += 1) {
-    const candidate = view.state.doc.line(number);
-    const candidateSpaces = candidate.text.match(/^ */)?.[0].length || 0;
-    if (candidate.text.trim() && candidateSpaces <= spaces) break;
-    lines.push(candidate);
-  }
-  const changes = lines.map((candidate) => {
-    const candidateSpaces = candidate.text.match(/^ */)?.[0].length || 0;
-    return {
-      from: candidate.from,
-      to: candidate.from + candidateSpaces,
-      insert: " ".repeat(Math.max(0, candidateSpaces + delta)),
-    };
-  });
-  view.dispatch({
-    changes,
-    selection: {
-      anchor: Math.max(line.from, selection.anchor + delta),
-      head: Math.max(line.from, selection.head + delta),
-    },
-    scrollIntoView: true,
-    userEvent: "input",
-  });
-  return true;
-}
+const outlineMoveAnnotation = Annotation.define();
 
-function moveOutlineSubtree(view, direction, onCommit) {
+function applyOutlineTransform(view, transform, onCommit) {
+  if (!transform) return true;
   const selection = view.state.selection.main;
-  if (!selection.empty) return false;
-  const sourceLines = view.state.doc.toString().split("\n");
   const line = view.state.doc.lineAt(selection.head);
-  const start = line.number - 1;
-  if (!sourceLines[start]?.trim()) return true;
-  const depth = outlineDepth(sourceLines[start]);
-  const blockEnd = (from) => {
-    let index = from + 1;
-    while (index < sourceLines.length) {
-      const text = sourceLines[index];
-      if (text.trim() && outlineDepth(text) <= depth) break;
-      index += 1;
-    }
-    return index;
-  };
-  const end = blockEnd(start);
-  let replacement;
-  let movedStart;
-  if (direction < 0) {
-    let previous = start - 1;
-    while (previous >= 0) {
-      const text = sourceLines[previous];
-      if (!text.trim() || outlineDepth(text) > depth) {
-        previous -= 1;
-        continue;
-      }
-      if (outlineDepth(text) < depth) return true;
-      break;
-    }
-    if (previous < 0) return true;
-    replacement = [
-      ...sourceLines.slice(start, end),
-      ...sourceLines.slice(previous, start),
-    ];
-    sourceLines.splice(previous, end - previous, ...replacement);
-    movedStart = previous;
-  } else {
-    let next = end;
-    while (next < sourceLines.length && !sourceLines[next].trim()) next += 1;
-    if (
-      next >= sourceLines.length ||
-      outlineDepth(sourceLines[next]) < depth
-    ) {
-      return true;
-    }
-    if (outlineDepth(sourceLines[next]) > depth) return true;
-    const nextEnd = blockEnd(next);
-    const nextBlock = sourceLines.slice(next, nextEnd);
-    replacement = [
-      ...nextBlock,
-      ...sourceLines.slice(start, end),
-    ];
-    sourceLines.splice(start, nextEnd - start, ...replacement);
-    movedStart = start + nextBlock.length;
-  }
   const column = selection.head - line.from;
-  const movedLine = sourceLines[movedStart] || "";
+  const oldIndent = line.text.match(/^ */)?.[0].length || 0;
+  const nextLines = transform.source.split("\n");
+  const selectedLine = Math.max(
+    0,
+    transform.originLines.indexOf(line.number),
+  );
+  const nextIndent =
+    nextLines[selectedLine]?.match(/^ */)?.[0].length || 0;
+  const nextColumn =
+    nextIndent + Math.max(0, column - oldIndent);
   const position =
-    sourceLines
-      .slice(0, movedStart)
+    nextLines
+      .slice(0, selectedLine)
       .reduce((length, text) => length + text.length + 1, 0) +
-    Math.min(column, movedLine.length);
+    Math.min(nextColumn, nextLines[selectedLine]?.length || 0);
   view.dispatch({
     changes: {
       from: 0,
       to: view.state.doc.length,
-      insert: sourceLines.join("\n"),
+      insert: transform.source,
     },
     selection: { anchor: position },
     scrollIntoView: true,
+    annotations: outlineMoveAnnotation.of(transform.originLines),
     userEvent: "move.line",
   });
   queueMicrotask(() => onCommit?.("reorder", position));
   return true;
+}
+
+function moveOutlineSiblingInEditor(view, direction, onCommit) {
+  const selection = view.state.selection.main;
+  if (!selection.empty) return false;
+  const line = view.state.doc.lineAt(selection.head);
+  const start = line.number - 1;
+  return applyOutlineTransform(
+    view,
+    moveOutlineSibling(view.state.doc.toString(), start, direction),
+    onCommit,
+  );
+}
+
+function changeOutlineNesting(view, direction, onCommit) {
+  const selection = view.state.selection.main;
+  if (!selection.empty) return false;
+  const line = view.state.doc.lineAt(selection.head);
+  const source = view.state.doc.toString();
+  const transform =
+    direction > 0
+      ? indentOutlineSubtree(source, line.number - 1)
+      : outdentOutlineSubtree(source, line.number - 1);
+  return applyOutlineTransform(view, transform, onCommit);
+}
+
+function outlineLineElement(view, line) {
+  const dom = view.domAtPos(line.from);
+  const node = dom.node.nodeType === Node.TEXT_NODE
+    ? dom.node.parentElement
+    : dom.node;
+  return node?.closest?.(".cm-line") || null;
+}
+
+function outlineDragPlugin(onCommit) {
+  return ViewPlugin.fromClass(
+    class {
+      constructor(view) {
+        this.view = view;
+        this.hoveredLine = null;
+        this.drag = null;
+        this.handle = document.createElement("div");
+        this.handle.className = "cm-outline-drag-handle";
+        this.handle.setAttribute("aria-hidden", "true");
+        this.handle.title = "Drag to move page";
+        this.indicator = document.createElement("div");
+        this.indicator.className = "cm-outline-drop-indicator";
+        this.indicator.hidden = true;
+        this.parentHighlight = document.createElement("div");
+        this.parentHighlight.className = "cm-outline-drop-parent";
+        this.parentHighlight.hidden = true;
+        view.dom.append(this.parentHighlight, this.indicator, this.handle);
+        this.onHover = (event) => this.hover(event);
+        this.onLeave = (event) => this.leave(event);
+        this.onPointerDown = (event) => this.start(event);
+        this.onPointerMove = (event) => this.move(event);
+        this.onPointerUp = (event) => this.finish(event);
+        view.dom.addEventListener("pointermove", this.onHover);
+        view.dom.addEventListener("pointerleave", this.onLeave);
+        this.handle.addEventListener("pointerdown", this.onPointerDown);
+        this.handle.addEventListener("pointermove", this.onPointerMove);
+        this.handle.addEventListener("pointerup", this.onPointerUp);
+        this.handle.addEventListener("pointercancel", this.onPointerUp);
+      }
+
+      lineAt(event) {
+        const position = this.view.posAtCoords({
+          x: event.clientX,
+          y: event.clientY,
+        });
+        if (position === null) return null;
+        const line = this.view.state.doc.lineAt(position);
+        return line.text.trim() ? line : null;
+      }
+
+      placeHandle(line) {
+        const element = outlineLineElement(this.view, line);
+        if (!element) return this.hideHandle();
+        const root = this.view.dom.getBoundingClientRect();
+        const rect = element.getBoundingClientRect();
+        this.hoveredLine = line.number - 1;
+        this.handle.style.top =
+          `${rect.top - root.top + (rect.height - 18) / 2}px`;
+        this.handle.classList.add("cm-visible");
+      }
+
+      hideHandle() {
+        if (this.drag) return;
+        this.hoveredLine = null;
+        this.handle.classList.remove("cm-visible");
+      }
+
+      hover(event) {
+        if (this.drag || this.handle.contains(event.target)) return;
+        const root = this.view.dom.getBoundingClientRect();
+        if (event.clientX - root.left > 20) {
+          this.hideHandle();
+          return;
+        }
+        const line = this.lineAt(event);
+        if (line) this.placeHandle(line);
+        else this.hideHandle();
+      }
+
+      leave(event) {
+        if (!this.drag && !this.handle.contains(event.relatedTarget)) {
+          this.hideHandle();
+        }
+      }
+
+      start(event) {
+        if (event.button !== 0 || this.hoveredLine === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        this.drag = {
+          pointerId: event.pointerId,
+          sourceLine: this.hoveredLine,
+          transform: null,
+        };
+        this.handle.setPointerCapture(event.pointerId);
+        this.view.dom.classList.add("cm-outline-dragging");
+      }
+
+      showDrop(line, placement) {
+        const element = outlineLineElement(this.view, line);
+        if (!element) return;
+        const root = this.view.dom.getBoundingClientRect();
+        const rect = element.getBoundingClientRect();
+        const source = this.view.state.doc.toString();
+        let top = rect.top - root.top;
+        let depth = outlineDepth(line.text);
+        if (placement === "after") {
+          const end = outlineSubtreeEnd(source, line.number - 1);
+          const finalLine = this.view.state.doc.line(
+            Math.max(line.number, end),
+          );
+          const finalElement = outlineLineElement(this.view, finalLine);
+          top = (finalElement?.getBoundingClientRect().bottom || rect.bottom)
+            - root.top;
+        } else if (placement === "inside-first") {
+          top = rect.bottom - root.top;
+          depth += 1;
+        }
+        const content = this.view.contentDOM.getBoundingClientRect();
+        this.indicator.style.top = `${top - 0.75}px`;
+        this.indicator.style.left =
+          `${Math.max(13, content.left - root.left + 7 + depth * 14)}px`;
+        this.indicator.hidden = false;
+        if (placement === "inside-first") {
+          this.parentHighlight.style.top = `${rect.top - root.top}px`;
+          this.parentHighlight.style.left =
+            `${Math.max(15, content.left - root.left + 3)}px`;
+          this.parentHighlight.style.height = `${rect.height}px`;
+          this.parentHighlight.hidden = false;
+        } else {
+          this.parentHighlight.hidden = true;
+        }
+      }
+
+      clearDrop() {
+        this.indicator.hidden = true;
+        this.parentHighlight.hidden = true;
+        if (this.drag) this.drag.transform = null;
+      }
+
+      move(event) {
+        if (!this.drag || event.pointerId !== this.drag.pointerId) return;
+        event.preventDefault();
+        const line = this.lineAt(event);
+        if (!line) return this.clearDrop();
+        const element = outlineLineElement(this.view, line);
+        if (!element) return this.clearDrop();
+        const rect = element.getBoundingClientRect();
+        const ratio = (event.clientY - rect.top) / Math.max(1, rect.height);
+        const placement =
+          ratio < 0.27
+            ? "before"
+            : ratio > 0.73
+              ? "after"
+              : "inside-first";
+        const transform = moveOutlineSubtree(
+          this.view.state.doc.toString(),
+          this.drag.sourceLine,
+          line.number - 1,
+          placement,
+        );
+        if (!transform) return this.clearDrop();
+        this.drag.transform = transform;
+        this.showDrop(line, placement);
+        const scroller = this.view.scrollDOM.getBoundingClientRect();
+        if (event.clientY < scroller.top + 24) this.view.scrollDOM.scrollTop -= 8;
+        else if (event.clientY > scroller.bottom - 24) {
+          this.view.scrollDOM.scrollTop += 8;
+        }
+      }
+
+      finish(event) {
+        if (!this.drag || event.pointerId !== this.drag.pointerId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const transform = this.drag.transform;
+        this.drag = null;
+        this.view.dom.classList.remove("cm-outline-dragging");
+        this.clearDrop();
+        this.hideHandle();
+        if (transform) {
+          this.view.focus();
+          applyOutlineTransform(this.view, transform, onCommit);
+        }
+      }
+
+      destroy() {
+        this.view.dom.removeEventListener("pointermove", this.onHover);
+        this.view.dom.removeEventListener("pointerleave", this.onLeave);
+        this.handle.removeEventListener("pointerdown", this.onPointerDown);
+        this.handle.removeEventListener("pointermove", this.onPointerMove);
+        this.handle.removeEventListener("pointerup", this.onPointerUp);
+        this.handle.removeEventListener("pointercancel", this.onPointerUp);
+        this.handle.remove();
+        this.indicator.remove();
+        this.parentHighlight.remove();
+      }
+    },
+  );
 }
 
 export function mountModuleOutlineEditor(
@@ -1984,21 +2187,36 @@ export function mountModuleOutlineEditor(
     outlineTheme,
     outlineConfigField,
     presentation,
+    outlineDragPlugin(onCommit),
     Prec.highest(
       keymap.of([
         {
           key: "Enter",
           run: (view) => insertOutlineSibling(view, onCommit),
         },
-        { key: "Tab", run: (view) => changeOutlineIndent(view, 2) },
-        { key: "Shift-Tab", run: (view) => changeOutlineIndent(view, -2) },
+        {
+          key: "Tab",
+          run: (view) => changeOutlineNesting(view, 1, onCommit),
+        },
+        {
+          key: "Shift-Tab",
+          run: (view) => changeOutlineNesting(view, -1, onCommit),
+        },
         {
           key: "Alt-ArrowUp",
-          run: (view) => moveOutlineSubtree(view, -1, onCommit),
+          run: (view) => moveOutlineSiblingInEditor(view, -1, onCommit),
         },
         {
           key: "Alt-ArrowDown",
-          run: (view) => moveOutlineSubtree(view, 1, onCommit),
+          run: (view) => moveOutlineSiblingInEditor(view, 1, onCommit),
+        },
+        {
+          key: "Alt-ArrowRight",
+          run: (view) => changeOutlineNesting(view, 1, onCommit),
+        },
+        {
+          key: "Alt-ArrowLeft",
+          run: (view) => changeOutlineNesting(view, -1, onCommit),
         },
         {
           key: "Escape",
@@ -2023,7 +2241,10 @@ export function mountModuleOutlineEditor(
           transaction.annotation(Transaction.userEvent) === "outline.sync",
       );
       if (update.docChanged && !externalSync) {
-        onChange?.(update.state.doc.toString(), update);
+        const moveOrigins = update.transactions
+          .map((transaction) => transaction.annotation(outlineMoveAnnotation))
+          .find(Boolean);
+        onChange?.(update.state.doc.toString(), update, { moveOrigins });
       }
       if (update.selectionSet || update.docChanged) {
         onSelectionChange?.(update.state.selection.main, update);

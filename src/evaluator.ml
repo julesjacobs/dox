@@ -1263,6 +1263,7 @@ let compile_document_units ?(prelude_source = prelude) ?entry ~directory
         let module_path =
           Result.to_option (Module_path.of_source_path document.Document.path)
         in
+        let source = Module_path.rewrite_qualified_references ~modules source in
         let source =
           match module_path with
           | None -> source

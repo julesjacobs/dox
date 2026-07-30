@@ -308,6 +308,44 @@ let code_mask source =
   loop 0;
   Bytes.unsafe_to_string masked
 
+let top_level_module_shadows source =
+  let masked = code_mask source in
+  let token_re = Str.regexp "[A-Za-z_][A-Za-z0-9_']*" in
+  let rec scan offset depth previous pending result =
+    try
+      let start = Str.search_forward token_re masked offset in
+      let token = Str.matched_string masked in
+      let next = Str.match_end () in
+      let depth =
+        if String.equal token "end" then max 0 (depth - 1) else depth
+      in
+      let pending, result =
+        match pending with
+        | Some module_start when String.equal token "rec" ->
+            (Some module_start, result)
+        | Some _ when String.equal token "type" -> (None, result)
+        | Some _ when depth = 0 && Str.string_match component_re token 0 ->
+            (None, (token, start) :: result)
+        | Some _ -> (None, result)
+        | None -> (None, result)
+      in
+      let pending =
+        if
+          depth = 0
+          && String.equal token "module"
+          && not (Option.equal String.equal previous (Some "let"))
+        then Some start
+        else pending
+      in
+      let depth =
+        if List.mem token [ "struct"; "sig"; "object"; "begin" ] then depth + 1
+        else depth
+      in
+      scan next depth (Some token) pending result
+    with Not_found -> List.rev result
+  in
+  scan 0 0 None None []
+
 let rewrite_qualified_references ~modules source =
   let modules =
     List.sort
@@ -325,12 +363,22 @@ let rewrite_qualified_references ~modules source =
     }
   in
   let buffer = Buffer.create (String.length source + 32) in
+  let shadows = top_level_module_shadows source in
   let matching index =
     List.find_opt
       (fun module_path ->
         let length = String.length module_path in
+        let top = List.hd (split module_path) in
         index + length <= String.length source
         && String.sub source index length = module_path
+        && (not
+              (List.exists
+                 (fun (name, declaration) ->
+                   String.equal name top && declaration <= index)
+                 shadows))
+        && (String.contains module_path '.'
+           || index + length < String.length source
+              && source.[index + length] = '.')
         && (index = 0
            ||
            let character = source.[index - 1] in

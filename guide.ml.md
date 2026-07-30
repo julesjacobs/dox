@@ -23,10 +23,15 @@ The left pane is an editable module outline.
 
 - `Enter` commits an edited module name and opens it.
 - `Enter` on an unchanged module creates a sibling.
-- `Tab` and `Shift–Tab` change nesting.
+- `Tab` or `Option–Right` moves a page into the preceding sibling.
+- `Shift–Tab` or `Option–Left` moves it back out after its parent.
 - `Option–Up` and `Option–Down` (`Alt` elsewhere) move a page and its
   descendants among siblings.
 - `Escape` cancels an edit.
+
+Move the pointer to the far-left edge of a page row to reveal its drag grip.
+Drop above or below a row to reorder siblings. Drop on the middle of a row to
+make the page its first child. The insertion line previews the exact result.
 
 Module components begin with a capital letter because they are OCaml module
 names. Moving or renaming a module updates code references and wiki links.

@@ -6,7 +6,7 @@ import {
   setMarkdownEditorEvaluation,
   setMarkdownEditorResultInvalidation,
   replaceEditorStateDocument,
-} from "./editor.bundle.js?v=20260729l";
+} from "./editor.bundle.js?v=20260729o";
 
 const app = document.querySelector("#app");
 
@@ -1215,6 +1215,16 @@ function carryOutlineRowsThroughUpdate(previousRows, update) {
     .map(([sourceLine, row]) => ({ ...row, sourceLine }));
 }
 
+function carryOutlineRowsThroughMove(previousRows, moveOrigins) {
+  const byLine = new Map(
+    previousRows.map((row) => [row.sourceLine, row]),
+  );
+  return moveOrigins.flatMap((originLine, index) => {
+    const row = byLine.get(originLine);
+    return row ? [{ ...row, sourceLine: index + 1 }] : [];
+  });
+}
+
 function parseOutlineDraft(source, { previousRows = [], update = null } = {}) {
   const raw = source.split("\n");
   const rows = [];
@@ -1652,6 +1662,14 @@ async function performOutlineCommit({
   const draft = parseOutlineDraft(submittedDraft, {
     previousRows: state.outlineDraftRows,
   });
+  const submittedCursorRow = draft.rows.find(
+    (row) => row.sourceLine === submittedCursorLine,
+  );
+  const submittedCursorDocumentLine =
+    state.outlineView?.state.doc.line(submittedCursorLine);
+  const submittedCursorColumn = submittedCursorDocumentLine
+    ? state.outlineSelection - submittedCursorDocumentLine.from
+    : 0;
   const previous = outlineModules(
     state.outlineBase?.committedRowsWithOrigins || [],
   );
@@ -1846,17 +1864,43 @@ async function performOutlineCommit({
         modulePath === mapping.before ? mapping.after : modulePath,
       openModule,
     );
+    const cursorModule = appliedMapping.reduce(
+      (modulePath, mapping) =>
+        modulePath === mapping.before ? mapping.after : modulePath,
+      submittedCursorRow?.targetModule ||
+        submittedCursorRow?.originTarget ||
+        null,
+    );
+    const cursorPath = appliedMapping.reduce(
+      (path, mapping) =>
+        path === mapping.before
+          ? mapping.after
+          : path?.startsWith(`${mapping.before}.`)
+            ? mapping.after + path.slice(mapping.before.length)
+            : path,
+      submittedCursorRow?.proposedPath || submittedCursorRow?.path || null,
+    );
+    const currentEntries =
+      newerDraft !== null
+        ? state.outlineDraftRows
+        : state.outlineBase.committedRowsWithOrigins;
+    const cursorPosition = outlinePositionForCursor(currentEntries, {
+      modulePath: cursorModule,
+      path: cursorPath,
+      column: submittedCursorColumn,
+    });
+    if (cursorPosition !== null) state.outlineSelection = cursorPosition;
     if (openedModule) {
       const position = outlinePositionForModule(
-        newerDraft !== null
-          ? state.outlineDraftRows
-          : state.outlineBase.committedRowsWithOrigins,
+        currentEntries,
         openedModule,
       );
       if (position !== null) state.outlineSelection = position;
     }
     render();
-    syncOutlineEditor({ moveSelection: Boolean(openedModule) });
+    syncOutlineEditor({
+      moveSelection: cursorPosition !== null || Boolean(openedModule),
+    });
     if (state.module) void loadDependencyContext(state.module);
     return true;
   } catch (error) {
@@ -1997,25 +2041,31 @@ function mountOutlineEditor() {
     pendingModule: state.pendingModule,
     pendingVisible: state.pendingVisible,
     lineMap: state.outlineLineMap,
-    onChange: (source, update) => {
+    onChange: (source, update, { moveOrigins = null } = {}) => {
       state.outlineText = source;
       state.outlineSelection = update.state.selection.main.head;
       state.workspaceError = state.outlineConflict || null;
       state.outlineDraftGeneration += 1;
       state.outlineFailedGeneration = null;
-      const carriedRows = carryOutlineRowsThroughUpdate(
-        state.outlineDraftRows,
-        update,
-      );
+      const previousRows = moveOrigins
+        ? carryOutlineRowsThroughMove(
+            state.outlineDraftRows,
+            moveOrigins,
+          )
+        : state.outlineDraftRows;
+      const identityUpdate = moveOrigins ? null : update;
+      const carriedRows = moveOrigins
+        ? previousRows
+        : carryOutlineRowsThroughUpdate(previousRows, identityUpdate);
       try {
         const draft = preserveBlankOutlineOrigins(
           source,
           parseOutlineDraft(source, {
-            previousRows: state.outlineDraftRows,
-            update,
+            previousRows,
+            update: identityUpdate,
           }),
-          state.outlineDraftRows,
-          update,
+          previousRows,
+          identityUpdate,
         );
         state.outlineDraftRows = draft.rows;
         state.outlineLineMap = draft.lineMap;

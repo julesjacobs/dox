@@ -108,6 +108,7 @@ the readable equation it is solving in the context pane.
       else [ variable, body ]
     let rec unify left right =
       let @unify_step equation =
+        let _ = equation in
         match left, right with
         | Int, Int | Bool, Bool -> []
         | Type_variable variable, body
@@ -156,6 +157,7 @@ variables. Instantiation replaces those variables with fresh ones at each use.
       Forall (quantified, body)
     let rec infer environment expression =
       let @infer_step form =
+        let _ = form in
         match expression with
         | Integer _ -> [], Int
         | Boolean _ -> [], Bool

@@ -87,6 +87,9 @@ incremental rebuilds, cycles, and the transitive evaluation closure.
 The module outline is manually ordered. `Option–Up` and `Option–Down`
 (`Alt–Up` and `Alt–Down` elsewhere) move the current page and its descendants
 among siblings; ordinary outline text edits can reorder several pages at once.
+`Tab`/`Shift–Tab` and `Option–Right`/`Option–Left` move a subtree into or out
+of a sibling. A drag grip appears only near the outline’s left edge; dropping
+above, below, or on a row previews and applies the corresponding tree move.
 The order is stored as module paths in the Git-tracked `.dox-order` file and
 does not affect OCaml module identity.
 
