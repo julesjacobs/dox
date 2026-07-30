@@ -6,7 +6,7 @@ import {
   setMarkdownEditorEvaluation,
   setMarkdownEditorResultInvalidation,
   replaceEditorStateDocument,
-} from "./editor.bundle.js?v=20260729h";
+} from "./editor.bundle.js?v=20260729k";
 
 const app = document.querySelector("#app");
 
@@ -61,7 +61,6 @@ const state = {
       ? "source"
       : "literate",
   paneWidths: { sidebar: 220, inspector: 280 },
-  showBuild: false,
   typeInfo: null,
   cursorPosition: null,
   definitionInfo: null,
@@ -500,7 +499,6 @@ async function loadDocument(
   if (cached?.document) {
     restoreSession(cached);
     state.view = "document";
-    state.showBuild = false;
     if (!preserveTrace) state.traceContext = cached.traceContext || null;
     updateRoute(modulePath, history);
     state.provisionalNavigation = {
@@ -607,7 +605,6 @@ async function loadDocument(
     state.selected = payload.document.blocks[0]?.id || null;
     state.selectedDefinitionName = null;
     state.selectedTraceId = null;
-    state.showBuild = false;
     state.typeInfo = null;
     state.cursorPosition = null;
     state.hoveredObservationSite = null;
@@ -2464,22 +2461,9 @@ function renderInspector() {
     ${diagnosticsHtml}
     ${renderDependencyContext()}
     ${
-      state.showBuild
-        ? `<section class="inspect-section build-section">
-            <h3>Artifact</h3>
-            <form class="artifact-form" id="artifact-form">
-              <input name="entry" value="main" aria-label="OCaml entry value" />
-              <input name="name" value="${escapeHtml(state.document.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "app")}" aria-label="Artifact name" />
-              <button class="button" type="submit">Compile entry</button>
-            </form>
-          </section>`
-        : ""
-    }
-    ${
       !typeInfo &&
       !state.definitionInfo &&
       !diagnostics.length &&
-      !state.showBuild &&
       !traceTree.roots.length
         ? '<p class="context-empty">Place the cursor on OCaml code to inspect its type.</p>'
         : ""
@@ -3675,28 +3659,6 @@ async function save() {
   return drainAutosave(session);
 }
 
-async function buildArtifact(entry, name) {
-  try {
-    if (state.dirty && !(await save())) return;
-    const manifest = await api("/api/artifact", {
-      method: "POST",
-      body: JSON.stringify({
-        path: state.path,
-        entry,
-        name,
-        projectVersion: state.projectVersion,
-        documentVersion: state.savedVersion,
-      }),
-    });
-    await refreshProjectIndex();
-    state.showBuild = false;
-    refreshInspector();
-    toast(`Built ${manifest.name} from project version ${manifest.projectVersion.slice(0, 8)}.`);
-  } catch (error) {
-    toast(error.message);
-  }
-}
-
 function mountEmbeddedEditors() {
   const documentParent = document.querySelector("[data-document-editor]");
   if (documentParent) {
@@ -3867,7 +3829,6 @@ async function createDocument() {
 function openSourceLine(line) {
   if (!line) return;
   state.view = "document";
-  state.showBuild = false;
   render();
   const editor = state.sourceEditorView;
   if (!editor) return;
@@ -4095,7 +4056,6 @@ function bindEvents() {
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => {
       state.view = button.dataset.view;
-      state.showBuild = false;
       render();
     });
   });
@@ -4104,7 +4064,6 @@ function bindEvents() {
       const path = button.dataset.path;
       if (path === state.path) {
         state.view = "document";
-        state.showBuild = false;
         render();
       } else {
         const modulePath = state.project.documents.find(
@@ -4112,7 +4071,6 @@ function bindEvents() {
         )?.module;
         if (!modulePath || !(await loadDocument(modulePath))) return;
         state.view = "document";
-        state.showBuild = false;
         render();
       }
     });
@@ -4142,7 +4100,6 @@ function bindEvents() {
       const path = card.dataset.projectPath;
       if (path === state.path) {
         state.view = "document";
-        state.showBuild = false;
         render();
         return;
       }
@@ -4151,7 +4108,6 @@ function bindEvents() {
       )?.module;
       if (modulePath && (await loadDocument(modulePath))) {
         state.view = "document";
-        state.showBuild = false;
         render();
       }
     };
@@ -4162,7 +4118,6 @@ function bindEvents() {
   });
   bindInspectorEvents();
   mountEmbeddedEditors();
-  bindArtifactForm();
 }
 
 function refreshInspector() {
@@ -4180,15 +4135,6 @@ function refreshInspector() {
     }
   }
   bindInspectorEvents();
-  bindArtifactForm();
-}
-
-function bindArtifactForm() {
-  document.querySelector("#artifact-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    buildArtifact(data.get("entry"), data.get("name"));
-  });
 }
 
 initialize();

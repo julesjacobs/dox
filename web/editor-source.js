@@ -37,12 +37,12 @@ import {
 import { tags } from "@lezer/highlight";
 
 const colors = {
-  ink: "#1d2824",
-  muted: "#7e8983",
-  green: "#135f4b",
-  amber: "#c66b2b",
-  blue: "#466b78",
-  plum: "#87546c",
+  ink: "#202824",
+  muted: "#7b847f",
+  green: "#285f4e",
+  amber: "#b86a35",
+  blue: "#4b6974",
+  plum: "#7f596b",
 };
 
 const setEditorMode = StateEffect.define();
@@ -67,13 +67,13 @@ const embeddedTheme = EditorView.theme({
   "&": {
     backgroundColor: "transparent",
     color: colors.ink,
-    fontSize: "16px",
+    fontSize: "17px",
   },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": {
     overflow: "visible",
     fontFamily: "Iowan Old Style, Charter, Palatino Linotype, Palatino, Georgia, serif",
-    lineHeight: "1.7",
+    lineHeight: "1.64",
   },
   ".cm-content": {
     padding: "0",
@@ -93,7 +93,7 @@ const embeddedTheme = EditorView.theme({
     backgroundColor: "transparent",
   },
   "&.cm-focused .cm-activeLine": {
-    backgroundColor: "rgba(255, 254, 250, 0.38)",
+    backgroundColor: "rgba(255, 255, 255, 0.28)",
   },
   ".cm-matchingBracket": {
     borderBottom: "1px solid rgba(19, 95, 75, 0.55)",
@@ -108,10 +108,10 @@ const embeddedTheme = EditorView.theme({
   "&.cm-raw-source": {
     fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
     fontSize: "13px",
-    lineHeight: "1.62",
+    lineHeight: "1.66",
   },
   "&.cm-raw-source .cm-content": {
-    padding: "18px 22px 60px",
+    padding: "20px 22px 72px",
   },
   "&.cm-raw-source .cm-block-results, &.cm-raw-source .cm-inline-result": {
     display: "none",
@@ -121,16 +121,18 @@ const embeddedTheme = EditorView.theme({
     fontWeight: "680",
     letterSpacing: "-0.025em",
     lineHeight: "1.15",
-    paddingTop: "0.35em",
-    paddingBottom: "0.16em",
+    paddingTop: "0.48em",
+    paddingBottom: "0.18em",
   },
   ".cm-md-heading-1": {
-    fontSize: "2.85em",
-    letterSpacing: "-0.047em",
+    fontSize: "2.65em",
+    letterSpacing: "-0.043em",
     lineHeight: "1.02",
+    paddingTop: "0.16em",
+    paddingBottom: "0.24em",
   },
-  ".cm-md-heading-2": { fontSize: "1.65em" },
-  ".cm-md-heading-3": { fontSize: "1.25em" },
+  ".cm-md-heading-2": { fontSize: "1.52em" },
+  ".cm-md-heading-3": { fontSize: "1.22em" },
   ".cm-md-marker": {
     position: "absolute",
     right: "calc(100% - 3px)",
@@ -160,11 +162,11 @@ const embeddedTheme = EditorView.theme({
     pointerEvents: "none",
   },
   ".cm-md-list": {
-    paddingLeft: "1.2em",
-    textIndent: "-1.2em",
+    paddingLeft: "1.25em",
+    textIndent: "-1.25em",
   },
   ".cm-md-list-marker": {
-    color: "#929c96",
+    color: "#858f89",
     fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
     fontSize: "0.72em",
     fontWeight: "600",
@@ -175,9 +177,9 @@ const embeddedTheme = EditorView.theme({
   },
   ".cm-md-inline-code": {
     borderRadius: "4px",
-    padding: "1px 3px",
-    backgroundColor: "rgba(19, 95, 75, 0.065)",
-    color: "#315e51",
+    padding: "1px 4px",
+    backgroundColor: "rgba(40, 95, 78, 0.07)",
+    color: "#315b4e",
   },
   ".cm-md-inline-marker": {
     display: "inline",
@@ -190,8 +192,8 @@ const embeddedTheme = EditorView.theme({
     opacity: "1",
   },
   ".cm-wiki-link": {
-    borderBottom: "1px solid rgba(19, 95, 75, 0.28)",
-    color: "#135f4b",
+    borderBottom: "1px solid rgba(40, 95, 78, 0.3)",
+    color: "#285f4e",
     cursor: "text",
   },
   ".cm-wiki-missing": {
@@ -219,9 +221,9 @@ const embeddedTheme = EditorView.theme({
   ".cm-tooltip-lint": {
     maxWidth: "min(520px, 80vw)",
     border: "1px solid #dcc7c1",
-    borderRadius: "7px",
-    backgroundColor: "#fffdfa",
-    boxShadow: "0 8px 28px rgba(60, 36, 27, 0.12)",
+    borderRadius: "8px",
+    backgroundColor: "#fdfcf8",
+    boxShadow: "0 12px 34px rgba(60, 50, 42, 0.11)",
     fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
     fontSize: "11px",
     lineHeight: "1.45",
@@ -229,17 +231,17 @@ const embeddedTheme = EditorView.theme({
   ".cm-md-indented-code": {
     color: "#34443d",
     fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
-    fontSize: "0.78em",
-    lineHeight: "1.6",
+    fontSize: "0.77em",
+    lineHeight: "1.62",
   },
-  ".cm-ocaml-keyword": { color: "#7c5935", fontWeight: "620" },
+  ".cm-ocaml-keyword": { color: "#785a3a", fontWeight: "600" },
   ".cm-ocaml-definition, .cm-ocaml-module-definition": {
     color: colors.green,
-    fontWeight: "650",
+    fontWeight: "620",
   },
   ".cm-ocaml-type-definition, .cm-ocaml-constructor-definition": {
     color: colors.blue,
-    fontWeight: "650",
+    fontWeight: "620",
   },
   ".cm-ocaml-variable": { color: "#29362f" },
   ".cm-ocaml-parameter": { color: "#4c6b60" },
@@ -262,7 +264,7 @@ const embeddedTheme = EditorView.theme({
   ".cm-ocaml-observation": {
     borderRadius: "2px",
     color: colors.amber,
-    fontWeight: "760",
+    fontWeight: "720",
   },
   ".cm-ocaml-observation:hover": {
     backgroundColor: "rgba(198, 107, 43, 0.1)",
@@ -272,11 +274,11 @@ const embeddedTheme = EditorView.theme({
   },
   ".cm-block-results": {
     boxSizing: "border-box",
-    margin: "5px 10px 12px 42px",
+    margin: "6px 10px 14px 40px",
     color: "#53615a",
     fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
-    fontSize: "11px",
-    lineHeight: "1.45",
+    fontSize: "11.5px",
+    lineHeight: "1.48",
   },
   ".cm-result-invalidated": {
     opacity: "0.48",
@@ -286,8 +288,8 @@ const embeddedTheme = EditorView.theme({
   ".cm-block-result-row": {
     display: "grid",
     gridTemplateColumns: "10px minmax(0, 1fr)",
-    gap: "7px",
-    padding: "3px 0",
+    gap: "8px",
+    padding: "3px 0 4px",
   },
   ".cm-block-result-mark": {
     color: "#a3aaa6",
@@ -311,9 +313,9 @@ const embeddedTheme = EditorView.theme({
   },
   ".cm-inline-result": {
     display: "inline",
-    marginLeft: "3px",
-    borderRadius: "3px",
-    padding: "1px 4px",
+    marginLeft: "4px",
+    borderRadius: "4px",
+    padding: "1px 4px 2px",
     backgroundColor: "rgba(70, 107, 120, 0.09)",
     color: "#466b78",
     fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
@@ -1648,41 +1650,42 @@ const outlineTheme = EditorView.theme({
     height: "100%",
     backgroundColor: "transparent",
     color: "#34443d",
-    fontSize: "13px",
+    fontSize: "13.5px",
   },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": {
     overflow: "auto",
     fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
-    lineHeight: "1.65",
+    lineHeight: "1.68",
+    scrollbarWidth: "thin",
   },
   ".cm-content": {
-    padding: "4px 0 28px",
+    padding: "2px 0 32px",
     caretColor: colors.green,
     whiteSpace: "pre",
   },
   ".cm-line": {
     position: "relative",
-    padding: "0 10px 0 6px",
+    padding: "0 12px 0 7px",
   },
   ".cm-activeLine": {
     backgroundColor: "transparent",
   },
   ".cm-line:not(.cm-outline-active):hover": {
     borderRadius: "6px 0 0 6px",
-    backgroundColor: "rgba(19, 95, 75, 0.055)",
+    backgroundColor: "rgba(40, 95, 78, 0.055)",
   },
   "&.cm-focused .cm-activeLine": {
-    backgroundColor: "rgba(19, 95, 75, 0.07)",
+    backgroundColor: "rgba(40, 95, 78, 0.065)",
   },
   ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
-    backgroundColor: "rgba(19, 95, 75, 0.14)",
+    backgroundColor: "rgba(40, 95, 78, 0.14)",
   },
   ".cm-outline-active": {
     zIndex: "1",
     borderRadius: "7px 0 0 7px",
     backgroundColor: "var(--paper)",
-    color: "#14221d",
+    color: "#202824",
   },
   "&.cm-focused .cm-activeLine.cm-outline-active": {
     backgroundColor: "var(--paper)",
@@ -1709,10 +1712,10 @@ const outlineTheme = EditorView.theme({
     color: "#6f7b75",
   },
   ".cm-outline-active.cm-outline-namespace": {
-    color: "#31433b",
+    color: "#34463e",
   },
   ".cm-outline-pending": {
-    backgroundColor: "rgba(19, 95, 75, 0.08)",
+    backgroundColor: "rgba(40, 95, 78, 0.075)",
   },
   ".cm-outline-pending-visible": {
     backgroundImage: "radial-gradient(circle, #73817a 0 2px, transparent 2.5px)",

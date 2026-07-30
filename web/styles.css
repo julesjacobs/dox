@@ -1,20 +1,24 @@
 :root {
   color-scheme: light;
-  --paper: #f7f5ef;
-  --paper-strong: #fffefa;
-  --ink: #1d2824;
-  --muted: #68746e;
-  --line: #d9ddd4;
-  --line-strong: #b8c0b7;
-  --green: #135f4b;
-  --green-dark: #0a3e31;
-  --mint: #dcece3;
-  --amber: #d5782c;
-  --amber-soft: #fae9d9;
-  --red: #a94436;
+  --paper: #f8f7f3;
+  --paper-strong: #fdfcf8;
+  --sidebar: #eeeee9;
+  --inspector: #f5f4ef;
+  --ink: #202824;
+  --muted: #6b746f;
+  --subtle: #8b938e;
+  --line: #dedfd9;
+  --line-strong: #c3c8c1;
+  --green: #285f4e;
+  --green-dark: #18483a;
+  --mint: #e2ece6;
+  --amber: #b86a35;
+  --amber-soft: #f7e9dc;
+  --red: #a64b3f;
   --code: #14221d;
   --code-ink: #dcece4;
-  --shadow: 0 18px 50px rgb(28 44 37 / 8%);
+  --shadow: 0 16px 44px rgb(31 43 37 / 8%);
+  --focus-ring: 0 0 0 2px rgb(40 95 78 / 18%);
   --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", sans-serif;
   --serif: Iowan Old Style, Charter, "Palatino Linotype", Palatino, Georgia,
@@ -39,6 +43,8 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--sans);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
 button,
@@ -57,48 +63,55 @@ button {
   display: grid;
   place-content: center;
   justify-items: center;
-  gap: 18px;
+  gap: 11px;
   color: var(--muted);
+  font-size: 12px;
   letter-spacing: 0.01em;
 }
 
-.boot-mark {
-  width: 38px;
-  height: 38px;
-  display: grid;
-  place-items: center;
-  border-radius: 12px 12px 4px;
-  background: var(--green);
-  color: white;
+.boot-wordmark {
+  color: var(--ink);
   font-family: var(--serif);
   font-size: 25px;
-  font-weight: 700;
+  font-weight: 680;
+  letter-spacing: -0.03em;
+  line-height: 1;
 }
 
 .workspace {
   --sidebar-width: 220px;
   --inspector-width: 280px;
   display: grid;
-  grid-template-rows: 1fr 26px;
+  grid-template-rows: minmax(0, 1fr) auto;
   width: 100%;
   height: 100%;
-  background:
-    radial-gradient(circle at 60% -20%, rgb(255 255 255 / 90%), transparent 34%),
-    var(--paper);
+  background: var(--paper);
 }
 
 .button {
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  padding: 7px 11px;
+  border-radius: 7px;
+  padding: 6px 10px;
   background: var(--paper-strong);
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 640;
+  line-height: 1.2;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease;
 }
 
 .button:hover {
-  border-color: var(--green);
+  border-color: #9fb2aa;
+}
+
+.button:focus-visible {
+  border-color: #8da99e;
+  outline: 0;
+  box-shadow: var(--focus-ring);
 }
 
 .button.primary {
@@ -113,12 +126,15 @@ button {
 
 .button.secondary-action {
   border-color: transparent;
-  background: transparent;
+  background: rgb(248 247 243 / 78%);
   color: var(--muted);
+  backdrop-filter: blur(8px);
 }
 
 .button.secondary-action:hover,
 .button.secondary-action.active {
+  border-color: var(--line);
+  background: rgb(253 252 248 / 92%);
   color: var(--green-dark);
 }
 
@@ -143,7 +159,9 @@ button {
 .inspector {
   min-height: 0;
   overflow: auto;
-  background: rgb(247 245 239 / 72%);
+  background: var(--inspector);
+  scrollbar-width: thin;
+  scrollbar-color: #a7ada8 transparent;
 }
 
 .sidebar {
@@ -151,24 +169,27 @@ button {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: 16px 0 0 8px;
-  background: #e9e9e2;
+  padding: 19px 0 0 8px;
+  background: var(--sidebar);
   color: #34443d;
 }
 
 .sidebar-brand {
-  margin: 0 10px 17px;
+  margin: 0 11px 19px;
   color: var(--ink);
   font-family: var(--serif);
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  font-size: 21px;
+  font-weight: 680;
+  letter-spacing: -0.025em;
   line-height: 1;
 }
 
 .inspector {
   display: none;
-  padding: 17px 16px 30px;
+  padding: 22px 20px 36px;
+  color: #303a35;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .pane-resizer {
@@ -194,8 +215,8 @@ button {
   top: 50%;
   right: 4px;
   left: 4px;
-  height: 44px;
-  border-radius: 2px;
+  height: 38px;
+  border-radius: 999px;
   content: "";
   background: transparent;
   transform: translateY(-50%);
@@ -209,7 +230,7 @@ button {
 .pane-resizer:focus-visible::after {
   right: 3px;
   left: 3px;
-  background: rgb(108 154 136 / 55%);
+  background: rgb(90 126 112 / 40%);
 }
 
 .pane-resizer:focus-visible {
@@ -246,7 +267,7 @@ button {
 
 .module-context {
   display: grid;
-  gap: 11px;
+  gap: 13px;
   transition: opacity 120ms ease;
 }
 
@@ -254,23 +275,39 @@ button {
   opacity: 0.48;
 }
 
-.module-context h3 {
+.inspect-section.module-context h3 {
+  margin-bottom: 1px;
   overflow-wrap: anywhere;
+  color: #4f5b55;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .module-relations {
   display: grid;
-  gap: 3px;
+  gap: 4px;
 }
 
-.module-relations > span,
-.module-boundary {
+.module-relations > span {
   margin: 0;
   color: var(--muted);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  font-size: 9.5px;
+  font-weight: 680;
+  letter-spacing: 0.075em;
   text-transform: uppercase;
+}
+
+.module-boundary {
+  margin: -2px 0 0;
+  color: var(--subtle);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.4;
+  text-transform: none;
 }
 
 .module-compiler-error {
@@ -286,13 +323,14 @@ button {
 
 .module-relations button {
   border: 0;
-  border-radius: 5px;
-  padding: 3px 5px;
+  border-radius: 6px;
+  padding: 4px 6px;
   background: transparent;
   color: var(--green-dark);
   cursor: pointer;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 11.5px;
+  line-height: 1.35;
   text-align: left;
 }
 
@@ -300,6 +338,10 @@ button {
 .module-relations button:focus-visible {
   background: var(--mint);
   outline: none;
+}
+
+.module-relations button:focus-visible {
+  box-shadow: var(--focus-ring);
 }
 
 .mini-button {
@@ -399,17 +441,20 @@ button {
   min-height: 0;
   overflow: auto;
   scroll-behavior: smooth;
+  scrollbar-width: thin;
+  scrollbar-color: #a7ada8 transparent;
 }
 
 .main-actions {
   position: sticky;
   top: 0;
   z-index: 7;
+  width: 100%;
   height: 0;
   display: flex;
   justify-content: flex-end;
   gap: 6px;
-  padding: 12px 14px 0;
+  padding: 14px 18px 0;
   pointer-events: none;
 }
 
@@ -418,13 +463,13 @@ button {
 }
 
 .document-shell {
-  width: min(860px, calc(100% - 72px));
-  margin: 30px auto 100px;
+  width: min(820px, calc(100% - 80px));
+  margin: 45px auto 120px;
 }
 
 .workspace.source-context .document-shell {
-  width: min(1040px, calc(100% - 48px));
-  margin-top: 18px;
+  width: min(1040px, calc(100% - 56px));
+  margin-top: 28px;
 }
 
 .source-mode .literate-document-editor .cm-editor,
@@ -438,7 +483,7 @@ button {
   border-left: 2px solid transparent;
   font-family: var(--serif);
   font-size: 17px;
-  line-height: 1.7;
+  line-height: 1.64;
 }
 
 .prose-block:hover {
@@ -451,27 +496,27 @@ button {
 }
 
 .prose-block h1 {
-  margin: 8px 0 19px;
-  font-size: clamp(34px, 5vw, 55px);
-  font-weight: 680;
-  letter-spacing: -0.047em;
-  line-height: 0.98;
+  margin: 7px 0 21px;
+  font-size: clamp(34px, 4.5vw, 50px);
+  font-weight: 670;
+  letter-spacing: -0.043em;
+  line-height: 1;
 }
 
 .prose-block h2 {
-  margin: 36px 0 10px;
-  font-size: 26px;
+  margin: 38px 0 11px;
+  font-size: 25px;
   letter-spacing: -0.025em;
   line-height: 1.15;
 }
 
 .prose-block h3 {
-  margin: 28px 0 8px;
+  margin: 30px 0 8px;
   font-size: 19px;
 }
 
 .prose-block p {
-  margin: 10px 0;
+  margin: 11px 0;
 }
 
 .prose-block ul {
@@ -480,8 +525,8 @@ button {
 
 .prose-block code {
   border-radius: 4px;
-  padding: 1px 5px;
-  background: #e9e9df;
+  padding: 1px 4px;
+  background: #ecece6;
   color: var(--green-dark);
   font-family: var(--mono);
   font-size: 0.82em;
@@ -495,7 +540,7 @@ button {
 
 .code-block {
   position: relative;
-  margin: 20px 8px;
+  margin: 22px 8px;
   overflow: visible;
   border: 0;
   border-radius: 0;
@@ -576,7 +621,7 @@ button {
 
 .embedded-editor .cm-tooltip {
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--paper-strong);
   color: var(--ink);
   box-shadow: var(--shadow);
@@ -596,7 +641,7 @@ button {
 }
 
 .document-outputs {
-  margin-top: 26px;
+  margin-top: 30px;
   padding-top: 8px;
 }
 
@@ -606,12 +651,12 @@ button {
 
 .runtime-view {
   position: relative;
-  margin: 7px 8px 25px;
+  margin: 8px 8px 26px;
   overflow: hidden;
   border: 1px solid #cbd9d1;
-  border-radius: 10px;
+  border-radius: 9px;
   background: var(--paper-strong);
-  box-shadow: 0 7px 24px rgb(24 66 50 / 7%);
+  box-shadow: 0 6px 20px rgb(24 52 42 / 5%);
 }
 
 .runtime-content {
@@ -677,23 +722,23 @@ button {
 }
 
 .context-empty {
-  max-width: 210px;
-  margin: 4px 0;
+  max-width: 220px;
+  margin: 5px 0;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: 11.5px;
+  line-height: 1.55;
 }
 
 .definition-peek {
-  margin: 0 -7px 14px;
+  margin: 0 -8px 17px;
 }
 
 .definition-peek button {
   display: grid;
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px;
+  border-radius: 9px;
+  padding: 11px 12px;
   background: rgb(255 254 250 / 72%);
   text-align: left;
   cursor: pointer;
@@ -710,7 +755,7 @@ button {
 .definition-peek-location,
 .definition-peek-action {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 9.5px;
 }
 
 .definition-peek-label {
@@ -723,7 +768,7 @@ button {
 .definition-peek strong {
   overflow: hidden;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 11.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -738,7 +783,7 @@ button {
   overflow: hidden;
   color: #35463f;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 10.5px;
   line-height: 1.55;
   white-space: pre-wrap;
 }
@@ -773,7 +818,7 @@ button {
   overflow: hidden;
   color: #6f7c75;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -796,8 +841,8 @@ button {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 1px 8px;
   border: 0;
-  border-radius: 5px;
-  padding: 5px 7px 6px;
+  border-radius: 6px;
+  padding: 6px 7px 7px;
   background: transparent;
   color: var(--ink);
   cursor: pointer;
@@ -812,7 +857,7 @@ button {
 .completion-name {
   overflow: hidden;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -820,7 +865,7 @@ button {
 
 .completion-kind {
   color: #8b958f;
-  font-size: 8px;
+  font-size: 9px;
   letter-spacing: 0.04em;
   text-transform: lowercase;
 }
@@ -830,8 +875,8 @@ button {
   overflow: hidden;
   color: #6f7c75;
   font-family: var(--mono);
-  font-size: 9px;
-  line-height: 1.25;
+  font-size: 9.5px;
+  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -840,7 +885,7 @@ button {
 .completion-hint {
   margin: 0;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 9.5px;
 }
 
 .completion-empty {
@@ -853,12 +898,12 @@ button {
 }
 
 .trace-focus {
-  min-height: 112px;
-  max-height: 168px;
-  margin: 2px 0 14px;
+  min-height: 92px;
+  max-height: 184px;
+  margin: 1px 0 18px;
   overflow: auto;
   border-bottom: 1px solid var(--line);
-  padding: 2px 1px 11px;
+  padding: 2px 1px 14px;
   scrollbar-width: thin;
 }
 
@@ -866,7 +911,7 @@ button {
   display: flex;
   align-items: center;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11.5px;
 }
 
 .trace-focus-head {
@@ -880,7 +925,7 @@ button {
 .trace-focus-head strong {
   overflow: hidden;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 11.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -888,7 +933,7 @@ button {
 .trace-focus-head span {
   overflow: hidden;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 9.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -904,7 +949,7 @@ button {
 .trace-focus-result {
   overflow: hidden;
   color: var(--green-dark);
-  font-size: 9px;
+  font-size: 9.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -936,9 +981,9 @@ button {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
-  min-height: 17px;
+  min-height: 19px;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 9.5px;
 }
 
 .trace-value-row span,
@@ -969,13 +1014,13 @@ button {
 
 .trace-row {
   display: grid;
-  grid-template-columns: 11px minmax(0, 1fr) auto;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
   align-items: center;
   width: 100%;
-  min-height: 19px;
+  min-height: 23px;
   border: 0;
-  border-radius: 4px;
-  padding: 1px 4px 1px calc(3px + var(--trace-indent));
+  border-radius: 5px;
+  padding: 2px 5px 2px calc(4px + var(--trace-indent));
   background: transparent;
   color: var(--ink);
   cursor: pointer;
@@ -1007,13 +1052,13 @@ button {
 .trace-kind {
   color: #9aa49e;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 9.5px;
 }
 
 .trace-label {
   overflow: hidden;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 10.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1023,32 +1068,33 @@ button {
 }
 
 .trace-result {
-  max-width: 54px;
+  max-width: 62px;
   overflow: hidden;
   color: var(--muted);
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: 9.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .inspect-section {
-  margin: 19px 0;
+  margin: 22px 0;
 }
 
 .inspect-section h3 {
-  margin: 0 0 8px;
-  color: #818c86;
+  margin: 0 0 9px;
+  color: #77817c;
   font-size: 10px;
-  letter-spacing: 0.1em;
+  font-weight: 680;
+  letter-spacing: 0.085em;
   text-transform: uppercase;
 }
 
 .type-card,
 .inspect-card {
   border: 1px solid var(--line);
-  border-radius: 9px;
-  padding: 10px 11px;
+  border-radius: 8px;
+  padding: 11px 12px;
   background: var(--paper-strong);
   font-size: 12px;
   line-height: 1.5;
@@ -1076,12 +1122,12 @@ button {
   margin-bottom: 6px;
   border: 0;
   border-left: 3px solid var(--red);
-  border-radius: 5px;
-  padding: 8px 9px;
-  background: #f7e8e5;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #f7e9e6;
   color: #722c22;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 10.5px;
   white-space: pre-wrap;
   cursor: pointer;
   text-align: left;
@@ -1333,13 +1379,20 @@ button {
 }
 
 .statusbar {
+  min-height: 30px;
   display: flex;
   align-items: center;
   border-top: 1px solid var(--line);
-  padding: 0 12px;
-  background: #ecece5;
+  padding: 6px 14px;
+  background: var(--inspector);
   color: #66716b;
-  font-size: 10px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.statusbar:empty,
+.statusbar[aria-hidden="true"] {
+  display: none;
 }
 
 .status-left {
@@ -1350,6 +1403,11 @@ button {
 
 .status-ok {
   color: var(--green);
+}
+
+.statusbar.status-error {
+  border-top-color: #ead0ca;
+  background: #f8ece9;
 }
 
 .status-error {
@@ -1363,30 +1421,15 @@ button {
 .toast {
   position: fixed;
   right: 20px;
-  bottom: 45px;
+  bottom: 22px;
   z-index: 20;
   max-width: 360px;
-  border-radius: 9px;
-  padding: 11px 14px;
+  border-radius: 8px;
+  padding: 10px 13px;
   background: var(--ink);
   color: white;
   box-shadow: 0 10px 35px rgb(0 0 0 / 22%);
-  font-size: 12px;
-}
-
-.artifact-form {
-  display: grid;
-  gap: 8px;
-}
-
-.artifact-form input {
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 7px 8px;
-  background: white;
-  font-family: var(--mono);
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
 @media (max-width: 1000px) {
@@ -1405,7 +1448,7 @@ button {
   .sidebar {
     position: fixed;
     top: 0;
-    bottom: 26px;
+    bottom: 0;
     left: 0;
     z-index: 12;
     display: block;
@@ -1426,7 +1469,7 @@ button {
 
 @media (max-width: 700px) {
   .workspace {
-    grid-template-rows: 1fr 30px;
+    grid-template-rows: minmax(0, 1fr) auto;
   }
 
   .body-grid {
@@ -1446,25 +1489,25 @@ button {
 
   .sidebar {
     top: 0;
-    bottom: 30px;
+    bottom: 0;
   }
 
   .main-actions {
-    padding: 9px 10px 0;
+    padding: 10px 11px 0;
   }
 
   .inspector {
     max-height: 34vh;
     border-top: 1px solid var(--line);
     border-left: 0;
-    padding: 12px 16px 16px;
+    padding: 16px 17px 20px;
   }
 
   .document-shell,
   .project-view,
   .changes-view {
     width: calc(100% - 28px);
-    margin-top: 48px;
+    margin-top: 54px;
   }
 }
 
