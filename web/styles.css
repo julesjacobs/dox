@@ -462,6 +462,39 @@ button {
   pointer-events: auto;
 }
 
+.main-actions .secondary-action {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  backdrop-filter: none;
+  box-shadow: none;
+  transition: color 120ms ease;
+}
+
+.main-actions .secondary-action:hover {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink);
+}
+
+.main-actions .secondary-action.active {
+  border-color: transparent;
+  background: transparent;
+  color: var(--green-dark);
+}
+
+.main-actions .secondary-action.active:hover {
+  color: var(--ink);
+}
+
+.main-actions .secondary-action:focus-visible {
+  border-color: transparent;
+  background: transparent;
+  color: var(--green-dark);
+  outline: none;
+  box-shadow: none;
+}
+
 .document-shell {
   width: min(820px, calc(100% - 80px));
   margin: 45px auto 120px;
