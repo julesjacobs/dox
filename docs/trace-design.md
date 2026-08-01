@@ -1,105 +1,97 @@
-# Observed execution
+# Execution record
 
-## Goal
+## Model
 
-Observed execution is an opt-in execution record for ordinary OCaml. A single
-`@` marks the bindings, function calls, and expressions that should appear in a
-hierarchical trace.
+Dox records one execution while it evaluates the document. It does not launch
+or control a debugger. The source text describes every possible execution; the
+record contains the expressions that ran in this particular execution.
 
-```ocaml
-let rec @fib n =
-  if n < 2 then n else @(fib (n - 1)) + fib (n - 2)
+The compiler instruments boxed expressions whose source location belongs to a
+`.ml.md` page. Compiler-generated module glue and installed libraries are not
+instrumented. If an uninstrumented library invokes a closure defined in a Dox
+page, that closure re-enters the active record beneath the user call that
+entered the library.
 
-let @answer = fib 5
-```
+## Events
 
-The marked expression has normal OCaml semantics: it is evaluated once, its
-result or exception is recorded, and the same result is returned or the same
-exception is re-raised with its backtrace.
+Every event contains:
 
-## Syntax
+- a monotonically increasing sequence number;
+- an occurrence ID and optional dynamic parent occurrence ID;
+- an exact source path and span;
+- an inferred type;
+- a kind such as function, parameter, call, binding, value, step, or write;
+- enter and return phases, or enter and raise phases;
+- an event-time value preview or exception preview.
 
-- `let @x = expression` observes evaluation of the binding.
-- `let @f arguments = body` observes each call after its arguments match.
-- `let rec @f` and `and @g` have the same call semantics.
-- `@(expression)` observes one expression.
+Application events are the exact dynamic parents of user function invocations.
+Two calls on the same line therefore remain distinct without stack sampling or
+source-text guessing. Executed paths are the expression events owned by an
+invocation. An untaken branch has no owned events.
 
-`@` remains the ordinary list-append operator in infix position. The expression
-form has no space between `@` and `(`. When it is a function argument, it is
-parenthesized: `consume (@(produce ()))`.
+## Values and mutation
 
-## Compiler boundary
+The compiler attaches a compact value schema to each trace site. The runtime
+uses it to render values when their event occurs; it never retains a live
+reference and prints it later. Primitive values, strings, tuples, lists,
+options, arrays, records, and boxed variants have bounded OCaml-shaped
+previews. Recursive variants keep constructor names. Closures and unsupported
+abstract representations are explicitly opaque. Dox does not guess an
+abstract type's runtime representation from its module name.
 
-Dox uses a project-local OxCaml compiler pinned in `vendor/oxcaml`. The
-parser represents each marker as a private internal attribute on the unchanged
-OCaml expression or binding. Type checking therefore sees the original program:
-the marker does not introduce a helper call, thunk, dependency, or additional
-value restriction.
+Destructuring a value records each identifier after the pattern has matched,
+so `let left, right = pair` produces separate `left` and `right` bindings
+rather than treating the pair as the value of `left`.
 
-After type checking, `Translcore` wraps the typed Lambda expression with three
-non-allocating runtime primitives. The wrapper records entry, evaluates the
-expression exactly once, and records either its result or exception. Exception
-handling uses re-raise semantics so the original backtrace is retained. Dox
-does not replace the user's system compiler.
+This gives useful mutation semantics without claiming heap time travel. A ref
+can be recorded as `{contents = 1}`, followed by a write event, followed by a
+later read of `2`. Dox does not assign durable identities to every heap object,
+reconstruct alias graphs, or expose writes performed inside library and C code.
 
-The compiler keeps the marked source span on the generated expression. Runtime
-events carry a stable source site, inferred type, and per-evaluation occurrence
-ID. The first implementation supports boxed values. Recording a function
-return necessarily prevents that marked call from being compiled as a tail
-call; unmarked calls retain ordinary optimization.
+## Projections
 
-Each domain has an independent observation stack. Event writes are serialized
-after leaving the OCaml runtime lock, so filesystem I/O does not block runtime
-coordination. Observation stacks are not yet attached to algebraic-effect
-continuations: a marked computation must not perform an effect that escapes the
-marked span. Continuation-aware stack capture is required before that case can
-produce a reliable hierarchy.
+The CLI and IDE consume the same event list.
 
-## Runtime model
+- `dox check` includes the completed execution events in `traces`.
+- `dox check` also reports raw tail-handoff, linked-enter, and unexpected
+  handoff-outcome counts before tail events are projected away.
+- `dox inspect` groups occurrences at one static expression.
+- `dox inspect-call` projects one function invocation, its values, caller, and
+  child calls.
+- The always-present execution view focuses an invocation, softly highlights
+  its executed path, annotates binders and returns, and links exact callsites.
 
-Each evaluation has a dynamic observation stack. An occurrence contains:
+Moving the source cursor focuses an execution through the selected construct
+and highlights all matching events. Moving the timeline or clicking a call
+changes the same focus; none of these interactions rerun or replay the program.
 
-- occurrence ID and parent occurrence ID;
-- stable source site, source path, and exact span;
-- binding, function, or expression kind;
-- enter and return sequence numbers, or enter and raise sequence numbers;
-- a bounded value preview or exception;
-- the evaluation and project versions supplied by the evaluation response.
+## Current semantic boundary
 
-The semantic sequence is distinct from an `ocamldebug` time. A semantic sequence
-orders trace events. A debugger time identifies an event in one retained
-debugger session.
+Instrumentation is inserted after typing. It records exceptions with re-raise
+semantics and evaluates each expression once. A tail-position user call emits
+a handoff event before the jump instead of installing a return continuation.
+The entered function inherits the logical caller, so aliases and higher-order
+tail calls keep both OCaml tail-call behavior and the execution tree. Dox
+derives the omitted caller outcomes from the completed tail chain.
 
-## User interaction
+Observed closures register the number of supplied application arguments that
+enter their body. This compiler-known value is used for both native and
+bytecode closures; runtime closure metadata is not used. Underapplication uses
+an ordinary observation. Overapplication hands off to each entered body in
+turn and carries the remaining argument count until the final result.
+When the bytecode interpreter creates a `RESTART` partial closure, it records
+provenance only if the original closure was registered by Dox. The remaining
+compiler-known consumption is then derived from the captured argument count,
+so external and unobserved partial closures cannot arm a handoff.
 
-The context pane shows the trace tree when an evaluation contains observations.
-Selecting an occurrence:
+If the evaluated callee is not a registered Dox function, the compiler keeps
+an ordinary return/raise observation instead. This prevents callbacks from an
+uninstrumented library from being mistaken for the immediate tail callee, but
+that individual external or directly invoked anonymous call is not compiled
+as a tail call.
 
-1. moves the editor selection to its source span;
-2. keeps the occurrence selected in the tree;
-3. shows its kind, result or exception, and source location;
-4. queries the compiler type at that span.
-
-Source navigation is available without an active debugger session.
-
-## Debugger layer
-
-The first implementation records the semantic trace. A later debugger layer
-retains the exact `-g` bytecode and an `ocamldebug` process for the evaluation.
-Generated observation boundaries provide correlation points between semantic
-occurrences and debugger times. The APIs then support `goto`, `step`,
-`backstep`, `next`, `previous`, and `finish`.
-
-Debugger navigation is valid only for the exact retained bytecode and process
-session. Reverse execution may repeat external effects, so the interface must
-label replay boundaries and expire debugger sessions independently from the
-durable semantic trace.
-
-## Delivery stages
-
-1. Pin and build the project-local OxCaml compiler.
-2. Add parser markers, post-typing instrumentation, and focused tests.
-3. Use the local compiler in evaluation, artifacts, and compiler queries.
-4. Emit hierarchical enter, return, and raise events.
-5. Render the source-linked trace tree and occurrence details.
-6. Retain evaluation artifacts and add `ocamldebug` session control.
+Trace ownership currently follows system threads, but not captured algebraic
+effect continuations. Resuming or cloning a continuation can therefore produce
+an incomplete dynamic parent chain. Values and source coverage remain useful,
+but call-tree navigation across that continuation boundary is best effort until
+trace context is stored with the runtime continuation.

@@ -1,0 +1,4 @@
+    let rec loop remaining =
+      if remaining = 0 then 0 else loop (remaining - 1)
+    let result = loop 20
+    let () = print_endline (string_of_int result)

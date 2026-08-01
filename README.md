@@ -95,20 +95,22 @@ does not affect OCaml module identity.
 
 ## Observed execution
 
-A single `@` opts a value, function, or expression into the execution trace:
+Ordinary evaluation records every Dox function invocation and boxed expression,
+including its exact source span, type, result or exception, and dynamic parent.
+Library implementations remain opaque. A callback from a library into Dox code
+re-enters the record beneath the user call that triggered it.
 
-```ocaml
-let rec @fib n =
-  if n < 2 then n else @(fib (n - 1)) + fib (n - 2)
+The record is always present; there is no separate debugger mode and inspecting
+it never runs the program again. The timeline and call links focus the
+already-complete record. The selected invocation shows parameter and local
+values, its return value, its executed path, and exact links to its caller and
+child calls. Its exact executed expressions receive a soft highlight. Code that
+no execution reached is subdued, while code reached by another invocation keeps
+its normal contrast.
 
-let @answer = fib 5
-```
-
-`let @value` records one binding evaluation. `let @function arguments` records
-every call. `@(expression)` records the expression result or exception. The
-context pane shows the resulting dynamic call tree, inferred types, and bounded
-value previews. Selecting an occurrence moves the editor to its exact source
-span. Infix `left @ right` remains ordinary list append.
+Values are rendered immediately at each event. Mutable refs and arrays therefore
+show the contents they had when observed, but Dox does not reconstruct a complete
+historical heap or library-internal mutations.
 
 The full syntax and execution model are in
 [`docs/trace-design.md`](docs/trace-design.md).
@@ -134,6 +136,28 @@ Type-check and evaluate one document:
 ```sh
 dune exec dox -- check welcome.ml.md
 ```
+
+Query the execution data for the expression at a source position. Lines are
+one-based and columns are zero-based:
+
+```sh
+dune exec dox -- inspect demos/tracing.ml.md 33 35 --summary
+```
+
+Omit `--summary` to receive structured JSON containing the expression, all
+dynamic occurrences, local environments, call-stack breadcrumbs, trace events,
+and source positions.
+
+Query the invocation containing a source position:
+
+```sh
+dune exec dox -- inspect-call demos/tracing.ml.md 33 10 \
+  --occurrence 2 --summary
+```
+
+The structured form includes the invocation's source range, parameters and
+local binders, result, caller, and direct child calls. This is the same data used
+by the trace view in the editor.
 
 Compile a `unit -> unit` entry value:
 

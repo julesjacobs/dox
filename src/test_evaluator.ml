@@ -355,11 +355,18 @@ let () =
     match answer_enter with
     | None -> None
     | Some answer ->
-        find_trace (fun event ->
-            String.equal event.phase "enter"
-            && String.equal event.kind "function"
-            && String.equal event.label "fib"
-            && event.parent_id = Some answer.occurrence_id)
+        let callsite =
+          find_trace (fun event ->
+              String.equal event.phase "enter"
+              && String.equal event.kind "call"
+              && event.parent_id = Some answer.occurrence_id)
+        in
+        Option.bind callsite (fun callsite ->
+            find_trace (fun event ->
+                String.equal event.phase "enter"
+                && String.equal event.kind "function"
+                && String.equal event.label "fib"
+                && event.parent_id = Some callsite.occurrence_id))
   in
   expect (Option.is_some fib_child)
     "function observations did not form a dynamic hierarchy";
@@ -449,6 +456,58 @@ let () =
   expect (returned "flag" "true") "a boolean preview was not typed";
   expect (returned "nothing" "None") "an option preview was not typed";
   expect (returned "done_" "()") "a unit preview was not typed";
+  let structured_document =
+    Document.parse ~path:"structured.ml.md"
+      "# Structured values\n\n\
+      \    type sample = Stop | Next of int * sample list\n\
+      \    type point = { x : int; y : int }\n\
+      \    module Int_set = Set.Make (Int)\n\
+      \    module String_map = Map.Make (String)\n\
+      \    let sample = Next (1, [Stop; Next (2, [])])\n\
+      \    let point = { x = 3; y = 4 }\n\
+      \    let numbers = Int_set.of_list [3; 1; 2]\n\
+      \    let environment = String_map.singleton \"id\" (Next (1, []))\n\
+      \    let first, second = sample, point\n\
+      \    let unpack (left, right) = left + right\n\
+      \    let sum = unpack (2, 3)\n\
+      \    let result =\n\
+      \      match sample with\n\
+      \      | Stop -> 0\n\
+      \      | Next (head, rest) -> head + List.length rest\n"
+  in
+  let structured = Evaluator.evaluate structured_document in
+  expect structured.ok "structured value previews did not compile and run";
+  let structured_returned label detail =
+    List.exists
+      (fun (event : Evaluator.trace_event) ->
+        String.equal event.phase "return"
+        && String.equal event.label label
+        && String.equal event.detail detail)
+      structured.traces
+  in
+  expect
+    (structured_returned "sample" "Next (1, [Stop; Next (2, [])])")
+    "recursive variant values did not retain constructor names";
+  expect
+    (structured_returned "point" "{x = 3; y = 4}")
+    "record values did not retain field names";
+  expect
+    (structured_returned "numbers" "<opaque>")
+    "abstract set values should not be decoded by guessing their runtime \
+     representation";
+  expect
+    (structured_returned "environment" "<opaque>")
+    "abstract map values should not be decoded by guessing their runtime \
+     representation";
+  expect
+    (structured_returned "first" "Next (1, [Stop; Next (2, [])])"
+     && structured_returned "second" "{x = 3; y = 4}")
+    "destructuring bindings did not record every bound identifier";
+  expect
+    (structured_returned "left" "2" && structured_returned "right" "3"
+     && structured_returned "head" "1"
+     && structured_returned "rest" "[Stop; Next (2, [])]")
+    "function and match patterns did not record every bound identifier";
   let exception_document =
     Document.parse ~path:"exception.ml.md"
       "# Exceptions\n\n\
@@ -475,12 +534,13 @@ let () =
     "the parent observation did not continue after a caught exception";
   let debug_document =
     Document.parse ~path:"debug.ml.md"
-      "# Debug\n\n\
+      ("# Debug\n\n\
       \    let add x y =\n\
       \      let total =\n\
       \        x + y in\n\
       \      total\n\
       \    let answer = add 2 3\n"
+      ^ "\n`add 4 5 =`\n")
   in
   let debug_result =
     Debugger.start ~documents:[ debug_document ] ~target:debug_document ()
@@ -492,7 +552,7 @@ let () =
         let open Yojson.Safe.Util in
         let timeline = json |> member "timeline" |> to_list in
         let calls = json |> member "callEvents" |> to_list in
-        timeline <> []
+        timeline = []
         && List.exists
              (fun event ->
                event |> member "phase" |> to_string = "enter"
@@ -515,11 +575,480 @@ let () =
                && event |> member "endLine" |> to_int = 5)
              calls
         && List.exists
-             (fun stop ->
-               stop |> member "locals" |> to_list
-               |> List.exists (fun local ->
-                   local |> member "name" |> to_string = "x"
-                   && local |> member "value" |> to_string = "2"))
-             timeline)
-    "bytecode debugger did not capture a source timeline with local bindings";
+             (fun event ->
+               event |> member "phase" |> to_string = "enter"
+               && event |> member "kind" |> to_string = "call"
+               && event |> member "path" |> to_string = "debug.ml.md"
+               && event |> member "line" |> to_int = 9)
+             calls
+        && List.exists
+             (fun event ->
+               event |> member "phase" |> to_string = "return"
+               && event |> member "kind" |> to_string = "function"
+               && event |> member "label" |> to_string = "add"
+               && event |> member "detail" |> to_string = "9")
+             calls)
+    "ordinary evaluation did not expose its authoritative execution record";
+  let trace_document =
+    Document.parse ~path:"trace.ml.md"
+      "    let rec fib n =\n\
+      \      if n < 2 then\n\
+      \        n\n\
+      \      else\n\
+      \        fib (n - 1) + fib (n - 2)\n\
+      \    let answer = fib 5\n\
+      \    let incremented = List.map (fun value -> value + 1) [1; 2]\n\
+      \    let cell = ref 1\n\
+      \    let before = !cell\n\
+      \    let () = cell := 2\n\
+      \    let after = !cell\n\
+      \    let values = [| 1; 2; 3 |]\n"
+  in
+  let traced = Evaluator.evaluate trace_document in
+  expect traced.ok "the execution-record fixture did not evaluate";
+  let returned label detail =
+    List.exists
+      (fun (event : Evaluator.trace_event) ->
+        String.equal event.phase "return"
+        && String.equal event.kind "binding"
+        && String.equal event.label label
+        && String.equal event.detail detail)
+      traced.traces
+  in
+  expect (returned "cell" "{contents = 1}")
+    "a mutable value was not snapshotted when it was observed";
+  expect (returned "before" "1" && returned "after" "2")
+    "values around a mutation were not recorded at their execution time";
+  expect (returned "values" "[|1; 2; 3|]")
+    "an array snapshot was not recorded";
+  let callback_parameters =
+    traced.traces
+    |> List.filter (fun (event : Evaluator.trace_event) ->
+        String.equal event.phase "parameter"
+        && String.equal event.label "value")
+    |> List.map (fun (event : Evaluator.trace_event) -> event.detail)
+  in
+  expect (callback_parameters = [ "1"; "2" ])
+    "callbacks from uninstrumented library code did not re-enter the trace";
+  expect
+    (List.for_all
+       (fun (event : Evaluator.trace_event) ->
+         String.equal event.path "trace.ml.md")
+       traced.traces)
+    "library implementation details leaked into the user execution record";
+  let alternative_document =
+    Document.parse ~path:"alternatives.ml.md"
+      "    type token = Zero | One | Two | Four\n\
+      \    let classify = function\n\
+      \      | Some (Zero | One) -> 1\n\
+      \      | Some (Two | Four) -> 2\n\
+      \      | None -> 0\n\
+      \    let zero = classify (Some Zero)\n\
+      \    let two = classify (Some Two)\n"
+  in
+  let alternatives = Evaluator.evaluate alternative_document in
+  expect alternatives.ok "the or-pattern trace fixture did not evaluate";
+  let matched_pattern line start_column end_column =
+    List.exists
+      (fun (event : Evaluator.trace_event) ->
+        String.equal event.phase "enter"
+        && String.equal event.kind "pattern"
+        && event.source_line = line
+        && event.source_column = start_column
+        && event.source_end_column = end_column)
+      alternatives.traces
+  in
+  expect
+    (matched_pattern 3 14 18 && matched_pattern 4 14 17)
+    "matched nested or-pattern alternatives did not emit their own execution \
+     events";
+  expect
+    (not (matched_pattern 3 21 24) && not (matched_pattern 4 20 24))
+    "unmatched nested or-pattern alternatives emitted execution events";
+  expect
+    (match
+       Evaluator.execution_sites_with_cancel
+         ~cancelled:(fun () -> false)
+         ~documents:[ alternative_document ] ~target:alternative_document
+     with
+    | Error _ -> false
+    | Ok sites ->
+        List.exists
+          (fun (site : Evaluator.execution_site) ->
+            site.site_kind = "pattern" && site.site_direct)
+          sites
+        && List.exists
+             (fun (site : Evaluator.execution_site) ->
+               site.site_kind = "syntax"
+               && site.site_role = Some "alternative"
+               && Option.is_some site.site_target)
+             sites)
+    "the compiler index did not identify direct or-pattern leaves";
+  let guarded_document =
+    Document.parse ~path:"guarded.ml.md"
+      "    let classify n =\n\
+      \      match n with\n\
+      \      | x when x > 0 -> x + 1\n\
+      \      | _ -> 0\n"
+  in
+  expect
+    (match
+       Evaluator.execution_sites_with_cancel
+         ~cancelled:(fun () -> false)
+         ~documents:[ guarded_document ] ~target:guarded_document
+     with
+    | Error _ -> false
+    | Ok sites ->
+        List.exists
+          (fun (site : Evaluator.execution_site) ->
+            Option.is_some site.site_parent_id)
+          sites
+        && List.exists
+             (fun (site : Evaluator.execution_site) ->
+               site.site_kind = "pattern"
+               && Option.is_some site.site_selection)
+             sites
+        && List.exists
+             (fun (site : Evaluator.execution_site) ->
+               site.site_kind = "pattern" && site.site_start_line = 3
+               && Option.fold ~none:false
+                    ~some:(fun (target : Evaluator.execution_site_range) ->
+                      target.range_start_line = 3
+                      && target.range_start_column >= 24)
+                    site.site_target)
+             sites
+        && List.exists
+             (fun (site : Evaluator.execution_site) ->
+               site.site_kind = "expression"
+               && site.site_role = Some "operator"
+               && Option.is_some site.site_target)
+             sites
+        && List.exists
+             (fun (site : Evaluator.execution_site) ->
+               site.site_kind = "syntax" && site.site_role = Some "when"
+               && Option.is_some site.site_target)
+             sites)
+    "compiler sites did not retain tree identity or map a guarded pattern to \
+     its branch body";
+  let syntax_document =
+    Document.parse ~path:"syntax.ml.md"
+      "    let typed (f : int -> int) = f 0\n\
+      \    let guarded = function\n\
+      \      | value when value > 0 -> value\n\
+      \      | _ -> 0\n\
+      \    let rec exercise flag =\n\
+      \      let value = if flag then 1 else 2 in\n\
+      \      let apply = fun x -> x + value in\n\
+      \      let counter = ref 0 in\n\
+      \      while !counter < 1 do incr counter done;\n\
+      \      for index = 0 to 0 do ignore (apply index) done;\n\
+      \      match value with\n\
+      \      |\n\
+      \        0 -> 0\n\
+      \      | other\n\
+      \        -> other\n"
+  in
+  expect
+    (match
+       Evaluator.execution_sites_with_cancel
+         ~cancelled:(fun () -> false)
+         ~documents:[ syntax_document ] ~target:syntax_document
+     with
+    | Error _ -> false
+    | Ok sites ->
+        let targeted_roles =
+          sites
+          |> List.filter_map (fun (site : Evaluator.execution_site) ->
+                 if site.site_kind = "syntax" && Option.is_some site.site_target
+                 then site.site_role
+                 else None)
+        in
+        let role_sites role =
+          List.filter
+            (fun (site : Evaluator.execution_site) ->
+              site.site_kind = "syntax" && site.site_role = Some role)
+            sites
+        in
+        List.for_all
+          (fun role -> List.mem role targeted_roles)
+          [
+            "let";
+            "rec";
+            "if";
+            "then";
+            "else";
+            "in";
+            "function";
+            "while";
+            "for";
+            "do";
+            "done";
+            "match";
+            "with";
+            "alternative";
+            "arrow";
+          ]
+        && List.length (role_sites "arrow") = 5
+        && List.for_all
+             (fun (site : Evaluator.execution_site) ->
+               Option.is_some site.site_target)
+             (role_sites "arrow")
+        && List.length (role_sites "alternative") = 4
+        && List.for_all
+             (fun (site : Evaluator.execution_site) ->
+               Option.is_some site.site_target)
+             (role_sites "alternative"))
+    "compiler syntax did not map executable keywords to their constructs";
+  let runtime_edge_document =
+    Document.parse ~path:"runtime-edge.ml.md"
+      "    type branch = Left of int | Right of int\n\
+      \    let guarded = function\n\
+      \      | Left x when x < 0 -> x\n\
+      \      | Left x -> x + 1\n\
+      \      | Right y -> y\n\
+      \    let positive = guarded (Left 2)\n\
+      \    type digit = Zero | One\n\
+      \    let chosen = function\n\
+      \      | Some ((Zero as value) | (One as value)) -> value\n\
+      \      | None -> Zero\n\
+      \    let zero = chosen (Some Zero)\n\
+      \    let one = chosen (Some One)\n\
+      \    let floats = [| 1.5; 2.25 |]\n"
+  in
+  let runtime_edges = Evaluator.evaluate runtime_edge_document in
+  if not runtime_edges.ok then
+    List.iter
+      (fun (diagnostic : Evaluator.diagnostic) ->
+        prerr_endline diagnostic.message)
+      runtime_edges.diagnostics;
+  expect runtime_edges.ok "pattern and float runtime fixture did not evaluate";
+  let binding_returns label =
+    runtime_edges.traces
+    |> List.filter (fun (event : Evaluator.trace_event) ->
+        String.equal event.phase "return"
+        && String.equal event.kind "binding"
+        && String.equal event.label label)
+  in
+  expect
+    (List.length (binding_returns "x") >= 2)
+    "a pattern binding was not recorded before a failed guard";
+  let alternative_values = binding_returns "value" in
+  let alternatives_are_exact =
+    List.exists
+      (fun (event : Evaluator.trace_event) -> String.equal event.detail "Zero")
+      alternative_values
+    && List.exists
+         (fun (event : Evaluator.trace_event) -> String.equal event.detail "One")
+         alternative_values
+    && List.length
+         (List.sort_uniq Int.compare
+            (List.map
+               (fun (event : Evaluator.trace_event) -> event.source_column)
+               alternative_values))
+       >= 2
+  in
+  if not alternatives_are_exact then
+    List.iter
+      (fun (event : Evaluator.trace_event) ->
+        Printf.eprintf "value binding: %s at %d:%d-%d\n" event.detail
+          event.source_line event.source_column event.source_end_column)
+      alternative_values;
+  expect
+    alternatives_are_exact
+    "or-pattern bindings did not retain each matched alternative's value and \
+     source location";
+  expect
+    (List.exists
+       (fun (event : Evaluator.trace_event) ->
+         String.equal event.phase "return"
+         && String.equal event.label "floats"
+         && String.equal event.detail "[|1.5; 2.25|]")
+       runtime_edges.traces)
+    "a float array was not rendered from its unboxed runtime layout";
+  let tail_document =
+    Document.parse ~path:"tail.ml.md"
+      "    let rec loop accumulator remaining =\n\
+      \      if remaining = 0 then accumulator\n\
+      \      else loop (accumulator + 1) (remaining - 1)\n\
+      \    let result = loop 0 100000\n\
+      \    let () = print_endline (string_of_int result)\n"
+  in
+  let tail = Evaluator.evaluate tail_document in
+  expect tail.ok "instrumentation broke a large tail-recursive execution";
+  expect
+    (List.exists
+       (fun (output : Evaluator.block_output) ->
+         String.equal output.stdout "100000\n")
+       tail.block_outputs)
+    "a large tail-recursive execution returned the wrong result";
+  expect
+    (tail.tail_handoffs > 0 && tail.tail_linked_enters > 0
+    && tail.tail_handoff_outcomes = 0)
+    "the bytecode evaluator did not preserve the raw tail-handoff invariant";
+  let mixed_tail_document =
+    Document.parse ~path:"mixed-tail.ml.md"
+      "    let helper value = value + 1\n\
+      \    let rec loop accumulator remaining =\n\
+      \      if remaining = 0 then accumulator\n\
+      \      else\n\
+      \        let accumulator = helper accumulator in\n\
+      \        loop accumulator (remaining - 1)\n\
+      \    let mixed_result = loop 0 100000\n\
+      \    let () = print_endline (string_of_int mixed_result)\n"
+  in
+  let mixed_tail = Evaluator.evaluate mixed_tail_document in
+  expect mixed_tail.ok
+    "a non-tail call in a tail-recursive function broke tail recursion";
+  expect
+    (List.exists
+       (fun (output : Evaluator.block_output) ->
+         String.equal output.stdout "100000\n")
+       mixed_tail.block_outputs)
+    "mixed non-tail and tail calls returned the wrong result";
+  let higher_order_tail =
+    Document.parse ~path:"higher-order-tail.ml.md"
+      "    let increment value = value + 1\n\
+      \    let apply function_ value = function_ value\n\
+      \    let aliased = apply increment 4\n\
+      \    let after_alias = aliased + 1\n\
+      \    let map function_ values = List.map function_ values\n\
+      \    let mapped = map (fun value -> value + 1) [1; 2; 3]\n\
+      \    let add left right = left + right\n\
+      \    let make value = add value\n\
+      \    let partials = List.map make [1; 2; 3]\n\
+      \    let applied = List.map (fun function_ -> function_ 10) partials\n\
+      \    let after_partials = List.length applied\n\
+      \    let first left = fun right -> left + right\n\
+      \    let over function_ = function_ 2 3\n\
+      \    let over_result = over first\n"
+    |> Evaluator.evaluate
+  in
+  expect higher_order_tail.ok "a higher-order tail call did not evaluate";
+  let apply_outcome =
+    List.find_opt
+      (fun (event : Evaluator.trace_event) ->
+        String.equal event.kind "function" && String.equal event.label "apply"
+        && String.equal event.phase "return" && String.equal event.detail "5")
+      higher_order_tail.traces
+  in
+  expect (Option.is_some apply_outcome)
+    "a higher-order caller did not inherit its tail callee's outcome";
+  expect
+    (List.exists
+       (fun (event : Evaluator.trace_event) ->
+         String.equal event.kind "call" && event.source_line = 2
+         && String.equal event.phase "return" && String.equal event.detail "5")
+       higher_order_tail.traces)
+    "the higher-order tail call site did not retain an execution outcome";
+  expect
+    (List.exists
+       (fun (event : Evaluator.trace_event) ->
+         String.equal event.kind "call" && event.source_line = 5
+         && String.equal event.phase "return"
+         && String.equal event.detail "[2; 3; 4]")
+       higher_order_tail.traces)
+    "an uninstrumented tail callee inherited its first callback's outcome";
+  let partial_outcomes =
+    List.filter
+      (fun (event : Evaluator.trace_event) ->
+        String.equal event.kind "call" && event.source_line = 8
+        && String.equal event.phase "return"
+        && String.equal event.detail "<function>")
+      higher_order_tail.traces
+  in
+  expect (List.length partial_outcomes = 3)
+    "a partial application handed off before its function body entered";
+  let make_occurrences =
+    higher_order_tail.traces
+    |> List.filter (fun (event : Evaluator.trace_event) ->
+        String.equal event.kind "function" && String.equal event.label "make"
+        && String.equal event.phase "enter")
+    |> List.map (fun (event : Evaluator.trace_event) -> event.occurrence_id)
+  in
+  expect
+    (List.for_all
+       (fun (event : Evaluator.trace_event) ->
+         not (String.equal event.label "after_partials")
+         || Option.fold ~none:true
+              ~some:(fun parent -> not (List.mem parent make_occurrences))
+              event.parent_id)
+       higher_order_tail.traces)
+    "a partial application left a stale tail parent for later execution";
+  expect
+    (List.exists
+       (fun (event : Evaluator.trace_event) ->
+         String.equal event.label "over_result"
+         && String.equal event.phase "return" && String.equal event.detail "5")
+       higher_order_tail.traces)
+    "tail tracing changed an overapplication's result";
+  expect
+    (List.for_all
+       (fun (event : Evaluator.trace_event) ->
+         if String.equal event.label "after_alias"
+         then
+           match apply_outcome with
+           | Some apply -> event.parent_id <> Some apply.occurrence_id
+           | None -> false
+         else true)
+       higher_order_tail.traces)
+    "a completed higher-order tail caller remained on the runtime stack";
+  let exceptional_tail =
+    Document.parse ~path:"exceptional-tail.ml.md"
+      "    let rec explode remaining =\n\
+      \      let next =\n\
+      \        if remaining = 0 then failwith \"boom\" else remaining - 1\n\
+      \      in\n\
+      \      explode next\n\
+      \    let recovered = try explode 2 with Failure _ -> 42\n\
+      \    let after_exception = recovered + 1\n"
+    |> Evaluator.evaluate
+  in
+  expect exceptional_tail.ok
+    "an exception before a tail handoff corrupted evaluation";
+  let explode_enters =
+    List.filter
+      (fun (event : Evaluator.trace_event) ->
+        String.equal event.kind "function"
+        && String.equal event.label "explode"
+        && String.equal event.phase "enter")
+      exceptional_tail.traces
+  in
+  expect
+    (explode_enters <> []
+    && List.for_all
+         (fun (entered : Evaluator.trace_event) ->
+           List.exists
+             (fun (event : Evaluator.trace_event) ->
+               String.equal event.occurrence_id entered.occurrence_id
+               && (String.equal event.phase "return"
+                  || String.equal event.phase "raise"))
+             exceptional_tail.traces)
+         explode_enters)
+    "tail callers were left without outcomes after a pre-handoff exception";
+  let explode_occurrences =
+    List.map
+      (fun (event : Evaluator.trace_event) -> event.occurrence_id)
+      explode_enters
+  in
+  expect
+    (List.for_all
+       (fun (event : Evaluator.trace_event) ->
+         not (String.equal event.label "after_exception")
+         || Option.fold ~none:true
+              ~some:(fun parent -> not (List.mem parent explode_occurrences))
+              event.parent_id)
+       exceptional_tail.traces)
+    "a raised tail caller remained the parent of later execution";
+  let truncated_document =
+    Document.parse ~path:"truncated.ml.md"
+      "    let total = ref 0\n\
+      \    let () =\n\
+      \      for index = 1 to 100000 do\n\
+      \        total := !total + index\n\
+      \      done\n\
+      \    let finished = !total\n"
+  in
+  let truncated = Evaluator.evaluate truncated_document in
+  expect truncated.ok "trace truncation stopped an otherwise successful program";
+  expect truncated.trace_truncated "a bounded trace did not report truncation";
   print_endline "evaluator tests passed"

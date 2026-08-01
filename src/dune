@@ -23,7 +23,7 @@
   project
   server
   main)
- (libraries unix str yojson dox_native))
+ (libraries unix str yojson compiler-libs.common dox_native))
 
 (test
  (name test_document)
@@ -46,7 +46,7 @@
   compiler_workspace
   project
   server)
- (libraries unix str yojson dox_native))
+ (libraries unix str yojson compiler-libs.common dox_native))
 
 (test
  (name test_evaluator)
@@ -58,7 +58,7 @@
   document
   evaluator
   debugger)
- (libraries unix str yojson))
+ (libraries unix str yojson compiler-libs.common))
 
 (test
  (name test_workspace)
@@ -74,4 +74,4 @@
   evaluator
   compiler_workspace
   project)
- (libraries unix str yojson dox_native))
+ (libraries unix str yojson compiler-libs.common dox_native))

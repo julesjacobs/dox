@@ -54,39 +54,38 @@ Place the cursor on OCaml code to see its inferred type.
 Errors appear below their code block and as red underlines. Hover an underline
 to read the compiler message.
 
-## Evaluation and tracing
+## Evaluation
 
 OCaml evaluates from front to back. When code changes, its previous result and
 all later results fade immediately while the new run replaces them.
 
-- `let @value = expression` records a binding.
-- `let @function arguments = expression` records every function call.
-- `@(expression)` records one expression.
+The same evaluation also records the execution trace. There is no second
+debugger run.
 
-The context pane groups calls into a compact execution tree. Select an
-occurrence to see its parameters and observed values, or click it to return to
-the exact source span. [[Demos.Tracing]] is the smallest complete example.
+## Observed execution
 
-## Debugging
+The execution record is always present. Evaluation, the timeline, inline
+values, and the execution list all show the same immutable record; inspecting
+it never runs the program again.
 
-Choose `Explore execution` in the context pane to reconstruct the dynamic call
-graph for the current page and its dependencies.
+- Parameters, pattern variables, and local bindings reveal their runtime values
+  directly after their names.
+- Program highlights the top-level OCaml that ran.
+- A selected invocation softly highlights the exact expressions it executed.
+  Code that no execution reached is subdued; code reached by another invocation
+  keeps its normal contrast.
+- Calls made by the invocation show their arguments and result. Click one to
+  move down the call tree.
+- The function name shows the caller's result when a caller exists.
+  Click it to move back up the call tree.
+- Move the timeline to another event, or click a linked caller or callee to
+  focus that invocation.
+- Moving the text cursor focuses an execution that reached that construct and
+  marks every matching occurrence on the timeline.
 
-- Select a call in the context pane to inspect that particular invocation.
-- Compact annotations appear directly after the source line that produced
-  them. Function arguments follow the header, pattern variables follow the
-  selected pattern, and local values follow the completed binding.
-- A called function's result follows its callsite and opens that child call.
-  Repeated callsites are grouped; the context pane moves between individual
-  occurrences.
-- The selected function's result follows the expression that returned it.
-- Source lines that did not run in the selected call are subdued.
-- Select a called function in the source to open that child call. Use the
-  breadcrumb in the context pane, or select the current function's name, to
-  return to an ancestor.
-
-The call graph is tied to the exact compiled program. Editing executable OCaml
-marks it as stale; reconstruct it from the context pane.
+The trace is tied to the exact evaluated program. Editing executable OCaml
+marks it as stale until the replacement evaluation arrives. Prose-only edits do
+not rerun the program.
 
 ## Workspace
 

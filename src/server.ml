@@ -561,38 +561,6 @@ let evaluate_response context ~cancelled body =
              ("projectVersion", `String project_version);
            ])
 
-let debug_response context ~cancelled body =
-  let open Util in
-  match
-    let* request = json_body body in
-    let* path = string_member "path" request in
-    let* source = string_member "source" request in
-    let* base_project_version = string_member "baseProjectVersion" request in
-    match Project.snapshot context.project with
-    | Error project_error_ -> Error (Project.error_message project_error_)
-    | Ok snapshot ->
-        if not (String.equal snapshot.version base_project_version) then
-          Error "The project changed; reload before debugging this draft."
-        else
-          let document = Document.parse ~path source in
-          let* documents =
-            Project.resolve_documents ~cancelled context.project snapshot
-              document
-            |> Result.map_error Project.error_message
-          in
-          let* debugger =
-            Debugger.start ~cancelled ~documents ~target:document ()
-          in
-          Ok (debugger, snapshot.version)
-  with
-  | Error message -> error ~status:409 message
-  | Ok (debugger, project_version) ->
-      json
-        (`Assoc
-           [
-             ("debugger", debugger); ("projectVersion", `String project_version);
-           ])
-
 let type_at_response context ~cancelled body =
   let open Util in
   let parsed =
@@ -634,6 +602,49 @@ let type_at_response context ~cancelled body =
                            ( "info",
                              Option.fold ~none:`Null
                                ~some:Evaluator.type_info_to_json info );
+                         ]))))
+
+let execution_sites_response context ~cancelled body =
+  let open Util in
+  let parsed =
+    let* request = json_body body in
+    let* path = string_member "path" request in
+    let* source = string_member "source" request in
+    let* base_project_version = string_member "baseProjectVersion" request in
+    Ok (path, source, base_project_version)
+  in
+  match parsed with
+  | Error message -> error message
+  | Ok (path, source, base_project_version) -> (
+      match Project.snapshot context.project with
+      | Error project_error_ -> project_error project_error_
+      | Ok snapshot -> (
+          if not (String.equal snapshot.version base_project_version) then
+            error ~status:409
+              "The project changed; reopen the document before indexing its \
+               execution sites."
+          else
+            let target = Document.parse ~path source in
+            match
+              Project.resolve_documents ~cancelled context.project snapshot
+                target
+            with
+            | Error project_error_ -> project_error project_error_
+            | Ok documents -> (
+                match
+                  Evaluator.execution_sites_with_cancel ~cancelled ~documents
+                    ~target
+                with
+                | Error message -> error ~status:503 message
+                | Ok sites ->
+                    json
+                      (`Assoc
+                         [
+                           ( "sites",
+                             `List
+                               (List.map Evaluator.execution_site_to_json sites)
+                           );
+                           ("projectVersion", `String snapshot.version);
                          ]))))
 
 let definition_at_response context ~cancelled body =
@@ -896,12 +907,12 @@ let route context ~cancelled method_ target headers body =
   | "POST", "/api/evaluate" ->
       require_active_request context headers (fun () ->
           evaluate_response context ~cancelled body)
-  | "POST", "/api/debug" ->
-      require_active_request context headers (fun () ->
-          debug_response context ~cancelled body)
   | "POST", "/api/type-at" ->
       require_active_request context headers (fun () ->
           type_at_response context ~cancelled body)
+  | "POST", "/api/execution-sites" ->
+      require_active_request context headers (fun () ->
+          execution_sites_response context ~cancelled body)
   | "POST", "/api/definition-at" ->
       require_active_request context headers (fun () ->
           definition_at_response context ~cancelled body)

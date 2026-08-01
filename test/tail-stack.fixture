@@ -1,0 +1,22 @@
+    let helper value = value + 1
+    let rec loop accumulator remaining =
+      if remaining = 0 then accumulator
+      else
+        let accumulator = helper accumulator in
+        loop accumulator (remaining - 1)
+    let result = loop 0 100000
+    let () = print_endline (string_of_int result)
+
+    let rec tuple_loop (accumulator, remaining) =
+      if remaining = 0 then accumulator
+      else tuple_loop (accumulator + 1, remaining - 1)
+    let tuple_result = tuple_loop (0, 100000)
+    let () = print_endline (string_of_int tuple_result)
+
+    let rec over_loop remaining =
+      let step () =
+        if remaining = 0 then 0 else over_loop (remaining - 1) ()
+      in
+      step
+    let over_result = over_loop 100000 ()
+    let () = print_endline (string_of_int over_result)

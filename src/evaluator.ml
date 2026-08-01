@@ -57,6 +57,34 @@ type type_info = {
   end_column : int;
 }
 
+type execution_site_range = {
+  range_start_line : int;
+  range_start_column : int;
+  range_end_line : int;
+  range_end_column : int;
+}
+
+type execution_site = {
+  site_id : string;
+  site_parent_id : string option;
+  site_kind : string;
+  site_ghost : bool;
+  site_start_line : int;
+  site_start_column : int;
+  site_end_line : int;
+  site_end_column : int;
+  site_target : execution_site_range option;
+  site_selection : execution_site_range option;
+  site_role : string option;
+  site_direct : bool;
+}
+
+type compiler_token = {
+  token_range : execution_site_range;
+  token_role : string option;
+  token_operator : bool;
+}
+
 type definition_info = {
   name : string;
   kind : string;
@@ -91,6 +119,10 @@ type result = {
   inline_results : inline_result list;
   views : view list;
   traces : trace_event list;
+  trace_truncated : bool;
+  tail_handoffs : int;
+  tail_linked_enters : int;
+  tail_handoff_outcomes : int;
   diagnostics : diagnostic list;
   duration_ms : int;
 }
@@ -337,13 +369,175 @@ let parse_runtime_events contents =
   |> List.filter_map Fun.id
   |> List.fold_left
        (fun (views, traces) (sequence, kind, id, content) ->
-         if String.equal kind "observe" then
+         if String.equal kind "trace-truncated" then (views, traces)
+         else if String.equal kind "observe" then
            match trace_event sequence content with
            | Some event -> (views, event :: traces)
            | None -> (views, traces)
          else ({ sequence; kind; id; content } :: views, traces))
        ([], [])
   |> fun (views, traces) -> (List.rev views, List.rev traces)
+
+let runtime_events_truncated contents =
+  String.split_on_char '\n' contents
+  |> List.exists (Util.starts_with ~prefix:"trace-truncated\t")
+
+let complete_tail_outcomes traces =
+  let enters = Hashtbl.create (List.length traces) in
+  let outcomes = Hashtbl.create (List.length traces) in
+  let tail_events = Hashtbl.create 32 in
+  let first_tail_events = Hashtbl.create 32 in
+  let children = Hashtbl.create 32 in
+  List.iter
+    (fun event ->
+      if String.equal event.phase "enter" then (
+        Hashtbl.replace enters event.occurrence_id event;
+        Option.iter
+          (fun parent ->
+            Hashtbl.replace children parent
+              (event
+              :: Option.value ~default:[] (Hashtbl.find_opt children parent)))
+          event.parent_id)
+      else if String.equal event.phase "return"
+              || String.equal event.phase "raise"
+      then Hashtbl.replace outcomes event.occurrence_id event
+      else if String.equal event.phase "tail" then (
+        if not (Hashtbl.mem first_tail_events event.occurrence_id)
+        then Hashtbl.replace first_tail_events event.occurrence_id event;
+        Hashtbl.replace tail_events event.occurrence_id event))
+    traces;
+  let children occurrence =
+    Option.value ~default:[] (Hashtbl.find_opt children occurrence)
+  in
+  let tail_target tail =
+    let tailing_call =
+      children tail.occurrence_id
+      |> List.filter_map (fun child ->
+          Option.map
+            (fun child_tail -> (child, child_tail))
+            (Hashtbl.find_opt first_tail_events child.occurrence_id))
+      |> List.filter (fun (child, child_tail) ->
+          child.sequence < tail.sequence
+          && child_tail.sequence < tail.sequence)
+      |> List.sort (fun (left, _) (right, _) ->
+          Int.compare right.sequence left.sequence)
+      |> List.map fst
+      |> function child :: _ -> Some child | [] -> None
+    in
+    match tailing_call with
+    | Some _ as target -> target
+    | None ->
+      children tail.occurrence_id
+      |> List.filter (fun child -> child.sequence > tail.sequence)
+      |> List.sort (fun left right -> Int.compare left.sequence right.sequence)
+      |> function child :: _ -> Some child | [] -> None
+  in
+  let later_outcomes =
+    traces
+    |> List.filter (fun event ->
+        String.equal event.phase "return" || String.equal event.phase "raise")
+    |> List.sort (fun left right -> Int.compare left.sequence right.sequence)
+  in
+  let first_outcome_after tail =
+    List.find_opt (fun event -> event.sequence > tail.sequence) later_outcomes
+  in
+  let resolving = Hashtbl.create 32 in
+  let rec outcome occurrence =
+    match Hashtbl.find_opt outcomes occurrence with
+    | Some event -> Some event
+    | None when Hashtbl.mem resolving occurrence -> None
+    | None ->
+      Hashtbl.replace resolving occurrence ();
+      let resolved =
+        Option.bind (Hashtbl.find_opt tail_events occurrence) (fun tail ->
+            match tail_target tail with
+            | Some child -> outcome child.occurrence_id
+            | None ->
+              (match tail.parent_id with
+               | Some parent when not (String.equal parent occurrence) ->
+                 (match outcome parent with
+                  | Some _ as resolved -> resolved
+                  | None -> first_outcome_after tail)
+               | None | Some _ -> first_outcome_after tail))
+      in
+      Hashtbl.remove resolving occurrence;
+      resolved
+  in
+  let next_sequence =
+    ref
+      (List.fold_left
+         (fun maximum event -> max maximum event.sequence)
+         (-1) traces
+       + 1)
+  in
+  let completed = ref [] in
+  let completed_occurrences = Hashtbl.create 32 in
+  let rec complete occurrence =
+    if not (Hashtbl.mem outcomes occurrence)
+       && not (Hashtbl.mem completed_occurrences occurrence)
+    then (
+      Hashtbl.replace completed_occurrences occurrence ();
+      match Hashtbl.find_opt tail_events occurrence with
+      | None -> ()
+      | Some tail ->
+        Option.iter
+          (fun child ->
+            if Hashtbl.mem tail_events child.occurrence_id
+            then complete child.occurrence_id)
+          (tail_target tail);
+        match Hashtbl.find_opt enters occurrence, outcome occurrence with
+        | Some entered, Some returned ->
+          let event =
+            {
+              entered with
+              sequence = !next_sequence;
+              phase = returned.phase;
+              detail = returned.detail;
+            }
+          in
+          incr next_sequence;
+          Hashtbl.replace outcomes occurrence event;
+          completed := event :: !completed
+        | _ -> ())
+  in
+  tail_events
+  |> Hashtbl.to_seq_values |> List.of_seq
+  |> List.sort (fun left right -> Int.compare left.sequence right.sequence)
+  |> List.iter (fun tail -> complete tail.occurrence_id);
+  List.filter (fun event -> not (String.equal event.phase "tail")) traces
+  @ List.rev !completed
+
+let raw_tail_stats traces =
+  let handed_off = Hashtbl.create 32 in
+  let tail_handoffs = ref 0 in
+  List.iter
+    (fun event ->
+      if String.equal event.phase "tail" then (
+        incr tail_handoffs;
+        Hashtbl.replace handed_off event.occurrence_id ()))
+    traces;
+  let tail_linked_enters =
+    List.fold_left
+      (fun count event ->
+        if String.equal event.phase "enter"
+           && Option.fold ~none:false
+                ~some:(fun parent -> Hashtbl.mem handed_off parent)
+                event.parent_id
+        then count + 1
+        else count)
+      0 traces
+  in
+  let tail_handoff_outcomes =
+    List.fold_left
+      (fun count event ->
+        if (String.equal event.phase "return"
+            || String.equal event.phase "raise")
+           && Hashtbl.mem handed_off event.occurrence_id
+        then count + 1
+        else count)
+      0 traces
+  in
+  !tail_handoffs, tail_linked_enters, tail_handoff_outcomes
 
 let prelude =
   {|
@@ -501,6 +695,74 @@ let merlin_target_source document =
     | _ -> ());
   output |> Array.to_list |> String.concat "\n"
 
+let compiler_token_classification = function
+  | Parser.IF -> Some "if", false
+  | Parser.THEN -> Some "then", false
+  | Parser.ELSE -> Some "else", false
+  | Parser.LET -> Some "let", false
+  | Parser.REC -> Some "rec", false
+  | Parser.FUN | Parser.FUNCTION -> Some "function", false
+  | Parser.MATCH -> Some "match", false
+  | Parser.WITH -> Some "with", false
+  | Parser.TRY -> Some "try", false
+  | Parser.WHILE -> Some "while", false
+  | Parser.FOR -> Some "for", false
+  | Parser.DO -> Some "do", false
+  | Parser.DONE -> Some "done", false
+  | Parser.IN -> Some "in", false
+  | Parser.WHEN -> Some "when", false
+  | Parser.OF -> Some "of", false
+  | Parser.AS -> Some "as", false
+  | Parser.MINUSGREATER -> Some "arrow", false
+  | Parser.BAR -> Some "alternative", false
+  | Parser.BEGIN | Parser.END -> Some "block-delimiter", false
+  | Parser.PLUS | Parser.PLUSDOT | Parser.MINUS | Parser.MINUSDOT
+  | Parser.STAR | Parser.EQUAL | Parser.LESS | Parser.GREATER
+  | Parser.BARBAR | Parser.AMPERAMPER | Parser.AMPERSAND | Parser.OR
+  | Parser.COLONCOLON | Parser.COLONEQUAL | Parser.LESSMINUS
+  | Parser.PLUSEQ | Parser.PERCENT | Parser.BANG
+  | Parser.INFIXOP0 _ | Parser.INFIXOP1 _ | Parser.INFIXOP2 _
+  | Parser.INFIXOP3 _ | Parser.INFIXOP4 _ | Parser.PREFIXOP _ ->
+      None, true
+  | _ -> None, false
+
+let compiler_tokens document =
+  let source = merlin_target_source document in
+  let lexbuf = Lexing.from_string source in
+  Location.init lexbuf document.Document.path;
+  Lexer.init ();
+  let rec collect accumulator =
+    try
+      let token = Lexer.token lexbuf in
+      let start = Lexing.lexeme_start_p lexbuf in
+      let end_ = Lexing.lexeme_end_p lexbuf in
+      let start_line = start.Lexing.pos_lnum in
+      let end_line = end_.Lexing.pos_lnum in
+      let start_column = start.Lexing.pos_cnum - start.Lexing.pos_bol in
+      let end_column = end_.Lexing.pos_cnum - end_.Lexing.pos_bol in
+      let role, operator = compiler_token_classification token in
+      let entry =
+        {
+          token_range =
+            {
+              range_start_line = start_line;
+              range_start_column =
+                source_column_of_merlin document start_line start_column;
+              range_end_line = end_line;
+              range_end_column =
+                source_column_of_merlin document end_line end_column;
+            };
+          token_role = role;
+          token_operator = operator;
+        }
+      in
+      match token with
+      | Parser.EOF -> List.rev accumulator
+      | _ -> collect (entry :: accumulator)
+    with Lexer.Error _ -> List.rev accumulator
+  in
+  collect []
+
 let expression_at document ~start_line ~start_column ~end_line ~end_column =
   let lines = String.split_on_char '\n' (merlin_target_source document) in
   let line number =
@@ -528,42 +790,53 @@ let position_member name json =
   let position = member name json in
   (position |> member "line" |> to_int, position |> member "col" |> to_int)
 
-let type_info_of_json ~line_offset target json =
+let type_infos_of_json ~line_offset target json =
   let open Yojson.Safe.Util in
   match json |> member "class" |> to_string_option with
   | Some "return" -> (
       match json |> member "value" |> to_list with
-      | [] -> Ok None
-      | value :: _ ->
-          let physical_start_line, start_column =
-            position_member "start" value
-          in
-          let physical_end_line, end_column = position_member "end" value in
-          let start_line = physical_start_line - line_offset in
-          let end_line = physical_end_line - line_offset in
-          let expression =
-            expression_at target ~start_line ~start_column ~end_line ~end_column
-          in
-          let start_column =
-            source_column_of_merlin target start_line start_column
-          in
-          let end_column = source_column_of_merlin target end_line end_column in
-          let type_ = value |> member "type" |> to_string in
+      | values ->
           Ok
-            (Some
-               {
-                 expression;
-                 type_;
-                 start_line;
-                 start_column;
-                 end_line;
-                 end_column;
-               }))
+            (List.map
+               (fun value ->
+                 let physical_start_line, start_column =
+                   position_member "start" value
+                 in
+                 let physical_end_line, end_column =
+                   position_member "end" value
+                 in
+                 let start_line = physical_start_line - line_offset in
+                 let end_line = physical_end_line - line_offset in
+                 let expression =
+                   expression_at target ~start_line ~start_column ~end_line
+                     ~end_column
+                 in
+                 let start_column =
+                   source_column_of_merlin target start_line start_column
+                 in
+                 let end_column =
+                   source_column_of_merlin target end_line end_column
+                 in
+                 let type_ = value |> member "type" |> to_string in
+                 {
+                   expression;
+                   type_;
+                   start_line;
+                   start_column;
+                   end_line;
+                   end_column;
+                 })
+               values))
   | Some class_ ->
       Error
         (Printf.sprintf "Merlin returned %s: %s" class_
            (json |> member "value" |> Yojson.Safe.to_string))
   | None -> Error "Merlin returned an invalid response."
+
+let type_info_of_json ~line_offset target json =
+  Result.map
+    (function [] -> None | info :: _ -> Some info)
+    (type_infos_of_json ~line_offset target json)
 
 let newline_count source =
   String.fold_left
@@ -752,6 +1025,666 @@ let type_at ~documents ~target ~line ~column =
   type_at_with_cancel
     ~cancelled:(fun () -> false)
     ~documents ~target ~line ~column
+
+let execution_site_range site =
+  {
+    range_start_line = site.site_start_line;
+    range_start_column = site.site_start_column;
+    range_end_line = site.site_end_line;
+    range_end_column = site.site_end_column;
+  }
+
+let execution_range_contains outer inner =
+  (outer.range_start_line < inner.range_start_line
+  || (outer.range_start_line = inner.range_start_line
+     && outer.range_start_column <= inner.range_start_column))
+  &&
+  (outer.range_end_line > inner.range_end_line
+  || (outer.range_end_line = inner.range_end_line
+     && outer.range_end_column >= inner.range_end_column))
+
+let execution_position_compare left_line left_column right_line right_column =
+  match Int.compare left_line right_line with
+  | 0 -> Int.compare left_column right_column
+  | comparison -> comparison
+
+let token_between token left right =
+  execution_position_compare token.token_range.range_start_line
+    token.token_range.range_start_column left.range_end_line
+    left.range_end_column
+  >= 0
+  && execution_position_compare token.token_range.range_end_line
+       token.token_range.range_end_column right.range_start_line
+       right.range_start_column
+     <= 0
+
+let enrich_execution_sites sites tokens =
+  let range_key range =
+    Printf.sprintf "%d:%d:%d:%d" range.range_start_line
+      range.range_start_column range.range_end_line range.range_end_column
+  in
+  let sites_by_id = Hashtbl.create (List.length sites) in
+  let children_by_parent = Hashtbl.create (List.length sites) in
+  let operator_ranges = Hashtbl.create (List.length tokens) in
+  let patterns_by_target = Hashtbl.create (List.length sites) in
+  List.iter (fun site -> Hashtbl.replace sites_by_id site.site_id site) sites;
+  List.iter
+    (fun site ->
+      Option.iter
+        (fun parent_id ->
+          Hashtbl.replace children_by_parent parent_id
+            (site
+            :: Option.value ~default:[]
+                 (Hashtbl.find_opt children_by_parent parent_id)))
+        site.site_parent_id;
+      if String.equal site.site_kind "pattern" then
+        Option.iter
+          (fun target ->
+            let key = range_key target in
+            Hashtbl.replace patterns_by_target key
+              (site
+              :: Option.value ~default:[]
+                   (Hashtbl.find_opt patterns_by_target key)))
+          site.site_target)
+    sites;
+  List.iter
+    (fun token ->
+      if token.token_operator then
+        Hashtbl.replace operator_ranges (range_key token.token_range) ())
+    tokens;
+  let parent site =
+    Option.bind site.site_parent_id (Hashtbl.find_opt sites_by_id)
+  in
+  let is_expression site = String.equal site.site_kind "expression" in
+  let is_pattern site = String.equal site.site_kind "pattern" in
+  let is_operator_site site =
+    Hashtbl.mem operator_ranges (range_key (execution_site_range site))
+  in
+  let parent_is_operator_application parent_site =
+    let children =
+      Option.value ~default:[]
+        (Hashtbl.find_opt children_by_parent parent_site.site_id)
+    in
+    List.exists
+      (fun child ->
+        is_expression child && is_operator_site child)
+      children
+  in
+  let direct_patterns = Hashtbl.create (List.length sites) in
+  let alternatives =
+    tokens
+    |> List.filter (fun token -> token.token_role = Some "alternative")
+    |> List.sort (fun left right ->
+           execution_position_compare left.token_range.range_start_line
+             left.token_range.range_start_column
+             right.token_range.range_start_line
+             right.token_range.range_start_column)
+    |> Array.of_list
+  in
+  let alternative_between left right =
+    let rec lower_bound low high =
+      if low >= high then low
+      else
+        let middle = (low + high) / 2 in
+        let token = alternatives.(middle) in
+        if
+          execution_position_compare token.token_range.range_start_line
+            token.token_range.range_start_column left.range_end_line
+            left.range_end_column
+          < 0
+        then lower_bound (middle + 1) high
+        else lower_bound low middle
+    in
+    let index = lower_bound 0 (Array.length alternatives) in
+    index < Array.length alternatives
+    && token_between alternatives.(index) left right
+  in
+  Hashtbl.iter
+    (fun target_key candidates ->
+      let leaves =
+        candidates
+        |> List.filter (fun candidate ->
+               Option.value ~default:[]
+               (Hashtbl.find_opt children_by_parent candidate.site_id)
+               |> List.exists (fun child ->
+                      is_pattern child
+                      && match child.site_target with
+                         | Some target ->
+                             String.equal (range_key target) target_key
+                         | None -> false)
+               |> not)
+        |> List.sort (fun left right ->
+               execution_position_compare left.site_start_line
+                 left.site_start_column right.site_start_line
+                 right.site_start_column)
+      in
+      let rec mark_adjacent = function
+        | left :: (right :: _ as rest) ->
+            if
+              alternative_between (execution_site_range left)
+                (execution_site_range right)
+            then (
+              Hashtbl.replace direct_patterns left.site_id true;
+              Hashtbl.replace direct_patterns right.site_id true);
+            mark_adjacent rest
+        | _ -> ()
+      in
+      mark_adjacent leaves)
+    patterns_by_target;
+  let is_direct_pattern site = Hashtbl.mem direct_patterns site.site_id in
+  List.map
+    (fun site ->
+      let direct = is_pattern site && is_direct_pattern site in
+      match parent site with
+      | Some parent_site
+        when is_expression site && is_expression parent_site ->
+          let range = execution_site_range site in
+          let parent_range = execution_site_range parent_site in
+          if is_operator_site site then
+            {
+              site with
+              site_target = Some parent_range;
+              site_role = Some "operator";
+              site_direct = direct;
+            }
+          else if
+            range.range_start_line = parent_range.range_start_line
+            && range.range_start_column = parent_range.range_start_column
+            && not (parent_is_operator_application parent_site)
+          then
+            {
+              site with
+              site_target = Some parent_range;
+              site_role = Some "callee";
+              site_direct = direct;
+            }
+          else { site with site_direct = direct }
+      | Some parent_site
+        when is_pattern site && is_expression parent_site
+             && site.site_target = None && not parent_site.site_ghost ->
+          {
+            site with
+            site_target = Some (execution_site_range parent_site);
+            site_role = Some "lambda-parameter";
+            site_direct = direct;
+          }
+      | Some _ | None -> { site with site_direct = direct })
+    sites
+
+let execution_range_size range =
+  ((range.range_end_line - range.range_start_line) * 1_000_000)
+  + max 0 (range.range_end_column - range.range_start_column)
+
+let syntax_execution_sites sites tokens =
+  let all_expressions =
+    List.filter (fun site -> site.site_kind = "expression") sites
+  in
+  let expressions = List.filter (fun site -> not site.site_ghost) all_expressions in
+  let containing_expression token =
+    let containing candidates =
+      candidates
+      |> List.fold_left
+           (fun best site ->
+             if
+               not
+                 (execution_range_contains (execution_site_range site)
+                    token.token_range)
+             then best
+             else
+               match best with
+               | None -> Some site
+               | Some current ->
+                   if
+                     execution_range_size (execution_site_range site)
+                     < execution_range_size (execution_site_range current)
+                   then Some site
+                   else best)
+           None
+    in
+    let candidates = containing expressions in
+    match candidates with
+    | Some _ -> candidates
+    | None -> containing all_expressions
+  in
+  let starts_after token site =
+    execution_position_compare site.site_start_line site.site_start_column
+      token.token_range.range_end_line token.token_range.range_end_column
+    >= 0
+  in
+  let next_expression token container =
+    expressions
+    |> List.fold_left
+         (fun best site ->
+           if
+             not
+               (starts_after token site
+               && execution_range_contains (execution_site_range container)
+                    (execution_site_range site))
+           then best
+           else
+             match best with
+             | None -> Some site
+             | Some current ->
+                 let position =
+                   execution_position_compare site.site_start_line
+                     site.site_start_column current.site_start_line
+                     current.site_start_column
+                 in
+                 if
+                   position < 0
+                   || (position = 0
+                      && execution_range_size (execution_site_range site)
+                         > execution_range_size
+                             (execution_site_range current))
+                 then Some site
+                 else best)
+         None
+  in
+  let next_expression_any token =
+    expressions
+    |> List.fold_left
+         (fun best site ->
+           if not (starts_after token site) then best
+           else
+             match best with
+             | None -> Some site
+             | Some current ->
+                 let position =
+                   execution_position_compare site.site_start_line
+                     site.site_start_column current.site_start_line
+                     current.site_start_column
+                 in
+                 if
+                   position < 0
+                   || (position = 0
+                      && execution_range_size (execution_site_range site)
+                         > execution_range_size
+                             (execution_site_range current))
+                 then Some site
+                 else best)
+         None
+  in
+  let next_pattern_target token container =
+    sites
+    |> List.fold_left
+         (fun best site ->
+           if
+             not
+               (site.site_kind = "pattern" && starts_after token site
+               && Option.fold ~none:true
+                    ~some:(fun container ->
+                      execution_range_contains
+                        (execution_site_range container)
+                        (execution_site_range site))
+                    container
+               && Option.is_some site.site_target)
+           then best
+           else
+             match best with
+             | None -> Some site
+             | Some current ->
+                 if
+                   execution_position_compare site.site_start_line
+                     site.site_start_column current.site_start_line
+                     current.site_start_column
+                   < 0
+                 then Some site
+                 else best)
+         None
+    |> fun site -> Option.bind site (fun site -> site.site_target)
+  in
+  let preceding_pattern_target token container =
+    sites
+    |> List.fold_left
+         (fun best site ->
+           if
+             not
+               (site.site_kind = "pattern"
+               && execution_position_compare site.site_end_line
+                    site.site_end_column token.token_range.range_start_line
+                    token.token_range.range_start_column
+                  <= 0
+               && Option.fold ~none:true
+                    ~some:(fun container ->
+                      execution_range_contains
+                        (execution_site_range container)
+                        (execution_site_range site))
+                    container
+               && Option.is_some site.site_target)
+           then best
+           else
+             match best with
+             | None -> Some site
+             | Some current ->
+                 if
+                   execution_position_compare site.site_end_line
+                     site.site_end_column current.site_end_line
+                     current.site_end_column
+                   > 0
+                 then Some site
+                 else best)
+         None
+    |> fun site -> Option.bind site (fun site -> site.site_target)
+  in
+  let target_for token role =
+    let container = containing_expression token in
+    match role with
+    | "arrow" -> preceding_pattern_target token container
+    | "alternative" ->
+        Option.bind container (fun container ->
+            next_pattern_target token (Some container))
+    | "then" | "else" | "in" | "when" | "do" ->
+        Option.bind container (fun container ->
+            Option.map execution_site_range
+              (next_expression token container))
+    | _ -> (
+        match container with
+        | None ->
+            if role = "let" || role = "rec" then
+              Option.map execution_site_range (next_expression_any token)
+            else None
+        | Some container ->
+            Some (execution_site_range container))
+  in
+  tokens
+  |> List.filter_map (fun token ->
+         Option.bind token.token_role (fun role ->
+             let target = target_for token role in
+             if
+               Option.is_none target
+               && (String.equal role "arrow"
+                  || String.equal role "alternative")
+             then None
+             else
+               let range = token.token_range in
+               Some
+                 {
+                   site_id =
+                     Printf.sprintf "syntax:%s:%d:%d:%d:%d" role
+                       range.range_start_line range.range_start_column
+                       range.range_end_line range.range_end_column;
+                   site_parent_id = None;
+                   site_kind = "syntax";
+                   site_ghost = false;
+                   site_start_line = range.range_start_line;
+                   site_start_column = range.range_start_column;
+                   site_end_line = range.range_end_line;
+                   site_end_column = range.range_end_column;
+                   site_target = target;
+                   site_selection = None;
+                   site_role = Some role;
+                   site_direct = false;
+                 }))
+
+let execution_sites_with_cancel ~cancelled ~documents ~target =
+  let source, line_offset = merlin_source ~documents ~target in
+  let result =
+    run_process ~stdin:source ~timeout_seconds:3. ~output_limit:8_000_000
+      ~cancelled (merlin ())
+      [ "single"; "dump"; "-what"; "browse"; "-filename"; target.Document.path ]
+  in
+  if not (successful result.status) then
+    Error
+      (if String.equal (String.trim result.stderr) "" then
+         "Could not query the OCaml compiler service."
+       else String.trim result.stderr)
+  else
+    try
+      let open Yojson.Safe.Util in
+      let json = Yojson.Safe.from_string result.stdout in
+      match json |> member "class" |> to_string_option with
+      | Some "return" ->
+          let target_line_count = 1 + newline_count target.Document.source in
+          let range node =
+            let physical_start_line, start_column = position_member "start" node in
+            let physical_end_line, end_column = position_member "end" node in
+            let start_line = physical_start_line - line_offset in
+            let end_line = physical_end_line - line_offset in
+            if
+              start_line >= 1 && end_line >= start_line
+              && end_line <= target_line_count
+            then
+              Some
+                {
+                  range_start_line = start_line;
+                  range_start_column =
+                    source_column_of_merlin target start_line start_column;
+                  range_end_line = end_line;
+                  range_end_column =
+                    source_column_of_merlin target end_line end_column;
+                }
+            else None
+          in
+          let node_kind node =
+            node |> member "kind" |> to_string_option
+            |> Option.value ~default:""
+          in
+          let site_id kind range =
+            Printf.sprintf "%s:%d:%d:%d:%d" kind range.range_start_line
+              range.range_start_column range.range_end_line
+              range.range_end_column
+          in
+          let rec collect pattern_target selection parent_id accumulator node =
+            let kind = node |> member "kind" |> to_string_option in
+            let site =
+              match (kind, range node) with
+              | Some kind, Some site_range
+                when Util.starts_with ~prefix:"expression" kind
+                     || Util.starts_with ~prefix:"pattern" kind ->
+                  let is_pattern = Util.starts_with ~prefix:"pattern" kind in
+                  let site_kind =
+                    if is_pattern then "pattern" else "expression"
+                  in
+                  Some
+                    {
+                      site_id = site_id site_kind site_range;
+                      site_parent_id = parent_id;
+                      site_kind;
+                      site_ghost =
+                        (node |> member "ghost" |> to_bool_option
+                        |> Option.value ~default:false);
+                      site_start_line = site_range.range_start_line;
+                      site_start_column = site_range.range_start_column;
+                      site_end_line = site_range.range_end_line;
+                      site_end_column = site_range.range_end_column;
+                      site_target =
+                        (if is_pattern then pattern_target else None);
+                      site_selection =
+                        (if is_pattern then selection else None);
+                      site_role = None;
+                      site_direct = false;
+                    }
+              | _ -> None
+            in
+            let accumulator =
+              Option.fold ~none:accumulator
+                ~some:(fun site -> site :: accumulator)
+                site
+            in
+            let child_parent_id =
+              Option.fold ~none:parent_id
+                ~some:(fun site -> Some site.site_id)
+                site
+            in
+            let children = node |> member "children" |> to_list in
+            if String.equal (node_kind node) "case" then
+              let target =
+                children
+                |> List.filter_map (fun child ->
+                    if Util.starts_with ~prefix:"expression" (node_kind child)
+                    then range child
+                    else None)
+                |> List.rev
+                |> function
+                | [] -> None
+                | target :: _ -> Some target
+              in
+              let selection = range node in
+              children
+              |> List.fold_left
+                   (fun accumulator child ->
+                     let child_target =
+                       if Util.starts_with ~prefix:"pattern" (node_kind child)
+                       then target
+                       else None
+                     in
+                     let child_selection =
+                       if Util.starts_with ~prefix:"pattern" (node_kind child)
+                       then selection
+                       else None
+                     in
+                     collect child_target child_selection child_parent_id
+                       accumulator child)
+                   accumulator
+            else if String.equal (node_kind node) "value_binding" then
+              let selection = range node in
+              children
+              |> List.fold_left
+                   (fun accumulator child ->
+                     let child_selection =
+                       if Util.starts_with ~prefix:"pattern" (node_kind child)
+                       then selection
+                       else None
+                     in
+                     collect None child_selection child_parent_id accumulator
+                       child)
+                   accumulator
+            else
+              children
+              |> List.fold_left
+                   (collect
+                      (match kind with
+                      | Some kind when Util.starts_with ~prefix:"pattern" kind
+                        ->
+                         pattern_target
+                      | Some _ | None -> None)
+                      None
+                      child_parent_id)
+                   accumulator
+          in
+          let sites =
+            json |> member "value" |> to_list
+            |> List.fold_left (collect None None None) []
+            |> List.rev
+          in
+          let tokens = compiler_tokens target in
+          let sites = enrich_execution_sites sites tokens in
+          Ok (sites @ syntax_execution_sites sites tokens)
+      | Some class_ ->
+          Error
+            (Printf.sprintf "Merlin returned %s while indexing execution sites."
+               class_)
+      | None -> Error "Merlin returned an invalid execution-site index."
+    with
+    | Yojson.Json_error message -> Error ("Invalid Merlin response: " ^ message)
+    | Yojson.Safe.Util.Type_error (message, _) ->
+        Error ("Invalid Merlin response: " ^ message)
+
+let execution_site_to_json site =
+  `Assoc
+    [
+      ("id", `String site.site_id);
+      ( "parentId",
+        Option.fold ~none:`Null ~some:(fun id -> `String id) site.site_parent_id
+      );
+      ("kind", `String site.site_kind);
+      ("ghost", `Bool site.site_ghost);
+      ( "role",
+        Option.fold ~none:`Null ~some:(fun role -> `String role)
+          site.site_role );
+      ("direct", `Bool site.site_direct);
+      ("startLine", `Int site.site_start_line);
+      ("startColumn", `Int site.site_start_column);
+      ("endLine", `Int site.site_end_line);
+      ("endColumn", `Int site.site_end_column);
+      ( "target",
+        Option.fold ~none:`Null
+          ~some:(fun target ->
+            `Assoc
+              [
+                ("startLine", `Int target.range_start_line);
+                ("startColumn", `Int target.range_start_column);
+                ("endLine", `Int target.range_end_line);
+                ("endColumn", `Int target.range_end_column);
+              ])
+          site.site_target );
+      ( "selection",
+        Option.fold ~none:`Null
+          ~some:(fun selection ->
+            `Assoc
+              [
+                ("startLine", `Int selection.range_start_line);
+                ("startColumn", `Int selection.range_start_column);
+                ("endLine", `Int selection.range_end_line);
+                ("endColumn", `Int selection.range_end_column);
+              ])
+          site.site_selection );
+    ]
+
+let execution_expression_at_with_cancel ~cancelled ~documents ~target ~line
+    ~column =
+  let source, line_offset = merlin_source ~documents ~target in
+  let merlin_column =
+    max 0 (column - source_indentation target line)
+    |> utf8_byte_column_of_utf16 (compiler_source_line target line)
+  in
+  let result =
+    run_process ~stdin:source ~timeout_seconds:3. ~output_limit:262_144
+      ~cancelled (merlin ())
+      [
+        "single";
+        "type-enclosing";
+        "-position";
+        Printf.sprintf "%d:%d" (line + line_offset) merlin_column;
+        "-filename";
+        target.Document.path;
+      ]
+  in
+  if not (successful result.status) then
+    Error
+      (if String.equal (String.trim result.stderr) "" then
+         "Could not query the OCaml compiler service."
+       else String.trim result.stderr)
+  else
+    try
+      Result.map
+        (fun infos ->
+          let same_start left right =
+            left.start_line = right.start_line
+            && left.start_column = right.start_column
+          in
+          let is_operator expression =
+            let expression = String.trim expression in
+            let rec loop index seen =
+              if index >= String.length expression then seen
+              else
+                match expression.[index] with
+                | ' ' | '(' | ')' -> loop (index + 1) seen
+                | '+' | '-' | '*' | '/' | '=' | '<' | '>' | ':' | '@' | '^'
+                | '|' | '&' | '!' | '?' | '~' ->
+                    loop (index + 1) true
+                | _ -> false
+            in
+            loop 0 false
+          in
+          let rec select = function
+            | first :: (_ :: _ as rest) when is_operator first.expression ->
+                select rest
+            | first :: (second :: _ as rest)
+              when same_start first second
+                   && String.contains first.type_ '-'
+                   && String.contains first.type_ '>' ->
+                select rest
+            | first :: _ -> Some first
+            | [] -> None
+          in
+          select infos)
+        (Yojson.Safe.from_string result.stdout
+        |> type_infos_of_json ~line_offset target)
+    with
+    | Yojson.Json_error message -> Error ("Invalid Merlin response: " ^ message)
+    | Yojson.Safe.Util.Type_error (message, _) ->
+        Error ("Invalid Merlin response: " ^ message)
 
 let strip_common_indentation lines =
   let indentation line =
@@ -1058,12 +1991,22 @@ let ocamlrun () =
 let compiler_identity_value =
   lazy
     (let path = compiler () in
+     let executable_digest executable =
+       try Digest.file executable |> Digest.to_hex
+       with Sys_error _ -> "unreadable"
+     in
      let version =
        run_process ~timeout_seconds:2. ~output_limit:16_384 path [ "-version" ]
      in
      if successful version.status && not version.output_limited then
-       path ^ " " ^ String.trim version.stdout
-     else path ^ " (version unavailable)")
+       String.concat " "
+         [
+           path;
+           String.trim version.stdout;
+           executable_digest path;
+           executable_digest (ocamlrun ());
+         ]
+     else path ^ " (version unavailable) " ^ executable_digest path)
 
 let compiler_identity () = Lazy.force compiler_identity_value
 
@@ -1215,12 +2158,13 @@ let instrumented_compilation_source evaluation_id documents target =
               (Printf.sprintf
                  "# 1 %S\n\
                   let () = output_string stdout %S; flush stdout; \
-                  output_string stderr %S; flush stderr\n\
+                  output_string stderr %S; flush stderr;;\n\
                   # %d %S\n\
                   %s\n\
+                  ;;\n\
                   # 1 %S\n\
                   let () = flush stdout; output_string stdout %S; flush \
-                  stdout; flush stderr; output_string stderr %S; flush stderr\n"
+                  stdout; flush stderr; output_string stderr %S; flush stderr;;\n"
                  "<dox-block-boundary>" start_marker start_marker source_line
                  document.path source "<dox-block-boundary>" end_marker
                  end_marker)
@@ -1548,10 +2492,10 @@ let inline_results inline_markers (traces : trace_event list)
         List.find_opt
           (fun (event : trace_event) ->
             String.equal event.path marker.virtual_path
-            && event.parent_id = None
+            && String.equal event.kind "expression"
             && (String.equal event.phase "return"
                || String.equal event.phase "raise"))
-          traces
+          (List.rev traces)
       in
       let diagnostic =
         List.find_opt
@@ -1628,6 +2572,26 @@ let without_inline_trace_trees inline_markers (traces : trace_event list) =
     (fun (event : trace_event) -> not (List.mem event.occurrence_id removed))
     traces
 
+let normalize_inline_trace_event inline_markers (event : trace_event) =
+  match inline_marker_for_path inline_markers event.path with
+  | None -> event
+  | Some marker ->
+      let expression = marker.inline_expression in
+      let prefix_length = String.length "let () = try ignore (@(" in
+      let column column =
+        expression.column_start
+        + utf16_column_of_utf8_byte expression.expression
+            (max 0 (column - prefix_length))
+      in
+      {
+        event with
+        path = marker.document_path;
+        source_line = expression.line;
+        source_column = column event.source_column;
+        source_end_line = expression.line;
+        source_end_column = column event.source_end_column;
+      }
+
 let evaluate_documents ?project_version ?(cancelled = fun () -> false)
     ~documents ~target () =
   let started = Unix.gettimeofday () in
@@ -1637,6 +2601,7 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
   in
   let directory = Filename.temp_dir "dox-eval-" "" in
   let event_path = Filename.concat directory "events" in
+  let trace_path = Filename.concat directory "trace-events" in
   let document_sources, block_markers, inline_markers =
     instrumented_compilation_source evaluation_id documents target
   in
@@ -1665,24 +2630,38 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
           List.exists
             (fun diagnostic -> String.equal diagnostic.severity "error")
             parse_diagnostics
-        then ("invalid", "", "", "", [], [], parse_diagnostics)
+        then
+          ("invalid", "", "", "", [], [], false, 0, 0, 0,
+           parse_diagnostics)
         else
           match
-            compile_document_units ~directory ~sources:document_sources ~target
-              ~cancelled ()
+            compile_document_units
+              ~environment:[ ("DOX_TRACE_ALL", "1") ]
+              ~directory ~sources:document_sources ~target ~cancelled ()
           with
           | Error compilation ->
-              ("compile-error", "", "", "", [], [], [ compilation ])
+              ("compile-error", "", "", "", [], [], false, 0, 0, 0,
+               [ compilation ])
           | Ok (signature, executable, warnings) ->
               let runtime =
                 run_process ~timeout_seconds:5. ~cancelled
-                  ~environment:[ ("DOCLANG_EVENT_PATH", event_path) ]
-                  ~extra_output_paths:[ event_path ] (ocamlrun ())
-                  [ executable ]
+                  ~environment:
+                    [
+                      ("DOCLANG_EVENT_PATH", event_path);
+                      ("DOCLANG_TRACE_PATH", trace_path);
+                    ]
+                  ~extra_output_paths:[ event_path ]
+                  (ocamlrun ()) [ executable ]
               in
-              let views, traces =
-                read_file_prefix event_path 2_000_000 |> parse_runtime_events
+              let view_events = read_file_prefix event_path 2_000_000 in
+              let trace_events = read_file_prefix trace_path 2_000_000 in
+              let trace_truncated = runtime_events_truncated trace_events in
+              let views, _ = parse_runtime_events view_events in
+              let _, traces = parse_runtime_events trace_events in
+              let tail_handoffs, tail_linked_enters, tail_handoff_outcomes =
+                raw_tail_stats traces
               in
+              let traces = complete_tail_outcomes traces in
               let traces = List.map (normalize_trace_event documents) traces in
               let warning_diagnostics =
                 if String.equal warnings "" then []
@@ -1696,6 +2675,10 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
                   runtime.stderr,
                   views,
                   traces,
+                  trace_truncated,
+                  tail_handoffs,
+                  tail_linked_enters,
+                  tail_handoff_outcomes,
                   warning_diagnostics )
               else
                 ( (if runtime.timed_out then "timed-out"
@@ -1706,14 +2689,19 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
                   runtime.stderr,
                   views,
                   traces,
+                  trace_truncated,
+                  tail_handoffs,
+                  tail_linked_enters,
+                  tail_handoff_outcomes,
                   warning_diagnostics
                   @ [ process_failure ~stage:"runtime" runtime ] ))
   in
-  let status, signature, stdout, stderr, views, traces, diagnostics =
+  let status, signature, stdout, stderr, views, traces, trace_truncated,
+      tail_handoffs, tail_linked_enters, tail_handoff_outcomes, diagnostics =
     evaluated
   in
   let inline_results = inline_results inline_markers traces diagnostics in
-  let traces = without_inline_trace_trees inline_markers traces in
+  let traces = List.map (normalize_inline_trace_event inline_markers) traces in
   let diagnostics =
     List.map (normalize_inline_diagnostic inline_markers) diagnostics
   in
@@ -1750,6 +2738,10 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
     inline_results;
     views;
     traces;
+    trace_truncated;
+    tail_handoffs;
+    tail_linked_enters;
+    tail_handoff_outcomes;
     diagnostics;
     duration_ms;
   }
@@ -1862,6 +2854,10 @@ let to_json result =
         `List (List.map inline_result_to_json result.inline_results) );
       ("views", `List (List.map view_to_json result.views));
       ("traces", `List (List.map trace_event_to_json result.traces));
+      ("traceTruncated", `Bool result.trace_truncated);
+      ("tailHandoffs", `Int result.tail_handoffs);
+      ("tailLinkedEnters", `Int result.tail_linked_enters);
+      ("tailHandoffOutcomes", `Int result.tail_handoff_outcomes);
       ("diagnostics", `List (List.map diagnostic_to_json result.diagnostics));
       ("durationMs", `Int result.duration_ms);
     ]

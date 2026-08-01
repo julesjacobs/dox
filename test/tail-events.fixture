@@ -1,0 +1,27 @@
+    let increment value = value + 1
+    let apply function_ value = function_ value
+    let aliased = apply increment 4
+    let after_alias = aliased + 1
+
+    let map function_ values = List.map function_ values
+    let mapped = map (fun value -> value + 1) [1; 2; 3]
+    let after_map = List.length mapped
+
+    let add left right = left + right
+    let make value = add value
+    let partials = List.map make [1; 2; 3]
+    let applied = List.map (fun function_ -> function_ 10) partials
+    let after_partials = List.length applied
+
+    let first left = fun right -> left + right
+    let over function_ = function_ 2 3
+    let over_result = over first
+    let after_over = over_result + 1
+
+    let rec explode remaining =
+      let next =
+        if remaining = 0 then failwith "boom" else remaining - 1
+      in
+      explode next
+    let recovered = try explode 2 with Failure _ -> 42
+    let after_exception = recovered + 1

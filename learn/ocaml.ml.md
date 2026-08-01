@@ -19,7 +19,7 @@ inline evaluation: `square 9 =`.
 Functions compose naturally with the pipeline operator:
 
     let first_squares =
-      List.init 6 Fun.id
+      List.init 7 Fun.id
       |> List.map square
     let sum = List.fold_left ( + ) 0 first_squares
     let () =
@@ -40,7 +40,7 @@ handles each form.
 Because every case carries its own data, the compiler knows what is available
 inside each branch. The area of a `Rectangle (3., 4.)` is
 `area (Rectangle (3., 4.)) =`.
-
+`area (Circle 2.) =`
 ## Recursion follows the data
 
 Lists are either empty or a head followed by a tail. A recursive function can
@@ -56,6 +56,12 @@ mirror that shape directly:
 
 This combination—precise data types, pattern matching, inference, and small
 composable functions—is the core vocabulary used by the larger demos.
+
+    let rec fib n =
+        if n < 2
+        then n
+        else fib (n-1) + fib (n-2)
+    let f = fib 5
 
 Next: [[Demos.Inference]] uses these same tools to implement a type
 inference engine.

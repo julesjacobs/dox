@@ -96,18 +96,19 @@ the readable equation it is solving in the context pane.
     let apply_environment substitution environment =
       String_map.map (apply_scheme substitution) environment
     let compose after before =
-      List.map
-        (fun (variable, body) ->
-          variable, apply_type after body)
-        before
-      @ after
+      List.append
+        (List.map
+           (fun (variable, body) ->
+             variable, apply_type after body)
+           before)
+        after
     let bind variable body =
       if body = Type_variable variable then []
       else if Int_set.mem variable (free_type_variables body) then
         raise (Type_error "a type would contain itself")
       else [ variable, body ]
     let rec unify left right =
-      let @unify_step equation =
+      let unify_step equation =
         let _ = equation in
         match left, right with
         | Int, Int | Bool, Bool -> []
@@ -156,7 +157,7 @@ variables. Instantiation replaces those variables with fresh ones at each use.
       in
       Forall (quantified, body)
     let rec infer environment expression =
-      let @infer_step form =
+      let infer_step form =
         let _ = form in
         match expression with
         | Integer _ -> [], Int
@@ -273,7 +274,7 @@ Type variables are rendered with familiar letter names:
             if nested then "(" ^ rendered ^ ")" else rendered
       in
       render false inferred
-    let @inferred_type = principal_type example
+    let inferred_type = principal_type example
     let () =
       Doc.value ~id:"principal-type" ~type_:"typ"
         (string_of_type inferred_type)

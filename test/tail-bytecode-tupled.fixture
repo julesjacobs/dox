@@ -1,0 +1,5 @@
+    let rec loop (accumulator, remaining) =
+      if remaining = 0 then accumulator
+      else loop (accumulator + 1, remaining - 1)
+    let result = loop (0, 20)
+    let () = print_endline (string_of_int result)

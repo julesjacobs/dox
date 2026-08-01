@@ -1,9 +1,10 @@
 {
   "name": "dox-web",
   "private": true,
+  "type": "module",
   "scripts": {
     "build:web": "esbuild web/editor-source.js --bundle --format=esm --minify --outfile=web/editor.bundle.js",
-    "check:web": "npm run build:web && node --check web/app.js && node --test web/outline-tree.test.mjs"
+    "check:web": "npm run build:web && node --check web/app.js && node --test web/*.test.mjs"
   },
   "devDependencies": {
     "@codemirror/autocomplete": "^6.20.3",

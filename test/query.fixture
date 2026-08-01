@@ -1,0 +1,15 @@
+# Execution query fixture
+
+    let transform input =
+      let doubled = input * 2 in
+      doubled + 1
+    let first = transform 2
+    let second = transform 4
+    let skipped =
+      if false then transform 100 else 0
+    let rec sum acc = function
+      | [] -> acc
+      | value :: rest ->
+          let next = acc + value in
+          sum next rest
+    let total = sum 0 [1; 2]

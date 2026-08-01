@@ -4,11 +4,66 @@ import {
   updateModuleOutlineEditor,
   setMarkdownEditorMode,
   setMarkdownEditorEvaluation,
-  setMarkdownEditorDebugPosition,
   setMarkdownEditorDebugProjection,
   setMarkdownEditorResultInvalidation,
+  scrollMarkdownEditorTo,
   replaceEditorStateDocument,
-} from "./editor.bundle.js?v=20260730s";
+} from "./editor.bundle.js?v=20260801b";
+import {
+  executionCallLinkAt,
+  executionActivationInactiveRanges,
+  executionActiveRanges,
+  executionCursorCoverageIsConsistent,
+  executionFocusRangeAtPosition,
+  executionFunctionSourceRange,
+  executionNeverRunRanges,
+  executionRangesWithFocus,
+  executionIdentifierRange,
+  executionTraceIdentifierRange,
+  executionSnapshotKey,
+} from "./execution-lens.js";
+import {
+  executionSessionCall,
+  executionSessionCallForEvent,
+  executionSessionChooseFocusedExecution,
+  executionSessionFocusExecutions,
+  executionSessionFocusValue,
+  executionSessionFocusedEvents,
+  executionSessionFocusRange,
+  executionSessionEvent,
+  executionSessionMatches,
+  executionSessionReconcileFocus,
+  executionSessionSelectEvent,
+  executionSessionSelectCall,
+  executionSessionSelectSite,
+  pendingExecutionSession,
+  readyExecutionSession,
+} from "./execution-session.js";
+import {
+  createExecutionRecency,
+  noteExecutionChoice,
+  preferredExecutionChoice,
+} from "./execution-preference.js";
+import {
+  createExecutionDraftMapping,
+  mapExecutionDraftEvent,
+  mapExecutionDraftSites,
+  projectExecutionDraftEvents,
+} from "./execution-draft.js";
+import {
+  executionTimelineEvents,
+  executionTimelinePosition,
+  executionTimelineSpan,
+} from "./execution-timeline.js";
+import {
+  buildExecutionRecord,
+  executionCallBindings,
+} from "./execution-record.js";
+import {
+  executionCursorProbe,
+  executionSiteAt,
+  executionSourceTextForSite,
+} from "./execution-cursor.js";
 
 const app = document.querySelector("#app");
 
@@ -37,7 +92,6 @@ const state = {
   evaluation: null,
   evaluationPlan: null,
   evaluationInvalidation: null,
-  traceContext: null,
   view: "document",
   selected: null,
   selectedDefinitionName: null,
@@ -62,7 +116,7 @@ const state = {
     localStorage.getItem("dox:v2:editor-mode") === "source"
       ? "source"
       : "literate",
-  paneWidths: { sidebar: 220, inspector: 280 },
+  paneWidths: { sidebar: 160, inspector: 340 },
   typeInfo: null,
   cursorPosition: null,
   definitionInfo: null,
@@ -74,24 +128,21 @@ const state = {
   completionGeneration: 0,
   completionController: null,
   completionRequestKey: null,
+  completionPositionFrame: null,
   suppressNextCompletionLookup: false,
-  selectedTraceId: null,
   debugger: null,
-  debugging: false,
-  debuggingBackground: false,
-  debugError: null,
-  debugController: null,
-  traceAnchor: null,
-  tracePinned: false,
-  traceHistory: [],
-  traceHistoryIndex: -1,
-  previousDebugger: null,
+  debuggerPreview: null,
+  executionRecency: createExecutionRecency(),
+  executionRevealGeneration: 0,
+  executionTimelineScrubbing: false,
+  executionTimelineCleanup: null,
+  traceFocusGeneration: 0,
+  preserveTraceFocusForSelection: false,
+  executionSitesCache: new Map(),
   typeGeneration: 0,
   typeTimer: null,
   typeController: null,
   typePending: null,
-  suppressNextSelectionLookup: false,
-  hoveredObservationSite: null,
   toastTimer: null,
   sessions: new Map(),
   outlineView: null,
@@ -117,6 +168,7 @@ const state = {
   refactorModuleMapping: null,
   workspaceError: null,
   dependency: null,
+  inspectorHtml: null,
   dependencyGeneration: 0,
   dependencyController: null,
 };
@@ -246,14 +298,20 @@ function toast(message) {
 }
 
 function paneStorageKey() {
-  return `dox:v2:pane-widths:${state.projectRoot || "default"}`;
+  return `dox:v3:pane-widths:${state.projectRoot || "default"}`;
 }
 
 function loadPaneWidths() {
   const stored = storedJson(paneStorageKey(), {});
+  const legacy = storedJson(
+    `dox:v2:pane-widths:${state.projectRoot || "default"}`,
+    {},
+  );
   state.paneWidths = {
-    sidebar: Number.isFinite(stored.sidebar) ? stored.sidebar : 220,
-    inspector: Number.isFinite(stored.inspector) ? stored.inspector : 280,
+    sidebar: Number.isFinite(stored.sidebar) ? stored.sidebar : 160,
+    inspector: Number.isFinite(stored.inspector)
+      ? stored.inspector
+      : Math.max(Number.isFinite(legacy.inspector) ? legacy.inspector : 0, 340),
   };
 }
 
@@ -293,9 +351,64 @@ function currentSession() {
   return state.module ? state.sessions.get(state.module) : null;
 }
 
+function debuggerSnapshot({
+  path = state.path,
+  source = state.document?.source,
+  projectVersion = state.projectVersion,
+} = {}) {
+  if (!path || typeof source !== "string" || !projectVersion) return null;
+  return { path, source, projectVersion };
+}
+
+function debuggerMatchesSnapshot(debuggerState, snapshot) {
+  return Boolean(
+    executionSessionMatches(debuggerState, snapshot) &&
+      !debuggerState.stale &&
+      !debuggerState.provisional,
+  );
+}
+
+function debuggerOwnsSnapshot(debuggerState, snapshot) {
+  return Boolean(
+    debuggerState &&
+      snapshot &&
+      debuggerState.projectVersion === snapshot.projectVersion &&
+      debuggerState.sources?.[snapshot.path] === snapshot.source,
+  );
+}
+
+function debuggerUsableForSnapshot(debuggerState, snapshot) {
+  return Boolean(
+    executionSessionMatches(debuggerState, snapshot) &&
+      !debuggerState.stale &&
+      debuggerState.status === "ready" &&
+      debuggerState.sources?.[snapshot.path] === snapshot.source,
+  );
+}
+
+function currentExecutionSiteIndex() {
+  return state.debugger?.siteIndexes?.[state.path] || null;
+}
+
+function currentExecutionSites() {
+  return currentExecutionSiteIndex()?.sites || [];
+}
+
+function clearExecutionDocumentState() {
+  state.executionTimelineScrubbing = false;
+}
+
+function resetExecutionNavigation() {
+  clearExecutionDocumentState();
+}
+
 function captureCurrentSession() {
   if (!state.module || !state.document) return;
   const session = currentSession() || { module: state.module };
+  const editor =
+    state.sourceEditorView?.doxModule === state.module
+      ? state.sourceEditorView
+      : null;
   session.module = state.module;
   session.path = state.path;
   session.document = state.document;
@@ -304,12 +417,16 @@ function captureCurrentSession() {
   session.evaluation = state.evaluation;
   session.evaluationPlan = state.evaluationPlan;
   session.evaluationInvalidation = state.evaluationInvalidation;
-  session.traceContext = state.traceContext;
+  session.debugger = debuggerUsableForSnapshot(
+    state.debugger,
+    debuggerSnapshot(),
+  )
+    ? state.debugger
+    : null;
   session.selected = state.selected;
-  session.selectedTraceId = state.selectedTraceId;
-  session.editorState = state.sourceEditorView?.state || session.editorState;
+  session.editorState = editor?.state || session.editorState;
   session.scrollTop =
-    state.sourceEditorView?.scrollDOM.scrollTop ?? session.scrollTop ?? 0;
+    editor?.scrollDOM.scrollTop ?? session.scrollTop ?? 0;
   session.editRevision ??= 0;
   session.acknowledgedRevision ??= 0;
   session.autosaveTimer ??= null;
@@ -318,7 +435,7 @@ function captureCurrentSession() {
   state.sessions.set(state.module, session);
 }
 
-function restoreSession(session) {
+function restoreSession(session, { preserveDebugger = false } = {}) {
   state.module = session.module;
   state.path = session.path;
   state.document = session.document;
@@ -327,10 +444,19 @@ function restoreSession(session) {
   state.evaluation = session.evaluation || null;
   state.evaluationPlan = session.evaluationPlan || null;
   state.evaluationInvalidation = session.evaluationInvalidation || null;
-  state.traceContext = session.traceContext || null;
+  if (!preserveDebugger) {
+    const snapshot = debuggerSnapshot({
+      path: session.path,
+      source: session.document.source,
+    });
+    state.debugger = debuggerUsableForSnapshot(session.debugger, snapshot)
+      ? session.debugger
+      : null;
+  }
   state.selected = session.selected || session.document.blocks[0]?.id || null;
-  state.selectedTraceId = session.selectedTraceId || null;
   state.dirty = session.document.source !== session.savedSource;
+  if (preserveDebugger) clearExecutionDocumentState();
+  else resetExecutionNavigation(session);
 }
 
 function updateRoute(modulePath, mode = "push") {
@@ -474,7 +600,6 @@ async function loadDocument(
   modulePath,
   {
     force = false,
-    preserveTrace = false,
     preserveDebugger = false,
     history = "push",
     focus = "main",
@@ -492,19 +617,10 @@ async function loadDocument(
     modulePath = mapping?.get(modulePath) || modulePath;
   }
   if (!force && modulePath === state.module) return true;
-  if (!preserveDebugger && modulePath !== state.module) {
-    state.debugController?.abort();
-    state.debugController = null;
-    state.debugger = null;
-    state.debugging = false;
-    state.debuggingBackground = false;
-    state.traceAnchor = null;
-    state.tracePinned = false;
-    state.traceHistory = [];
-    state.traceHistoryIndex = -1;
-    state.previousDebugger = null;
-  }
   captureCurrentSession();
+  if (!preserveDebugger && modulePath !== state.module) {
+    state.debugger = null;
+  }
   const inheritedProvisional = state.provisionalNavigation;
   const previousModule =
     inheritedProvisional?.previousModule ?? state.module;
@@ -522,9 +638,8 @@ async function loadDocument(
   state.navigationController = controller;
   beginPendingNavigation(modulePath);
   if (cached?.document) {
-    restoreSession(cached);
+    restoreSession(cached, { preserveDebugger });
     state.view = "document";
-    if (!preserveTrace) state.traceContext = cached.traceContext || null;
     updateRoute(modulePath, history);
     state.provisionalNavigation = {
       generation,
@@ -592,7 +707,6 @@ async function loadDocument(
       if (refreshed.version !== diskVersion && projectRetry < 1) {
         return loadDocument(modulePath, {
           force: true,
-          preserveTrace,
           preserveDebugger,
           history,
           focus,
@@ -628,14 +742,13 @@ async function loadDocument(
     state.evaluation = null;
     state.evaluationPlan = null;
     state.evaluationInvalidation = null;
-    if (!preserveTrace) state.traceContext = null;
+    if (preserveDebugger) clearExecutionDocumentState();
+    else resetExecutionNavigation();
     state.evaluating = true;
     state.selected = payload.document.blocks[0]?.id || null;
     state.selectedDefinitionName = null;
-    state.selectedTraceId = null;
     state.typeInfo = null;
     state.cursorPosition = null;
-    state.hoveredObservationSite = null;
     state.dirty = Boolean(recovered);
     const session = {
       module: payload.module,
@@ -646,9 +759,8 @@ async function loadDocument(
       evaluation: null,
       evaluationPlan: null,
       evaluationInvalidation: null,
-      traceContext: preserveTrace ? state.traceContext : null,
+      debugger: null,
       selected: payload.document.blocks[0]?.id || null,
-      selectedTraceId: null,
       editorState: null,
       scrollTop: 0,
       editRevision: recovery?.editRevision || 0,
@@ -694,7 +806,6 @@ async function loadDocument(
         ) {
           return loadDocument(modulePath, {
             force: true,
-            preserveTrace,
             history,
             focus,
             projectRetry: projectRetry + 1,
@@ -986,7 +1097,505 @@ function evaluationStatus() {
   return { label: "Not evaluated", className: "" };
 }
 
+function currentExecutionTimelineEvents() {
+  return state.debugger?.events || [];
+}
+
+function executionCallForEvent(event) {
+  return executionSessionCallForEvent(state.debugger, event);
+}
+
+function currentExecutionTimelineEvent() {
+  return executionSessionEvent(state.debugger);
+}
+
+function currentDebugCall() {
+  return executionSessionCall(state.debugger);
+}
+
+function displayedDebuggerState() {
+  return state.debuggerPreview || state.debugger;
+}
+
+function executionRecencyNamespace(debuggerState) {
+  return debuggerState?.evaluationId || executionSnapshotKey(debuggerState);
+}
+
+function preferredChoiceForSession(debuggerState, choices) {
+  return preferredExecutionChoice(choices, state.executionRecency, {
+    currentEventIndex: debuggerState?.focus?.eventIndex,
+    namespace: executionRecencyNamespace(debuggerState),
+  });
+}
+
+function preferFocusedExecution(debuggerState) {
+  const choice = preferredChoiceForSession(
+    debuggerState,
+    executionSessionFocusExecutions(debuggerState),
+  );
+  return choice
+    ? executionSessionChooseFocusedExecution(debuggerState, choice.eventIndex, {
+        preserveAuthoritativeSelection: true,
+      })
+    : debuggerState;
+}
+
+function noteFocusedExecution(debuggerState = state.debugger) {
+  const choice = executionSessionFocusExecutions(debuggerState).find(
+    (candidate) => candidate.eventIndex === debuggerState?.focus?.eventIndex,
+  );
+  if (choice) {
+    noteExecutionChoice(state.executionRecency, choice, {
+      namespace: executionRecencyNamespace(debuggerState),
+    });
+  }
+}
+
+function setDebuggerPreview(preview) {
+  const next = preview?.status === "ready" ? preview : null;
+  if (state.debuggerPreview === next) return;
+  state.debuggerPreview = next;
+  applyDebuggerProjection();
+}
+
+function executionEventDescription(event) {
+  if (!event) return "";
+  if (event.phase === "return") {
+    return `${event.label} returned ${displayDebugValue(event.detail, event.type)}`;
+  }
+  if (event.phase === "raise") {
+    return `${event.label} raised ${displayDebugValue(event.detail, event.type)}`;
+  }
+  return event.kind === "function"
+    ? `${event.label}${event.detail ? ` ${event.detail}` : ""}`
+    : event.label;
+}
+
+function executionTimelineCallDepth(call) {
+  let depth = 0;
+  for (let current = call?.parent; current?.kind === "function"; current = current.parent) {
+    depth += 1;
+  }
+  return depth;
+}
+
+function renderExecutionTimelineMatches(events) {
+  const matches = executionSessionFocusExecutions(state.debugger).map(
+    ({ eventIndex }) => eventIndex,
+  );
+  const selectedIndex = state.debugger?.focus?.eventIndex ?? -1;
+  return matches
+    .filter((index) => index >= 0 && index < events.length)
+    .map((index) => {
+      const position = executionTimelinePosition(index, events.length);
+      return `<span
+        class="execution-timeline-match${index === selectedIndex ? " selected" : ""}"
+        data-execution-match="${index}"
+        style="left:${position.toFixed(3)}%"
+      ></span>`;
+    })
+    .join("");
+}
+
+function renderExecutionTimeline() {
+  if (state.view !== "document") return "";
+  const debuggerState = state.debugger;
+  const events = currentExecutionTimelineEvents();
+  if (!debuggerState || !events.length) {
+    const label =
+      debuggerState?.status === "loading" || state.evaluating
+        ? "Preparing execution…"
+        : state.evaluation?.ok
+          ? "Execution unavailable"
+          : state.evaluation?.diagnostics?.length
+            ? "Fix errors to inspect execution"
+            : "Execution appears after the document compiles";
+    return `<section class="execution-timeline unavailable" aria-label="Execution timeline">
+      <div class="execution-timeline-meta">
+        <strong data-execution-mode-label>Execution</strong>
+        <span>${escapeHtml(label)}</span>
+      </div>
+      <div class="execution-timeline-empty" aria-hidden="true"><span></span></div>
+    </section>`;
+  }
+
+  const hasOccurrence = Number.isFinite(debuggerState.focus?.eventIndex);
+  const index = Math.min(
+    Math.max(debuggerState.focus?.eventIndex ?? 0, 0),
+    events.length - 1,
+  );
+  const cursorExecutionCount =
+    executionSessionFocusExecutions(debuggerState).length;
+  const event = hasOccurrence ? events[index] : null;
+  const call = executionCallForEvent(event);
+  const selectedCallId = call?.id || null;
+  const activePath = new Set(
+    call ? debugCallBreadcrumb(call).map((ancestor) => ancestor.id) : [],
+  );
+  const allCalls = [...debuggerState.model.calls.values()].sort(
+    (left, right) => left.enterSequence - right.enterSequence,
+  );
+  const stride = Math.max(1, Math.ceil(allCalls.length / 480));
+  const spans = allCalls
+    .filter(
+      (candidate, candidateIndex) =>
+        candidateIndex % stride === 0 ||
+        candidate.id === selectedCallId ||
+        activePath.has(candidate.id),
+    )
+    .map((candidate) => {
+      const span = executionTimelineSpan(candidate, events);
+      if (!span) return "";
+      const left = executionTimelinePosition(span.start, events.length);
+      const right = executionTimelinePosition(span.end, events.length);
+      const width = Math.max(0.28, right - left);
+      const depth = Math.min(executionTimelineCallDepth(candidate), 3);
+      const classes = [
+        "execution-timeline-span",
+        candidate.id === selectedCallId ? "selected" : "",
+        activePath.has(candidate.id) ? "on-path" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      return `<span
+        class="${classes}"
+        data-timeline-call="${escapeHtml(candidate.id)}"
+        style="--timeline-left:${left.toFixed(3)}%;--timeline-width:${width.toFixed(3)}%;--timeline-depth:${depth}"
+        title="${escapeHtml(candidate.label)}"
+      ></span>`;
+    })
+    .join("");
+  const playhead = executionTimelinePosition(index, events.length);
+  const moduleName =
+    event &&
+    (state.project?.documents.find((document) => document.path === event.path)
+      ?.module || event.path);
+  const breadcrumb = call
+    ? debugCallBreadcrumb(call)
+        .map((ancestor) =>
+          ancestor.kind === "root" ? "Program" : ancestor.label,
+        )
+        .join(" › ")
+    : hasOccurrence
+      ? "Program"
+      : "Selected code";
+  return `<section class="execution-timeline${debuggerState.stale || debuggerState.provisional ? " stale" : ""}" data-execution-timeline aria-label="Execution timeline">
+    <div class="execution-timeline-meta">
+      <strong data-execution-mode-label>Execution</strong>
+      <span><b data-execution-index>${hasOccurrence ? index + 1 : "–"}</b> of ${events.length}<i data-execution-here>${cursorExecutionCount ? ` · ${cursorExecutionCount} here` : ""}</i></span>
+    </div>
+    <div class="execution-timeline-content">
+      <div class="execution-timeline-head">
+        <span class="execution-timeline-stack" data-execution-stack>${escapeHtml(breadcrumb)}</span>
+        <span class="execution-timeline-location" data-execution-location>${event ? `${escapeHtml(executionEventDescription(event))} · ${escapeHtml(moduleName)}:${event.line}` : "No execution reached the selected code"}</span>
+      </div>
+      <div class="execution-timeline-track">
+        <div class="execution-timeline-spans" aria-hidden="true">${spans}</div>
+        <div class="execution-timeline-rail" aria-hidden="true"></div>
+        <div class="execution-timeline-matches" data-execution-matches aria-hidden="true">${renderExecutionTimelineMatches(events)}</div>
+        <div class="execution-timeline-playhead" data-execution-playhead style="left:${playhead.toFixed(3)}%;${hasOccurrence ? "" : "opacity:0"}" aria-hidden="true"></div>
+        <input
+          type="range"
+          min="0"
+          max="${events.length - 1}"
+          step="1"
+        value="${index}"
+        data-execution-scrubber
+        ${debuggerState.stale ? "disabled" : ""}
+        aria-label="Execution event"
+          aria-valuetext="${escapeHtml(event ? `${index + 1} of ${events.length}: ${executionEventDescription(event)}` : "No execution selected")}"
+        />
+      </div>
+    </div>
+  </section>`;
+}
+
+function refreshExecutionTimeline() {
+  const current = document.querySelector(".execution-timeline");
+  if (!current || state.view !== "document") return;
+  clearExecutionTimelineInteraction();
+  const template = document.createElement("template");
+  template.innerHTML = renderExecutionTimeline().trim();
+  const next = template.content.firstElementChild;
+  if (!next) return;
+  current.replaceWith(next);
+  bindExecutionTimelineEvents();
+}
+
+function updateExecutionTimelineDom(events = currentExecutionTimelineEvents()) {
+  if (!events.length) return;
+  const hasOccurrence = Number.isFinite(state.debugger?.focus?.eventIndex);
+  const index = Math.min(
+    Math.max(state.debugger?.focus?.eventIndex ?? 0, 0),
+    events.length - 1,
+  );
+  const event = hasOccurrence ? events[index] : null;
+  const call = executionCallForEvent(event);
+  const playhead = executionTimelinePosition(index, events.length);
+  const moduleName =
+    event &&
+    (state.project?.documents.find((document) => document.path === event.path)
+      ?.module || event.path);
+  const breadcrumb = call
+    ? debugCallBreadcrumb(call)
+        .map((ancestor) =>
+          ancestor.kind === "root" ? "Program" : ancestor.label,
+        )
+        .join(" › ")
+    : hasOccurrence
+      ? "Program"
+      : "Selected code";
+  const indexNode = document.querySelector("[data-execution-index]");
+  const stackNode = document.querySelector("[data-execution-stack]");
+  const locationNode = document.querySelector("[data-execution-location]");
+  const playheadNode = document.querySelector("[data-execution-playhead]");
+  const hereNode = document.querySelector("[data-execution-here]");
+  const scrubber = document.querySelector("[data-execution-scrubber]");
+  if (indexNode) indexNode.textContent = hasOccurrence ? String(index + 1) : "–";
+  if (hereNode) {
+    const count = executionSessionFocusExecutions(state.debugger).length;
+    hereNode.textContent = count
+      ? ` · ${count} here`
+      : "";
+  }
+  if (stackNode) stackNode.textContent = breadcrumb;
+  if (locationNode) {
+    locationNode.textContent = event
+      ? `${executionEventDescription(event)} · ${moduleName}:${event.line}`
+      : "No execution reached the selected code";
+  }
+  if (playheadNode) {
+    playheadNode.style.left = `${playhead.toFixed(3)}%`;
+    playheadNode.style.opacity = hasOccurrence ? "" : "0";
+  }
+  if (scrubber) {
+    scrubber.value = String(index);
+    scrubber.setAttribute(
+      "aria-valuetext",
+      event
+        ? `${index + 1} of ${events.length}: ${executionEventDescription(event)}`
+        : "No execution selected",
+    );
+  }
+  const activePath = new Set(
+    call ? debugCallBreadcrumb(call).map((ancestor) => ancestor.id) : [],
+  );
+  document.querySelectorAll("[data-timeline-call]").forEach((span) => {
+    span.classList.toggle(
+      "selected",
+      span.dataset.timelineCall === call?.id,
+    );
+    span.classList.toggle(
+      "on-path",
+      activePath.has(span.dataset.timelineCall),
+    );
+  });
+  document.querySelectorAll("[data-execution-match]").forEach((marker) => {
+    marker.classList.toggle(
+      "selected",
+      Number(marker.dataset.executionMatch) === index,
+    );
+  });
+}
+
+function updateExecutionTimelineMatchesDom(
+  events = currentExecutionTimelineEvents(),
+) {
+  const container = document.querySelector("[data-execution-matches]");
+  if (container) {
+    container.innerHTML = renderExecutionTimelineMatches(events);
+  }
+  const hereNode = document.querySelector("[data-execution-here]");
+  if (hereNode) {
+    const count = executionSessionFocusExecutions(state.debugger).length;
+    hereNode.textContent = count
+      ? ` · ${count} here`
+      : "";
+  }
+}
+
+function installTraceFocus(next, { refresh = true } = {}) {
+  if (!next) return false;
+  state.debuggerPreview = null;
+  if (next === state.debugger) {
+    noteFocusedExecution(next);
+    return false;
+  }
+  state.debugger = next;
+  noteFocusedExecution(next);
+  state.traceFocusGeneration += 1;
+  const session = currentSession();
+  if (session) session.debugger = state.debugger;
+  updateExecutionTimelineDom();
+  applyDebuggerProjection();
+  if (refresh) refreshInspector();
+  return true;
+}
+
+function selectTraceSite(cursor, site) {
+  if (!state.debugger) return false;
+  const position = cursor
+    ? { path: state.path, line: cursor.line, column: cursor.column }
+    : null;
+  const next = preferFocusedExecution(
+    executionSessionSelectSite(state.debugger, position, site),
+  );
+  if (
+    state.debugger.provisional &&
+    !executionSessionFocusExecutions(next).length
+  ) {
+    applyDebuggerProjection();
+    return false;
+  }
+  installTraceFocus(next);
+  return executionSessionFocusExecutions(state.debugger).length > 0;
+}
+
+async function revealExecutionEvent(
+  event,
+  {
+    allowDocumentChange = false,
+    history = "replace",
+    animate = false,
+    moveCursor = false,
+    focusGeneration = state.traceFocusGeneration,
+  } = {},
+) {
+  if (!event) return;
+  const generation = ++state.executionRevealGeneration;
+  if (event.path !== state.path) {
+    if (!allowDocumentChange) return;
+    const modulePath = state.project?.documents.find(
+      (document) => document.path === event.path,
+    )?.module;
+    if (
+      !modulePath ||
+      !(await loadDocument(modulePath, {
+        preserveDebugger: true,
+        history,
+        focus: "none",
+      })) ||
+      generation !== state.executionRevealGeneration ||
+      focusGeneration !== state.traceFocusGeneration ||
+      !state.debugger
+    ) {
+      return;
+    }
+    const sources = {
+      ...state.debugger.sources,
+      [state.path]: state.document.source,
+    };
+    state.debugger = {
+      ...state.debugger,
+      sources,
+      model: buildDebugCallModel(state.debugger, sources),
+    };
+    const session = currentSession();
+    if (session) session.debugger = state.debugger;
+    void loadExecutionSites(debuggerSnapshot());
+  }
+  if (
+    generation !== state.executionRevealGeneration ||
+    focusGeneration !== state.traceFocusGeneration ||
+    event.path !== state.path ||
+    !state.sourceEditorView
+  ) {
+    return;
+  }
+  const view = state.sourceEditorView;
+  if (moveCursor) {
+    const line = view.state.doc.line(
+      Math.min(Math.max(event.line, 1), view.state.doc.lines),
+    );
+    state.preserveTraceFocusForSelection = true;
+    view.dispatch({
+      selection: {
+        anchor: line.from + Math.min(event.column || 0, line.length),
+      },
+    });
+    queueMicrotask(() => {
+      state.preserveTraceFocusForSelection = false;
+    });
+  }
+  scrollMarkdownEditorTo(
+    view,
+    { line: event.line, column: event.column || 0 },
+    { animate },
+  );
+  applyDebuggerProjection();
+  refreshInspector();
+}
+
+function selectTraceEvent(
+  index,
+  { revealSource = true, allowDocumentChange = false } = {},
+) {
+  const events = currentExecutionTimelineEvents();
+  if (!events.length) return;
+  if (state.debugger?.stale) return;
+  const previousCallId = currentDebugCall()?.id || null;
+  installTraceFocus(executionSessionSelectEvent(state.debugger, index), {
+    refresh: !state.executionTimelineScrubbing,
+  });
+  const event = currentExecutionTimelineEvent();
+  const call = currentDebugCall();
+  if (
+    state.sourceEditorView &&
+    event.path === state.path
+  ) {
+    if (previousCallId !== call?.id) {
+      setMarkdownEditorDebugProjection(
+        state.sourceEditorView,
+        focusedProjectionForDebugCall(call),
+      );
+    }
+  }
+  if (revealSource) {
+    void revealExecutionEvent(event, {
+      allowDocumentChange,
+      moveCursor: !state.executionTimelineScrubbing,
+      focusGeneration: state.traceFocusGeneration,
+    });
+  }
+}
+
+function clearExecutionTimelineInteraction() {
+  state.executionTimelineCleanup?.();
+  state.executionTimelineCleanup = null;
+  state.executionTimelineScrubbing = false;
+  document
+    .querySelector(".main")
+    ?.classList.remove("timeline-following");
+  document
+    .querySelector("[data-execution-timeline]")
+    ?.classList.remove("scrubbing");
+  state.sourceEditorView?.dom.classList.remove(
+    "cm-timeline-scrubbing",
+  );
+}
+
+function disposeMountedEditors() {
+  clearExecutionTimelineInteraction();
+  if (state.completionPositionFrame !== null) {
+    cancelAnimationFrame(state.completionPositionFrame);
+    state.completionPositionFrame = null;
+  }
+  const sourceEditor = state.sourceEditorView;
+  if (sourceEditor) {
+    if (sourceEditor.doxModule === state.module) {
+      const session = currentSession();
+      if (session) {
+        session.editorState ??= sourceEditor.state;
+        session.scrollTop = sourceEditor.scrollDOM.scrollTop;
+      }
+    }
+    sourceEditor.destroy();
+    state.sourceEditorView = null;
+  }
+}
+
 function renderShell() {
+  disposeMountedEditors();
   const existingSidebar = app.querySelector(".sidebar");
   app.innerHTML = `
     <div
@@ -1006,6 +1615,7 @@ function renderShell() {
         <div class="pane-resizer pane-resizer-right" data-pane-resizer="inspector" role="separator" aria-label="Resize context pane" aria-orientation="vertical" tabindex="0"></div>
         <aside class="inspector">${renderInspector()}</aside>
       </div>
+      ${renderExecutionTimeline()}
       ${
         state.workspaceError
           ? `<footer class="statusbar status-error" aria-live="assertive">${escapeHtml(state.workspaceError)}</footer>`
@@ -2241,210 +2851,9 @@ function renderProject() {
     </section>`;
 }
 
-function selectedBlock() {
-  return state.document?.blocks.find((block) => block.id === state.selected);
-}
-
-function traceOccurrences() {
-  const occurrences = new Map();
-  const events = state.traceContext?.traces?.length
-    ? state.traceContext.traces
-    : state.evaluation?.traces || [];
-  for (const event of events) {
-    const occurrence = occurrences.get(event.occurrenceId) || {
-      occurrenceId: event.occurrenceId,
-      children: [],
-      parameters: [],
-    };
-    if (event.phase === "enter") {
-      Object.assign(occurrence, event, { enterSequence: event.sequence });
-    } else if (event.phase === "parameter") {
-      occurrence.parameters.push({
-        name: event.label,
-        type: event.type,
-        value: event.detail,
-        sequence: event.sequence,
-      });
-    } else {
-      occurrence.outcome = event.phase;
-      occurrence.detail = event.detail;
-      occurrence.endSequence = event.sequence;
-      occurrence.type = event.type || occurrence.type;
-    }
-    occurrences.set(event.occurrenceId, occurrence);
-  }
-  const roots = [];
-  for (const occurrence of occurrences.values()) {
-    const parent = occurrence.parentId
-      ? occurrences.get(occurrence.parentId)
-      : null;
-    occurrence.parent = parent;
-    if (parent) parent.children.push(occurrence);
-    else roots.push(occurrence);
-  }
-  const bySequence = (left, right) =>
-    (left.enterSequence ?? Number.MAX_SAFE_INTEGER) -
-    (right.enterSequence ?? Number.MAX_SAFE_INTEGER);
-  roots.sort(bySequence);
-  for (const occurrence of occurrences.values()) {
-    occurrence.children.sort(bySequence);
-    occurrence.parameters.sort(
-      (left, right) => (left.sequence ?? 0) - (right.sequence ?? 0),
-    );
-  }
-  return { roots, occurrences };
-}
-
-function sourceTextForTrace(trace) {
-  if (!state.document || trace.path !== state.path) return "";
-  const lines = state.document.source.split("\n");
-  const start = lines[trace.line - 1] || "";
-  if (trace.line === trace.endLine) {
-    return start.slice(trace.column, trace.endColumn);
-  }
-  const middle = lines.slice(trace.line, trace.endLine - 1);
-  const end = (lines[trace.endLine - 1] || "").slice(0, trace.endColumn);
-  return [start.slice(trace.column), ...middle, end].join("\n");
-}
-
-function traceLabel(trace) {
-  if (trace.kind !== "expression") return trace.label;
-  const source = sourceTextForTrace(trace).trim();
-  if (source.startsWith("@(") && source.endsWith(")")) {
-    return source.slice(2, -1).trim();
-  }
-  return source || trace.label;
-}
-
-function flattenTraceNodes(nodes, depth = 0) {
-  return nodes.flatMap((trace) => [
-    { trace, depth },
-    ...flattenTraceNodes(trace.children, depth + 1),
-  ]);
-}
-
-function traceParameterSummary(trace) {
-  if (trace.kind !== "function" || !trace.parameters?.length) return "";
-  return trace.parameters
-    .map((parameter) => `${parameter.name}=${parameter.value}`)
-    .join(" ");
-}
-
-function renderTraceNodes(nodes) {
-  return `<ol class="trace-list">${flattenTraceNodes(nodes)
-    .map(({ trace, depth }) => {
-      const selected = trace.occurrenceId === state.selectedTraceId;
-      const outcome = trace.outcome || "running";
-      const detail = trace.detail
-        ? `<span class="trace-result">${escapeHtml(trace.detail)}</span>`
-        : "";
-      return `<li class="trace-node">
-        <button class="trace-row ${selected ? "selected" : ""} ${outcome === "raise" ? "raised" : ""}" style="--trace-indent: ${Math.min(depth, 5) * 6}px" data-trace-occurrence="${escapeHtml(trace.occurrenceId)}">
-          <span class="trace-kind">${trace.kind === "function" ? "ƒ" : trace.kind === "expression" ? "@" : "·"}</span>
-          <span class="trace-label">${escapeHtml(traceLabel(trace))}${traceParameterSummary(trace) ? `<span class="trace-arguments"> ${escapeHtml(traceParameterSummary(trace))}</span>` : ""}</span>
-          ${detail}
-        </button>
-      </li>`;
-    })
-    .join("")}</ol>`;
-}
-
-function enclosingFunctionCall(trace) {
-  let current = trace;
-  while (current && current.kind !== "function") current = current.parent;
-  return current || null;
-}
-
-function observationsInCall(call) {
-  if (!call) return [];
-  const observations = [];
-  const visit = (trace) => {
-    if (trace.kind === "function") return;
-    if (trace.kind === "expression" || trace.kind === "binding") {
-      observations.push(trace);
-    }
-    trace.children.forEach(visit);
-  };
-  call.children.forEach(visit);
-  return observations;
-}
-
-function renderValueRows(rows, className = "") {
-  if (!rows.length) return "";
-  return `<div class="trace-values ${className}">${rows
-    .map(
-      ({ label, value, type }) =>
-        `<div class="trace-value-row">
-          <span>${escapeHtml(label)}</span>
-          <code title="${escapeHtml(type || "")}">${escapeHtml(value || "…")}</code>
-        </div>`,
-    )
-    .join("")}</div>`;
-}
-
-function renderTraceFocus(traceTree, selectedTrace, typeInfo) {
-  if (!traceTree.roots.length) return "";
-  if (!selectedTrace && typeInfo) {
-    return `<section class="trace-focus">
-      <div class="trace-focus-head">
-        <strong>${escapeHtml(typeInfo.expression)}</strong>
-        <span>cursor</span>
-      </div>
-      <code class="trace-focus-type">${escapeHtml(typeInfo.type)}</code>
-    </section>`;
-  }
-  if (!selectedTrace) {
-    return `<section class="trace-focus trace-focus-empty">
-      <span>Select a call or recorded value.</span>
-    </section>`;
-  }
-
-  const call = enclosingFunctionCall(selectedTrace);
-  const focusedCall = selectedTrace.kind === "function" ? selectedTrace : call;
-  const parameters = (focusedCall?.parameters || []).map((parameter) => ({
-    label: parameter.name,
-    value: parameter.value,
-    type: parameter.type,
-  }));
-  const observations =
-    selectedTrace.kind === "function"
-      ? observationsInCall(selectedTrace).map((observation) => ({
-          label: `@ ${traceLabel(observation)}`,
-          value: observation.detail,
-          type: observation.type,
-        }))
-      : [];
-  const result = selectedTrace.detail
-    ? `${selectedTrace.outcome === "raise" ? "raised" : "→"} ${selectedTrace.detail}`
-    : "";
-  const context =
-    selectedTrace.kind !== "function" && call
-      ? `in ${traceLabel(call)}${traceParameterSummary(call) ? ` · ${traceParameterSummary(call)}` : ""}`
-      : selectedTrace.kind;
-
-  return `<section class="trace-focus">
-    <div class="trace-focus-head">
-      <strong>${escapeHtml(traceLabel(selectedTrace))}</strong>
-      <span>${escapeHtml(context)}</span>
-    </div>
-    <div class="trace-focus-summary">
-      ${selectedTrace.type ? `<code class="trace-focus-type">${escapeHtml(selectedTrace.type)}</code>` : "<span></span>"}
-      ${result ? `<code class="trace-focus-result ${selectedTrace.outcome === "raise" ? "raised" : ""}">${escapeHtml(result)}</code>` : ""}
-    </div>
-    ${
-      selectedTrace.kind === "function"
-        ? `${renderValueRows(parameters, "trace-parameters")}${renderValueRows(observations, "trace-observations")}`
-        : call
-          ? renderValueRows(parameters, "trace-parameters")
-          : ""
-    }
-  </section>`;
-}
-
 function renderCompletion() {
   const completion = state.completion;
   if (!completion) return "";
-  const scope = completion.context || "Current scope";
   const rows = completion.items.length
     ? completion.items
         .map(
@@ -2453,6 +2862,8 @@ function renderCompletion() {
               class="completion-row${index === completion.selectedIndex ? " selected" : ""}"
               data-completion-index="${index}"
               type="button"
+              role="option"
+              aria-selected="${index === completion.selectedIndex}"
             >
               <span class="completion-name">${escapeHtml(item.name)}</span>
               <span class="completion-kind">${escapeHtml(item.kind.toLowerCase())}</span>
@@ -2461,14 +2872,83 @@ function renderCompletion() {
         )
         .join("")
     : `<p class="completion-empty">${completion.loading ? "Loading compiler completions…" : "No matching identifiers."}</p>`;
-  return `<section class="completion-section" aria-label="OCaml completions">
-    <div class="completion-head">
-      <h3>${escapeHtml(scope)}</h3>
-      ${completion.loading ? '<span class="completion-loading">updating</span>' : ""}
-    </div>
-    <div class="completion-list">${rows}</div>
-    <p class="completion-hint">↑↓ select · Tab or Enter insert · Esc close</p>
-  </section>`;
+  return `<div class="completion-list">${rows}</div>`;
+}
+
+function positionCompletionPopup() {
+  const popup = document.querySelector("#completion-popup");
+  const completion = state.completion;
+  const editor = state.sourceEditorView;
+  if (!popup || !completion || !editor) return;
+  const coordinates = editor.coordsAtPos(
+    Math.min(completion.to, editor.state.doc.length),
+  );
+  if (!coordinates) {
+    popup.hidden = true;
+    return;
+  }
+  popup.hidden = false;
+  const margin = 8;
+  const gap = 5;
+  const width = Math.min(360, Math.max(260, window.innerWidth - margin * 2));
+  const left = Math.min(
+    Math.max(coordinates.left, margin),
+    window.innerWidth - width - margin,
+  );
+  popup.style.width = `${width}px`;
+  popup.style.left = `${left}px`;
+  popup.style.top = `${coordinates.bottom + gap}px`;
+  popup.style.bottom = "auto";
+  popup.style.maxHeight = "none";
+  const availableBelow = window.innerHeight - coordinates.bottom - margin;
+  const availableAbove = coordinates.top - margin;
+  const preferredHeight = Math.min(popup.scrollHeight, 390);
+  if (availableBelow < Math.min(preferredHeight, 180) && availableAbove > availableBelow) {
+    popup.style.top = "auto";
+    popup.style.bottom = `${window.innerHeight - coordinates.top + gap}px`;
+    popup.style.maxHeight = `${Math.max(120, availableAbove - gap)}px`;
+  } else {
+    popup.style.maxHeight = `${Math.max(120, availableBelow - gap)}px`;
+  }
+}
+
+function scheduleCompletionPopupPosition() {
+  if (!state.completion || state.completionPositionFrame !== null) return;
+  state.completionPositionFrame = requestAnimationFrame(() => {
+    state.completionPositionFrame = null;
+    positionCompletionPopup();
+  });
+}
+
+function renderCompletionPopup() {
+  let popup = document.querySelector("#completion-popup");
+  if (!state.completion || !state.sourceEditorView) {
+    popup?.remove();
+    state.sourceEditorView?.contentDOM.setAttribute("aria-expanded", "false");
+    state.sourceEditorView?.contentDOM.removeAttribute("aria-controls");
+    return;
+  }
+  if (!popup) {
+    popup = document.createElement("div");
+    popup.id = "completion-popup";
+    popup.className = "completion-popup";
+    popup.setAttribute("role", "listbox");
+    popup.setAttribute("aria-label", "OCaml completions");
+    document.body.append(popup);
+  }
+  popup.innerHTML = renderCompletion();
+  popup.querySelectorAll("[data-completion-index]").forEach((button) => {
+    button.addEventListener("pointerdown", (event) => event.preventDefault());
+    button.addEventListener("click", () =>
+      acceptCompletion(Number(button.dataset.completionIndex)),
+    );
+  });
+  state.sourceEditorView.contentDOM.setAttribute("aria-expanded", "true");
+  state.sourceEditorView.contentDOM.setAttribute(
+    "aria-controls",
+    "completion-popup",
+  );
+  positionCompletionPopup();
 }
 
 function renderDependencyContext() {
@@ -2527,335 +3007,44 @@ function renderDefinitionPeek() {
   </section>`;
 }
 
-function sourceFunctionRange(source, call) {
-  const lines = source.split("\n");
-  const start = Math.min(Math.max(call.line || 1, 1), lines.length);
-  const definition = lines[start - 1] || "";
-  const definitionIndent = definition.match(/^ */)?.[0].length || 0;
-  let blockEnd = lines.length;
-  for (let number = start + 1; number <= lines.length; number += 1) {
-    const text = lines[number - 1];
-    if (
-      definition.startsWith("    ") &&
-      text.trim() &&
-      !text.startsWith("    ")
-    ) {
-      blockEnd = number - 1;
-      break;
-    }
-    if (/^```/.test(text.trim())) {
-      blockEnd = number - 1;
-      break;
-    }
-  }
-  let end = blockEnd;
-  for (let number = start + 1; number <= blockEnd; number += 1) {
-    const text = lines[number - 1];
-    if (!text.trim()) continue;
-    const indent = text.match(/^ */)?.[0].length || 0;
-    const content = text.trimStart();
-    if (
-      indent <= definitionIndent &&
-      /^(?:let|and|type|module|exception|class|external)\b/.test(content)
-    ) {
-      end = number - 1;
-      break;
-    }
-  }
-  while (end > start && !(lines[end - 1] || "").trim()) end -= 1;
-  return { start, end };
-}
-
-function traceEventOccurrences(events) {
-  const occurrences = new Map();
-  for (const event of events || []) {
-    const occurrence = occurrences.get(event.occurrenceId) || {
-      id: event.occurrenceId,
-      children: [],
-      parameters: [],
-    };
-    if (event.phase === "enter") {
-      Object.assign(occurrence, event, { enterSequence: event.sequence });
-    } else if (event.phase === "parameter") {
-      occurrence.parameters.push({
-        name: event.label,
-        type: event.type,
-        value: event.detail,
-        sequence: event.sequence,
-      });
-    } else {
-      occurrence.outcome = event.phase;
-      occurrence.value = event.detail;
-      occurrence.returnType = event.type;
-      occurrence.endSequence = event.sequence;
-    }
-    occurrences.set(event.occurrenceId, occurrence);
-  }
-  for (const occurrence of occurrences.values()) {
-    occurrence.rawParent = occurrence.parentId
-      ? occurrences.get(occurrence.parentId) || null
-      : null;
-    occurrence.rawParent?.children.push(occurrence);
-    occurrence.parameters.sort((left, right) => left.sequence - right.sequence);
-  }
-  return occurrences;
-}
-
-function localMatchesParameters(stop, parameters) {
-  return parameters.every((parameter) =>
-    stop.locals?.some(
-      (local) =>
-        local.name === parameter.name &&
-        (local.value === parameter.value ||
-          local.value?.includes(parameter.value) ||
-          parameter.value?.includes(local.value)),
-    ),
-  );
-}
-
-function nearestFunction(occurrence, calls) {
-  let parent = occurrence?.rawParent;
-  while (parent) {
-    if (parent.kind === "function") return calls.get(parent.id) || null;
-    parent = parent.rawParent;
-  }
-  return null;
-}
+const sourceFunctionRange = executionFunctionSourceRange;
 
 function buildDebugCallModel(debuggerPayload, sources) {
-  const timeline = debuggerPayload.timeline || [];
-  const occurrences = traceEventOccurrences(debuggerPayload.callEvents || []);
-  const calls = new Map();
-  const roots = new Map();
-  const rootFor = (path) => {
-    const id = `root:${path}`;
-    if (!roots.has(id)) {
-      roots.set(id, {
-        id,
-        kind: "root",
-        label:
-          state.project?.documents.find((document) => document.path === path)
-            ?.module || path,
-        path,
-        children: [],
-        parameters: [],
-      });
-    }
-    return roots.get(id);
-  };
-
-  const ordered = [...occurrences.values()]
-    .filter((occurrence) => occurrence.phase === "enter" && occurrence.kind === "function")
-    .sort((left, right) => left.enterSequence - right.enterSequence)
-    .map((occurrence) => {
-      const call = {
-        ...occurrence,
-        children: [],
-        values: [],
-        range: sources[occurrence.path]
-          ? sourceFunctionRange(sources[occurrence.path], occurrence)
-          : { start: occurrence.line, end: occurrence.line + 120 },
-      };
-      calls.set(call.id, call);
-      return call;
-    });
-
-  for (const call of ordered) {
-    const parent = nearestFunction(call, calls) || rootFor(call.path);
-    call.parent = parent;
-    parent.children.push(call);
-  }
-
-  let searchFrom = 0;
-  for (const call of ordered) {
-    const functionParent =
-      call.parent?.kind === "function" ? call.parent : null;
-    const minimumDepth = functionParent?.startStop?.frames?.length
-      ? functionParent.startStop.frames.length + 1
-      : 0;
-    const inBody = (stop) =>
-      stop.path === call.path &&
-      stop.line >= call.range.start &&
-      stop.line <= call.range.end &&
-      (stop.frames?.length || 0) >= minimumDepth;
-    let index = timeline.findIndex(
-      (stop, candidate) =>
-        candidate >= searchFrom &&
-        inBody(stop) &&
-        localMatchesParameters(stop, call.parameters),
-    );
-    if (index < 0) {
-      index = timeline.findIndex(
-        (stop, candidate) => candidate >= searchFrom && inBody(stop),
-      );
-    }
-    if (index < 0) {
-      index = timeline.findIndex(
-        (stop) =>
-          inBody(stop) && localMatchesParameters(stop, call.parameters),
-      );
-    }
-    call.startIndex = index;
-    if (index >= 0) {
-      call.startStop = timeline[index];
-      call.stackDepth = timeline[index].frames?.length || 0;
-      const previous = timeline[index - 1];
-      if (previous?.path === call.path) call.callsiteStop = previous;
-      const callsite = call.callsiteStop;
-      if (callsite) {
-        call.callsiteLine = callsite.line;
-        call.callsiteColumn = callsite.column;
-        call.callsiteKey = [
-          call.path,
-          callsite.line,
-          callsite.column,
-          call.label,
-        ].join(":");
-      }
-      searchFrom = index + 1;
-    }
-  }
-
-  for (let index = 0; index < ordered.length; index += 1) {
-    const call = ordered[index];
-    const nextOutside = ordered
-      .slice(index + 1)
-      .find(
-        (candidate) =>
-          candidate.enterSequence > (call.endSequence ?? call.enterSequence) &&
-          candidate.startIndex >= 0,
-      );
-    call.endIndex = nextOutside
-      ? Math.max(call.startIndex, nextOutside.startIndex - 1)
-      : timeline.length - 1;
-  }
-
-  for (const call of ordered) {
-    const source = sources[call.path];
-    const bindingParent =
-      call.rawParent?.kind === "binding" ? call.rawParent : null;
-    if (source && bindingParent) {
-      const lines = source.split("\n");
-      const start = Math.max(1, bindingParent.line || 1);
-      const end = Math.min(
-        lines.length,
-        bindingParent.endLine || bindingParent.line || start,
-      );
-      for (let line = start; line <= end; line += 1) {
-        const span = findIdentifierSpan(
-          source,
-          line,
-          call.label,
-          call.callsiteColumn || 0,
-        );
-        if (!span) continue;
-        call.callsiteLine = span.line;
-        call.callsiteColumn = span.column;
-        break;
-      }
-    }
-    if (source && call.callsiteLine) {
-      const span = findIdentifierSpan(
-        source,
-        call.callsiteLine,
-        call.label,
-        call.callsiteColumn || 0,
-      );
-      if (span) call.callsiteColumn = span.column;
-    }
-    if (call.callsiteLine) {
-      call.callsiteKey = [
-        call.path,
-        call.callsiteLine,
-        call.callsiteColumn || 0,
-        call.label,
-      ].join(":");
-    }
-  }
-
-  for (const occurrence of occurrences.values()) {
-    if (
-      occurrence.phase !== "enter" ||
-      occurrence.kind === "function" ||
-      occurrence.value === undefined
-    ) {
-      continue;
-    }
-    const owner = nearestFunction(occurrence, calls);
-    if (!owner) continue;
-    owner.values.push({
-      name: occurrence.label,
-      value: occurrence.value,
-      type: occurrence.returnType || occurrence.type,
-      line: occurrence.endLine || occurrence.line,
-      sequence: occurrence.enterSequence,
-    });
-  }
-
-  for (const call of ordered) {
-    const descendantRanges = call.children
-      .filter((child) => child.startIndex >= 0)
-      .map((child) => [child.startIndex, child.endIndex]);
-    const ownStops = [];
-    if (call.startIndex >= 0) {
-      for (let index = call.startIndex; index <= call.endIndex; index += 1) {
-        if (
-          descendantRanges.some(
-            ([start, end]) => index >= start && index <= end,
-          )
-        ) {
-          continue;
-        }
-        const stop = timeline[index];
-        if (
-          stop.path === call.path &&
-          stop.line >= call.range.start &&
-          stop.line <= call.range.end &&
-          (stop.frames?.length || 0) >= call.stackDepth
-        ) {
-          ownStops.push(stop);
-        }
-      }
-    }
-    call.ownStops = ownStops;
-  }
-
-  for (const root of roots.values()) {
-    root.children.sort((left, right) => left.enterSequence - right.enterSequence);
-  }
-  const callsBySite = new Map();
-  for (const call of ordered) {
-    if (!call.callsiteKey) continue;
-    if (!callsBySite.has(call.callsiteKey)) {
-      callsBySite.set(call.callsiteKey, []);
-    }
-    callsBySite.get(call.callsiteKey).push(call);
-  }
-  for (const call of ordered) {
-    const siblings = callsBySite.get(call.callsiteKey) || [call];
-    call.occurrenceSiblings = siblings;
-    call.occurrenceIndex = Math.max(0, siblings.indexOf(call));
-  }
-  return { calls, roots, occurrences };
+  return buildExecutionRecord(debuggerPayload.callEvents || [], {
+    rootLabel: (path) =>
+      state.project?.documents.find((document) => document.path === path)
+        ?.module || path,
+    rangeFor: (occurrence) =>
+      sources[occurrence.path]
+        ? sourceFunctionRange(sources[occurrence.path], occurrence)
+        : { start: occurrence.line, end: occurrence.line + 120 },
+  });
 }
 
 function findIdentifierSpan(source, lineNumber, name, preferredColumn = 0) {
   const line = source.split("\n")[lineNumber - 1] || "";
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const matcher = new RegExp(`\\b${escaped}\\b`, "g");
-  const matches = [...line.matchAll(matcher)];
-  if (!matches.length) return null;
-  const match = matches.reduce((best, candidate) =>
-    Math.abs((candidate.index || 0) - preferredColumn) <
-    Math.abs((best.index || 0) - preferredColumn)
-      ? candidate
-      : best,
+  const range = executionIdentifierRange(
+    line,
+    name,
+    preferredColumn,
   );
+  if (!range) return null;
   return {
     line: lineNumber,
-    column: match.index,
-    endColumn: match.index + name.length,
+    ...range,
   };
+}
+
+function findTracedIdentifierSpan(source, binding, fallbackLine) {
+  const lineNumber = binding.line || fallbackLine;
+  const line = source.split("\n")[lineNumber - 1] || "";
+  const range = executionTraceIdentifierRange(
+    line,
+    binding.name,
+    binding.column,
+    binding.endColumn,
+  );
+  return range ? { line: lineNumber, ...range } : null;
 }
 
 function debugResultType(type = "") {
@@ -2869,10 +3058,148 @@ function displayDebugValue(value, type = "") {
   return resultType ? `${resultType} value` : "value";
 }
 
-function callArguments(call) {
-  return (call.parameters || [])
-    .map((parameter) => displayDebugValue(parameter.value, parameter.type))
-    .join(" ");
+function singleLineDebugValue(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function abbreviatedDebugValue(value, limit) {
+  const text = singleLineDebugValue(value);
+  const characters = Array.from(text);
+  if (characters.length <= limit) return text;
+  if (limit < 7) return `${characters.slice(0, Math.max(1, limit - 1)).join("")}…`;
+  const tail = Math.min(6, Math.floor((limit - 1) / 3));
+  const head = limit - tail - 1;
+  return `${characters.slice(0, head).join("")}…${characters.slice(-tail).join("")}`;
+}
+
+function debugExecutionChoice(choice) {
+  const { call, event, outcomeEvent } = choice;
+  const expression =
+    call.kind === "root" &&
+    event?.kind !== "binding" &&
+    Boolean(state.debugger?.focus?.site);
+  const fullLabel = expression
+    ? executionSourceTextForSite(
+        state.document?.source || "",
+        state.debugger.focus.site,
+      ) || event.label || "expression"
+    : call.kind === "root"
+      ? "Program"
+      : call.label || "function";
+  const fullArguments = (call.parameters || []).map((parameter) =>
+    singleLineDebugValue(displayDebugValue(parameter.value, parameter.type)),
+  );
+  const fullResult = expression
+    ? singleLineDebugValue(
+        displayDebugValue(
+          outcomeEvent?.detail,
+          outcomeEvent?.type || event?.type,
+        ),
+      )
+    : call.kind === "root" || call.value === undefined
+      ? ""
+      : singleLineDebugValue(
+          displayDebugValue(call.value, call.returnType || call.type),
+        );
+  const label = abbreviatedDebugValue(fullLabel, expression ? 180 : 120);
+  const result = abbreviatedDebugValue(fullResult, 360);
+  const visibleArguments =
+    fullArguments.length > 8
+      ? [...fullArguments.slice(0, 7), `…+${fullArguments.length - 7}`]
+      : fullArguments;
+  const arguments_ = visibleArguments.map((argument) =>
+    abbreviatedDebugValue(argument, 360),
+  );
+  return {
+    label,
+    expression,
+    arguments_,
+    result,
+    raised: expression
+      ? outcomeEvent?.phase === "raise"
+      : call.outcome === "raise",
+    title:
+      call.kind === "root"
+        ? expression
+          ? `${fullLabel} ${outcomeEvent?.phase === "raise" ? "!" : "→"} ${fullResult || "…"}`
+          : fullLabel
+        : `${fullLabel}(${fullArguments.join(", ")}) ${call.outcome === "raise" ? "!" : "→"} ${fullResult || "…"}`,
+  };
+}
+
+function debugFocusedExpression(debuggerState = state.debugger) {
+  const focused = executionSessionFocusValue(debuggerState);
+  if (!focused) return null;
+  const source = debuggerState?.sources?.[state.path] || state.document?.source || "";
+  const expression =
+    focused.kind === "parameter" || focused.kind === "binding"
+      ? focused.label
+      : executionSourceTextForSite(source, debuggerState?.focus?.site) ||
+        focused.label ||
+        "expression";
+  const fullValue = singleLineDebugValue(
+    displayDebugValue(focused.value, focused.type),
+  );
+  const value = abbreviatedDebugValue(fullValue, 720);
+  return {
+    expression,
+    value,
+    fullValue,
+    type: singleLineDebugValue(focused.type),
+    raised: focused.outcome === "raise",
+    title: `${expression} ${focused.outcome === "raise" ? "!" : "→"} ${fullValue}${focused.type ? ` : ${focused.type}` : ""}`,
+  };
+}
+
+function debugValueAtEditorPosition(offset) {
+  const editor = state.sourceEditorView;
+  const debuggerState = state.debugger;
+  if (
+    !editor ||
+    debuggerState?.status !== "ready" ||
+    debuggerState.stale ||
+    !Number.isFinite(offset)
+  ) {
+    return null;
+  }
+  const line = editor.state.doc.lineAt(
+    Math.min(Math.max(offset, 0), editor.state.doc.length),
+  );
+  const position = {
+    path: state.path,
+    line: line.number,
+    column: offset - line.from,
+  };
+  const site = executionSiteAt(currentExecutionSites(), position, {
+    ...executionCursorProbe(line.text, position.column),
+    line: line.text,
+  });
+  if (!site || site.kind === "syntax") return null;
+  const hovered = executionSessionSelectSite(debuggerState, position, site);
+  const related = executionSessionFocusExecutions(hovered);
+  const choice = preferredChoiceForSession(
+    hovered,
+    related,
+  );
+  if (!choice) return null;
+  const focused = {
+    ...hovered,
+    focus: {
+      ...hovered.focus,
+      eventIndex: choice.eventIndex,
+    },
+  };
+  const summary = debugFocusedExpression(focused);
+  const range = hovered.focus?.range;
+  return summary && range?.path === state.path
+    ? {
+        ...summary,
+        line: range.line,
+        column: range.column,
+        endColumn: range.endColumn,
+        previewSession: focused,
+      }
+    : null;
 }
 
 function sourceIndent(lines, line) {
@@ -2880,43 +3207,20 @@ function sourceIndent(lines, line) {
   return Math.max(0, spaces - 4) + 2;
 }
 
-function debugActivityForPath(debuggerState, path) {
-  const activity = new Map();
-  const add = (line) => {
-    if (!line || line < 1) return;
-    const current = activity.get(line) || {
-      line,
-      count: 0,
-      exceptions: 0,
-    };
-    current.count += 1;
-    activity.set(line, current);
-  };
-  for (const stop of debuggerState?.timeline || []) {
-    if (stop.path === path) add(stop.line);
-  }
-  for (const call of debuggerState?.model?.calls?.values() || []) {
-    if (call.path !== path || call.outcome !== "raise") continue;
-    const line = call.callsiteLine || call.line;
-    const current = activity.get(line) || {
-      line,
-      count: 1,
-      exceptions: 0,
-    };
-    current.exceptions += 1;
-    activity.set(line, current);
-  }
-  return [...activity.values()].sort((left, right) => left.line - right.line);
-}
-
-function projectionForDebugCall(call) {
+function projectionForDebugCall(call, debuggerState = state.debugger) {
   if (!call || call.path !== state.path) return null;
   const source = state.document?.source || "";
   const lines = source.split("\n");
   if (call.kind === "root") {
+    const focusedEvents = debuggerState?.focus?.site
+      ? executionSessionFocusedEvents(debuggerState)
+      : [];
+    const projectedCall = focusedEvents.length
+      ? { ...call, ownOccurrences: focusedEvents }
+      : call;
     const links = [];
+    const annotations = [];
     const occupied = new Set();
-    const annotationGroups = new Map();
     const callsiteGroups = new Map();
     for (const child of call.children || []) {
       if (!child.callsiteKey || child.callsiteLine < 1) continue;
@@ -2927,18 +3231,46 @@ function projectionForDebugCall(call) {
     }
     for (const children of callsiteGroups.values()) {
       const child = children[0];
-      const callerFrame =
-        child.callsiteStop ||
-        child.startStop?.frames?.find(
-        (frame, index) => index > 0 && frame.path === call.path,
+      const callsiteLine = child.callsiteLine;
+      if (!callsiteLine || child.callsitePath !== call.path) continue;
+      const inlineResult = state.evaluation?.inlineResults?.some(
+        (result) =>
+          result.path === call.path &&
+          result.line === callsiteLine &&
+          (child.callsiteColumn || 0) >= result.columnStart &&
+          (child.callsiteColumn || 0) <= result.columnEnd,
       );
-      const callsiteLine = child.callsiteLine || callerFrame?.line;
-      if (!callsiteLine) continue;
+      if (
+        !inlineResult &&
+        children.length === 1 &&
+        child.value !== undefined
+      ) {
+        const returnedValue = displayDebugValue(
+          child.value,
+          child.returnType || child.type,
+        );
+        const annotationValue =
+          child.outcome === "raise"
+            ? `! ${returnedValue}`
+            : `→ ${returnedValue}`;
+        annotations.push({
+          line: callsiteLine,
+          indent: sourceIndent(lines, callsiteLine),
+          items: [
+            {
+              kind: child.outcome === "raise" ? "raise" : "return",
+              value: annotationValue,
+              fullValue: annotationValue,
+              type: debugResultType(child.returnType || child.type),
+            },
+          ],
+        });
+      }
       const span = findIdentifierSpan(
         source,
         callsiteLine,
         child.label,
-        child.callsiteColumn || callerFrame?.column || 0,
+        child.callsiteColumn || 0,
       );
       const key = span && `${span.line}:${span.column}:${span.endColumn}`;
       if (!span || occupied.has(key)) continue;
@@ -2949,45 +3281,29 @@ function projectionForDebugCall(call) {
         label: child.label,
         kind: "child",
       });
-      const result = displayDebugValue(
-        child.value,
-        child.returnType || child.type,
-      );
-      if (!annotationGroups.has(child.callsiteLine)) {
-        annotationGroups.set(child.callsiteLine, {
-          line: child.callsiteLine,
-          indent: sourceIndent(lines, child.callsiteLine),
-          items: [],
-        });
-      }
-      annotationGroups.get(child.callsiteLine).items.push({
-        kind: "call",
-        name: child.label,
-        value: `${callArguments(child)} → ${result}`.trim(),
-        type: child.returnType || child.type,
-        callId: child.id,
-        occurrenceIndex: 1,
-        occurrenceTotal: children.length,
-      });
     }
     return {
-      dimLines: [],
-      activity: debugActivityForPath(state.debugger, call.path),
-      annotations: [...annotationGroups.values()].sort(
-        (left, right) => left.line - right.line,
-      ),
+      activationRange: null,
+      activationInactiveRanges: [],
+      activeRanges: executionActiveRanges({
+        source,
+        call: projectedCall,
+        sites: currentExecutionSites(),
+      }),
+      inactiveRanges: executionNeverRunRanges({
+        source,
+        path: state.path,
+        events: debuggerState?.events || [],
+        sites: currentExecutionSites(),
+      }),
+      activity: [],
+      annotations,
       links,
     };
   }
   const range = sourceFunctionRange(source, call);
   call.range = range;
-  const executed = new Set(call.ownStops?.map((stop) => stop.line) || []);
-  executed.add(call.line);
-  const dimLines = [];
-  for (let number = range.start; number <= range.end; number += 1) {
-    const text = lines[number - 1] || "";
-    if (text.trim() && !executed.has(number)) dimLines.push(number);
-  }
+  const executed = call.executedLines || new Set([call.line]);
 
   const annotations = new Map();
   const addAnnotation = (line, item) => {
@@ -2999,63 +3315,27 @@ function projectionForDebugCall(call) {
           (existing) =>
             existing.kind === item.kind &&
             existing.name === item.name &&
-            existing.callId === item.callId,
+            existing.callId === item.callId &&
+            existing.column === item.column &&
+            existing.endColumn === item.endColumn,
         )
     ) {
       annotations.get(line).push(item);
     }
   };
-  for (const parameter of call.parameters || []) {
-    addAnnotation(call.line, {
-      ...parameter,
+  for (const binding of executionCallBindings(call)) {
+    if (binding.value === "<function>") continue;
+    const fullValue = displayDebugValue(binding.value, binding.type);
+    const span = findTracedIdentifierSpan(source, binding, call.line);
+    addAnnotation(binding.line || call.line, {
+      ...binding,
+      line: binding.line || call.line,
       kind: "value",
-      value: displayDebugValue(parameter.value, parameter.type),
+      value: fullValue,
+      fullValue,
+      column: span?.column,
+      endColumn: span?.endColumn,
     });
-  }
-  for (const value of call.values || []) {
-    addAnnotation(value.line, {
-      ...value,
-      kind: "value",
-      value: displayDebugValue(value.value, value.type),
-    });
-  }
-  const declared = new Map();
-  for (let number = range.start; number <= range.end; number += 1) {
-    const text = lines[number - 1] || "";
-    for (const match of text.matchAll(/\b(?:let|and)\s+(?:rec\s+)?@?([a-z_][\w']*)/g)) {
-      if (match[1] !== call.label) {
-        declared.set(match[1], { line: number, kind: "binding" });
-      }
-    }
-    const arrow = text.indexOf("->");
-    if (arrow >= 0) {
-      for (const match of text
-        .slice(0, arrow)
-        .matchAll(/\b([a-z_][\w']*)\b/g)) {
-        if (!["fun", "function", "when"].includes(match[1])) {
-          declared.set(match[1], { line: number, kind: "pattern" });
-        }
-      }
-    }
-  }
-  const seen = new Set(call.parameters?.map((parameter) => parameter.name));
-  for (const stop of call.ownStops || []) {
-    for (const local of stop.locals || []) {
-      if (
-        seen.has(local.name) ||
-        local.value === "<fun>" ||
-        !declared.has(local.name)
-      ) {
-        continue;
-      }
-      seen.add(local.name);
-      const declaration = declared.get(local.name);
-      addAnnotation(declaration?.line || stop.line, {
-        ...local,
-        kind: "value",
-        value: displayDebugValue(local.value, local.type),
-      });
-    }
   }
 
   const links = [];
@@ -3082,26 +3362,13 @@ function projectionForDebugCall(call) {
   }
   for (const children of childGroups.values()) {
     const child = children[0];
-    const callerFrame =
-      child.callsiteStop ||
-      child.startStop?.frames?.find(
-      (frame, index) =>
-        index > 0 &&
-        frame.path === call.path &&
-        frame.line >= range.start &&
-        frame.line <= range.end,
-      );
-    const fallbackStop = (call.ownStops || []).find((stop) => {
-      const text = lines[stop.line - 1] || "";
-      return new RegExp(`\\b${child.label}\\b`).test(text);
-    });
-    const line = child.callsiteLine || callerFrame?.line || fallbackStop?.line;
-    if (!line) continue;
+    const line = child.callsiteLine;
+    if (!line || child.callsitePath !== call.path) continue;
     const span = findIdentifierSpan(
       source,
       line,
       child.label,
-      child.callsiteColumn || callerFrame?.column || 0,
+      child.callsiteColumn || 0,
     );
     if (span) {
       const key = `${span.line}:${span.column}:${span.endColumn}`;
@@ -3112,19 +3379,6 @@ function projectionForDebugCall(call) {
         callId: child.id,
         label: child.label,
         kind: "child",
-      });
-      const result = displayDebugValue(
-        child.value,
-        child.returnType || child.type,
-      );
-      addAnnotation(span.line, {
-        kind: "call",
-        name: child.label,
-        value: `${callArguments(child)} → ${result}`.trim(),
-        type: child.returnType || child.type,
-        callId: child.id,
-        occurrenceIndex: 1,
-        occurrenceTotal: children.length,
       });
     }
   }
@@ -3137,22 +3391,62 @@ function projectionForDebugCall(call) {
     call.value,
     call.returnType || call.type,
   );
-  const duplicatesTailCall = (annotations.get(returnLine) || []).some(
-    (item) =>
-      item.kind === "call" &&
-      item.value.endsWith(`→ ${returnedValue}`),
-  );
-  if (call.value !== undefined && !duplicatesTailCall) {
+  if (call.value !== undefined) {
+    const annotationValue =
+      call.outcome === "raise"
+        ? `! ${returnedValue}`
+        : `→ ${returnedValue}`;
     addAnnotation(returnLine, {
       kind: call.outcome === "raise" ? "raise" : "return",
-      name: call.outcome === "raise" ? "raise" : "return",
-      value: returnedValue,
-      type: call.returnType || call.type,
+      value: annotationValue,
+      fullValue: annotationValue,
+      type: debugResultType(call.returnType || call.type),
     });
   }
+  const additionalRanges = [...annotations.entries()].flatMap(
+    ([line, items]) =>
+      items
+        .filter(
+          (item) =>
+            item.kind === "value" &&
+            Number.isFinite(item.column) &&
+            Number.isFinite(item.endColumn),
+        )
+        .map((item) => ({
+          startLine: line,
+          startColumn: item.column,
+          endLine: line,
+          endColumn: item.endColumn,
+        })),
+  );
+  const sites = currentExecutionSites();
+  const inactiveRanges = executionNeverRunRanges({
+    source,
+    path: state.path,
+    events: debuggerState?.events || [],
+    sites,
+  });
   return {
-    dimLines,
-    activity: debugActivityForPath(state.debugger, call.path),
+    activationRange: {
+      startLine: range.start,
+      endLine: range.end,
+      startColumn: range.startColumn,
+      endColumn: range.endColumn,
+    },
+    activationInactiveRanges: executionActivationInactiveRanges({
+      source,
+      call,
+      sites,
+      excludeRanges: inactiveRanges,
+    }),
+    activeRanges: executionActiveRanges({
+      source,
+      call,
+      sites,
+      additionalRanges,
+    }),
+    inactiveRanges,
+    activity: [],
     annotations: [...annotations.entries()]
       .sort(([left], [right]) => left - right)
       .map(([line, items]) => ({
@@ -3164,6 +3458,152 @@ function projectionForDebugCall(call) {
   };
 }
 
+function focusedProjectionForDebugCall(
+  call,
+  debuggerState = state.debugger,
+) {
+  const projection = projectionForDebugCall(call, debuggerState);
+  if (!projection) return null;
+  const position = state.cursorPosition
+    ? { path: state.path, ...state.cursorPosition }
+    : null;
+  const executionCount = executionSessionFocusExecutions(
+    debuggerState,
+  ).length;
+  const cursorFocus = executionFocusRangeAtPosition(
+    executionSessionFocusRange(debuggerState),
+    position,
+    executionCount,
+  );
+  const activeRanges = executionRangesWithFocus(
+    projection.activeRanges,
+    cursorFocus,
+    position,
+    executionCount,
+  );
+  const focused = {
+    ...projection,
+    activeRanges,
+    cursorFocus:
+      cursorFocus?.path === state.path ? cursorFocus : null,
+    cursorAnchor:
+      position?.path === state.path ? position : null,
+    cursorValue:
+      cursorFocus?.path === state.path
+        ? debugFocusedExpression(debuggerState)
+        : null,
+  };
+  if (position) {
+    console.assert(
+      executionCursorCoverageIsConsistent({
+        activeRanges,
+        inactiveRanges: projection.inactiveRanges,
+        activationInactiveRanges: projection.activationInactiveRanges,
+        position,
+        executionCount,
+      }),
+      "Execution coverage is inconsistent at the source cursor",
+      { position, executionCount, callId: call.id },
+    );
+  }
+  return focused;
+}
+
+function applyDebuggerProjection() {
+  const editor = state.sourceEditorView;
+  if (!editor) return;
+  const active = Boolean(state.debugger);
+  const debuggerReady = Boolean(
+    state.debugger?.status === "ready" &&
+      !state.debugger.stale &&
+      state.debugger.sources?.[state.path] === state.document?.source,
+  );
+  editor.dom.classList.toggle(
+    "cm-execution-lens",
+    active,
+  );
+  editor.dom.classList.toggle(
+    "cm-execution-lens-loading",
+    active && !debuggerReady,
+  );
+  editor.dom.classList.toggle(
+    "cm-execution-lens-provisional",
+    Boolean(state.debugger?.provisional),
+  );
+  if (!active) {
+    delete editor.dom.dataset.executionLensCall;
+    setMarkdownEditorDebugProjection(editor, null);
+    return;
+  }
+  if (!debuggerReady) {
+    delete editor.dom.dataset.executionLensCall;
+    setMarkdownEditorDebugProjection(editor, null);
+    return;
+  }
+  const debuggerState = displayedDebuggerState();
+  const call = executionSessionCall(debuggerState);
+  if (!call) {
+    delete editor.dom.dataset.executionLensCall;
+    const inactiveRanges = executionNeverRunRanges({
+      source: state.document?.source || "",
+      path: state.path,
+      events: debuggerState?.events || [],
+      sites: currentExecutionSites(),
+    });
+    const position = state.cursorPosition
+      ? { path: state.path, ...state.cursorPosition }
+      : null;
+    if (position && state.debugger?.focus?.site) {
+      console.assert(
+        executionCursorCoverageIsConsistent({
+          activeRanges: [],
+          inactiveRanges,
+          position,
+          executionCount: 0,
+        }),
+        "Unreached source cursor is not globally faded",
+        { position, site: state.debugger.focus.site },
+      );
+    }
+    setMarkdownEditorDebugProjection(editor, {
+      activeRanges: [],
+      inactiveRanges,
+      annotations: [],
+      links: [],
+      activity: [],
+      cursorFocus: null,
+    });
+    return;
+  }
+  editor.dom.dataset.executionLensCall = call.id;
+  setMarkdownEditorDebugProjection(
+    editor,
+    focusedProjectionForDebugCall(call, debuggerState),
+  );
+}
+
+function debugCallLinkAtPosition(position) {
+  const editor = state.sourceEditorView;
+  const call = currentDebugCall();
+  if (!editor || !call || !Number.isFinite(position)) return null;
+  const sourceLine = editor.state.doc.lineAt(
+    Math.min(Math.max(position, 0), editor.state.doc.length),
+  );
+  const column = position - sourceLine.from;
+  return executionCallLinkAt(
+    projectionForDebugCall(call)?.links,
+    sourceLine.number,
+    column,
+  );
+}
+
+function navigateDebugCall(callId, position) {
+  const resolved = callId || debugCallLinkAtPosition(position);
+  if (!resolved) return false;
+  void showDebugCall(resolved, { scroll: true });
+  return true;
+}
+
 function debugCallBreadcrumb(call) {
   const calls = [];
   for (let current = call; current; current = current.parent) {
@@ -3172,466 +3612,117 @@ function debugCallBreadcrumb(call) {
   return calls.reverse();
 }
 
-function groupedChildCalls(call) {
-  const groups = new Map();
-  for (const child of call.children || []) {
-    const key = child.callsiteKey || child.id;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(child);
-  }
-  return [...groups.values()];
-}
-
-function traceAnchorAtPosition(editor, position) {
-  if (!editor || !state.path) return null;
-  const line = editor.state.doc.lineAt(position);
-  const column = position - line.from;
-  const tokens = [
-    ...line.text.matchAll(
-      /(?:[A-Z][A-Za-z0-9_']*(?:\.[A-Z_a-z][A-Za-z0-9_']*)*|[a-z_][A-Za-z0-9_']*|[-+*/=<>:@^|&!?~]+)/g,
-    ),
-  ];
-  const token =
-    tokens.find(
-      (candidate) =>
-        column >= candidate.index &&
-        column <= candidate.index + candidate[0].length,
-    ) || null;
-  return {
-    path: state.path,
-    line: line.number,
-    column,
-    label: token?.[0] || line.text.trim() || `Line ${line.number}`,
-  };
-}
-
-function traceOwnerCall(occurrence, model) {
-  for (let current = occurrence?.rawParent; current; current = current.rawParent) {
-    if (current.kind === "function") {
-      return model.calls.get(current.id) || null;
-    }
-  }
-  return null;
-}
-
-function traceFocusForAnchor(debuggerState, anchor) {
-  if (!debuggerState?.model || !anchor) return null;
-  const calls = [...debuggerState.model.calls.values()].filter(
-    (call) =>
-      call.path === anchor.path &&
-      (call.line === anchor.line || call.callsiteLine === anchor.line),
-  );
-  const bindings = [...debuggerState.model.occurrences.values()].filter(
-    (occurrence) =>
-      occurrence.phase === "enter" &&
-      occurrence.kind !== "function" &&
-      occurrence.path === anchor.path &&
-      (occurrence.line === anchor.line ||
-        occurrence.endLine === anchor.line) &&
-      occurrence.value !== undefined,
-  );
-  const visits = (debuggerState.timeline || []).filter(
-    (stop) => stop.path === anchor.path && stop.line === anchor.line,
-  );
-  const observations = [
-    ...calls.map((call) => ({
-      id: `call:${call.id}`,
-      callId: call.id,
-      label: call.label,
-      value: displayDebugValue(call.value, call.returnType || call.type),
-      type: call.returnType || call.type,
-      outcome: call.outcome,
-      sequence: call.enterSequence,
-    })),
-    ...bindings.map((occurrence) => {
-      const owner = traceOwnerCall(occurrence, debuggerState.model);
-      return {
-        id: `binding:${occurrence.id}`,
-        callId: owner?.id || null,
-        label: occurrence.label,
-        value: displayDebugValue(
-          occurrence.value,
-          occurrence.returnType || occurrence.type,
-        ),
-        type: occurrence.returnType || occurrence.type,
-        outcome: occurrence.outcome,
-        sequence: occurrence.enterSequence,
-      };
-    }),
-  ].sort((left, right) => left.sequence - right.sequence);
-  const distinct = new Map();
-  for (const observation of observations) {
-    const key = `${observation.outcome || "return"}:${observation.value}`;
-    const group = distinct.get(key) || {
-      ...observation,
-      count: 0,
-      calls: [],
-    };
-    group.count += 1;
-    if (observation.callId) group.calls.push(observation.callId);
-    distinct.set(key, group);
-  }
-  const numeric = observations
-    .map((observation) => Number(observation.value))
-    .filter(Number.isFinite);
-  return {
-    anchor,
-    calls,
-    bindings,
-    visits,
-    observations,
-    distinct: [...distinct.values()].sort(
-      (left, right) => right.count - left.count,
-    ),
-    count: observations.length || visits.length,
-    exceptions: observations.filter(
-      (observation) => observation.outcome === "raise",
-    ).length,
-    range:
-      numeric.length > 1
-        ? [Math.min(...numeric), Math.max(...numeric)]
-        : null,
-  };
-}
-
-function projectionForTraceAnchor(anchor) {
-  if (!state.debugger || (anchor && anchor.path !== state.path)) return null;
-  return {
-    dimLines: [],
-    annotations: [],
-    links: [],
-    activity: debugActivityForPath(
-      state.debugger,
-      anchor?.path || state.path,
-    ),
-  };
-}
-
-function traceSnapshot() {
-  return {
-    path: state.path,
-    anchor: state.traceAnchor ? { ...state.traceAnchor } : null,
-    callId: state.debugger?.selectedCallId || null,
-  };
-}
-
-function sameTraceSnapshot(left, right) {
-  return (
-    left?.path === right?.path &&
-    left?.callId === right?.callId &&
-    left?.anchor?.path === right?.anchor?.path &&
-    left?.anchor?.line === right?.anchor?.line &&
-    left?.anchor?.column === right?.anchor?.column
-  );
-}
-
-function recordTraceVisit(snapshot = traceSnapshot()) {
-  if (!snapshot) return;
-  const current = state.traceHistory[state.traceHistoryIndex];
-  if (sameTraceSnapshot(current, snapshot)) return;
-  state.traceHistory = state.traceHistory.slice(
-    0,
-    state.traceHistoryIndex + 1,
-  );
-  state.traceHistory.push(snapshot);
-  state.traceHistoryIndex = state.traceHistory.length - 1;
-}
-
-function showOutputProvenance({ id = "", line = 0 } = {}) {
-  if (!state.debugger || !state.sourceEditorView) return;
-  if (state.traceHistoryIndex < 0) recordTraceVisit();
-  const labels = new Set(
-    [
-      id,
-      id.replace(/[-_]?(result|output|value)$/i, ""),
-      id.split(/[-_]/)[0],
-    ].filter(Boolean),
-  );
-  const occurrence = [
-    ...state.debugger.model.occurrences.values(),
-  ].find(
-    (candidate) =>
-      candidate.path === state.path &&
-      candidate.phase === "enter" &&
-      labels.has(candidate.label),
-  );
-  const targetLine =
-    occurrence?.endLine || occurrence?.line || Number(line) || 0;
-  if (!targetLine) return;
-  state.traceAnchor = {
-    path: state.path,
-    line: targetLine,
-    column: occurrence?.column || 0,
-    label: occurrence?.label || id || `Line ${targetLine}`,
-  };
-  state.debugger.selectedCallId = null;
-  recordTraceVisit();
-  setMarkdownEditorDebugPosition(state.sourceEditorView, null);
-  setMarkdownEditorDebugProjection(
-    state.sourceEditorView,
-    projectionForTraceAnchor(state.traceAnchor),
-  );
-  const sourceLine = state.sourceEditorView.state.doc.line(
-    Math.min(targetLine, state.sourceEditorView.state.doc.lines),
-  );
-  state.suppressNextSelectionLookup = true;
-  state.sourceEditorView.dispatch({
-    selection: {
-      anchor:
-        sourceLine.from +
-        Math.min(state.traceAnchor.column, sourceLine.length),
-    },
-    scrollIntoView: true,
-  });
-  state.suppressNextSelectionLookup = false;
-  refreshInspector();
-}
-
-function traceLensControls() {
-  const canGoBack = state.traceHistoryIndex > 0;
-  const canGoForward =
-    state.traceHistoryIndex + 1 < state.traceHistory.length;
-  return `<div class="trace-lens-controls">
-    <div class="trace-history-controls" aria-label="Trace navigation history">
-      <button type="button" data-trace-history="-1" ${canGoBack ? "" : "disabled"} aria-label="Back in trace history">‹</button>
-      <button type="button" data-trace-history="1" ${canGoForward ? "" : "disabled"} aria-label="Forward in trace history">›</button>
-    </div>
-    <button type="button" class="trace-pin ${state.tracePinned ? "active" : ""}" data-trace-pin aria-pressed="${state.tracePinned}" title="${state.tracePinned ? "Follow the caret" : "Keep this trace focus"}">${state.tracePinned ? "Pinned" : "Pin"}</button>
-  </div>`;
-}
-
-function renderTraceAggregate(debuggerState) {
-  const focus = traceFocusForAnchor(debuggerState, state.traceAnchor);
-  if (!focus) return "";
-  const summary = [
-    focus.count
-      ? `${focus.count} occurrence${focus.count === 1 ? "" : "s"}`
-      : "Not executed",
-    focus.distinct.length > 1 ? `${focus.distinct.length} values` : "",
-    focus.range ? `${focus.range[0]}…${focus.range[1]}` : "",
-    focus.exceptions ? `${focus.exceptions} raised` : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const observations = focus.distinct.length
-    ? `<section class="trace-lens-section">
-        <h3>Observed</h3>
-        <div class="trace-value-groups">
-          ${focus.distinct
-            .slice(0, 8)
-            .map(
-              (group) =>
-                `<button type="button" ${group.calls[0] ? `data-debug-call="${escapeHtml(group.calls[0])}"` : "disabled"}>
-                  <code title="${escapeHtml(group.type || "")}">${escapeHtml(group.value)}</code>
-                  ${group.count > 1 ? `<span>${group.count}×</span>` : ""}
-                </button>`,
-            )
-            .join("")}
-        </div>
-      </section>`
-    : "";
-  const previousFocus = traceFocusForAnchor(
-    state.previousDebugger,
-    state.traceAnchor,
-  );
-  const runChange =
-    previousFocus &&
-    (previousFocus.count !== focus.count ||
-      previousFocus.distinct.length !== focus.distinct.length ||
-      previousFocus.exceptions !== focus.exceptions)
-      ? `<p class="trace-run-change" title="Compared with the previous execution">${previousFocus.count} → ${focus.count} occurrences${
-          previousFocus.distinct.length !== focus.distinct.length
-            ? ` · ${previousFocus.distinct.length} → ${focus.distinct.length} values`
-            : ""
-        }${
-          previousFocus.exceptions !== focus.exceptions
-            ? ` · ${previousFocus.exceptions} → ${focus.exceptions} raised`
-            : ""
-        }</p>`
-      : "";
-  const callGroups = new Map();
-  for (const call of focus.calls) {
-    const key = `${call.label}:${call.callsiteKey || call.line}`;
-    if (!callGroups.has(key)) callGroups.set(key, []);
-    callGroups.get(key).push(call);
-  }
-  const calls = callGroups.size
-    ? `<section class="trace-lens-section">
-        <h3>Calls</h3>
-        <div class="trace-call-groups">
-          ${[...callGroups.values()]
-            .map((group) => {
-              const call = group[0];
-              const outcomes = new Set(
-                group.map((item) =>
-                  displayDebugValue(
-                    item.value,
-                    item.returnType || item.type,
-                  ),
-                ),
-              );
-              return `<button type="button" data-debug-call="${escapeHtml(call.id)}">
-                <span>${escapeHtml(call.label)}</span>
-                <small>${group.length}× · ${outcomes.size} result${outcomes.size === 1 ? "" : "s"}</small>
-              </button>`;
-            })
-            .join("")}
-        </div>
-      </section>`
-    : "";
-  return `<section class="trace-lens ${debuggerState.stale ? "stale" : ""}">
-    ${traceLensControls()}
-    <div class="trace-lens-location">
-      <strong><code>${escapeHtml(focus.anchor.label)}</code></strong>
-      <span>${escapeHtml(summary)}</span>
-    </div>
-    ${
-      debuggerState.stale
-        ? '<button type="button" class="debugger-stale" data-debug-start>Code changed · refresh trace</button>'
-        : ""
-    }
-    ${runChange}
-    ${observations}
-    ${calls}
-    ${
-      !observations && !calls
-        ? '<p class="trace-lens-empty">No recorded activity at this source position.</p>'
-        : ""
-    }
-  </section>`;
-}
-
 function renderDebugger() {
-  if (!state.evaluation?.ok) return "";
-  if (state.debugging) {
-    if (state.debuggingBackground) return "";
+  if (!state.debugger) {
+    if (!state.evaluating) return "";
+    return `<section class="debugger-panel debugger-loading" aria-live="polite">
+      <span class="debugger-pulse"></span>
+      <span>Preparing execution…</span>
+    </section>`;
+  }
+  if (state.debugger.status === "loading") {
     return `<section class="debugger-panel debugger-loading" aria-live="polite">
       <span class="debugger-pulse"></span>
       <span>Reconstructing calls…</span>
     </section>`;
   }
   const debuggerState = state.debugger;
-  if (!debuggerState) {
-    return state.debugError
-      ? `<button type="button" class="debugger-stale" data-debug-start title="${escapeHtml(state.debugError)}">Trace unavailable · retry</button>`
-      : "";
+  if (debuggerState.status === "error") {
+    return `<button type="button" class="debugger-stale" data-debug-start title="${escapeHtml(debuggerState.error || "")}">Execution unavailable · retry</button>`;
   }
-  if (!debuggerState.selectedCallId) {
-    return renderTraceAggregate(debuggerState);
+  const siteIndex = currentExecutionSiteIndex();
+  if (siteIndex?.status === "loading" && !debuggerState.focus?.site) {
+    return `<section class="debugger-panel debugger-loading" aria-live="polite">
+      <span class="debugger-pulse"></span>
+      <span>Reading code…</span>
+    </section>`;
   }
-  const call =
-    debuggerState.model?.calls.get(debuggerState.selectedCallId) ||
-    debuggerState.model?.roots.get(debuggerState.selectedCallId);
-  if (!call) return "";
-  const breadcrumb = debugCallBreadcrumb(call)
-    .map(
-      (ancestor, index, path) =>
-        `<button type="button" data-debug-call="${escapeHtml(ancestor.id)}" ${index === path.length - 1 ? 'aria-current="page"' : ""}>${escapeHtml(ancestor.kind === "root" ? "Program" : ancestor.label)}</button>`,
-    )
-    .join('<span aria-hidden="true">›</span>');
-  const occurrenceSiblings = call.occurrenceSiblings || [call];
-  const occurrencePosition = (call.occurrenceIndex || 0) + 1;
-  const previousOccurrence =
-    occurrenceSiblings[call.occurrenceIndex - 1] || null;
-  const nextOccurrence =
-    occurrenceSiblings[call.occurrenceIndex + 1] || null;
-  const callValue = (candidate) =>
-    `${candidate?.outcome}:${displayDebugValue(
-      candidate?.value,
-      candidate?.returnType || candidate?.type,
-    )}`;
-  const previousChange =
-    occurrenceSiblings
-      .slice(0, call.occurrenceIndex)
-      .reverse()
-      .find((candidate) => callValue(candidate) !== callValue(call)) || null;
-  const nextChange =
-    occurrenceSiblings
-      .slice(call.occurrenceIndex + 1)
-      .find((candidate) => callValue(candidate) !== callValue(call)) || null;
-  const occurrenceNavigation =
-    call.kind !== "root" && occurrenceSiblings.length > 1
-      ? `<div class="debugger-occurrences" aria-label="Callsite occurrences">
-          <button type="button" data-debug-call="${escapeHtml(previousOccurrence?.id || "")}" ${previousOccurrence ? "" : "disabled"} aria-label="Previous occurrence">‹</button>
-          <span>${occurrencePosition} of ${occurrenceSiblings.length}</span>
-          <button type="button" data-debug-call="${escapeHtml(nextOccurrence?.id || "")}" ${nextOccurrence ? "" : "disabled"} aria-label="Next occurrence">›</button>
-        </div>`
-      : "";
-  const changeNavigation =
-    previousChange || nextChange
-      ? `<div class="debugger-changes" aria-label="Value changes">
-          <span>Change</span>
-          <button type="button" data-debug-call="${escapeHtml(previousChange?.id || "")}" ${previousChange ? "" : "disabled"} aria-label="Previous different result">‹</button>
-          <button type="button" data-debug-call="${escapeHtml(nextChange?.id || "")}" ${nextChange ? "" : "disabled"} aria-label="Next different result">›</button>
-        </div>`
-      : "";
-  const parameters = call.parameters?.length
-    ? `<section class="debugger-values">
-        <h3>Arguments</h3>
-        ${call.parameters
-          .map(
-            (parameter) => `<div class="debugger-value">
-              <span>${escapeHtml(parameter.name)}</span>
-              <code title="${escapeHtml(parameter.type)}">${escapeHtml(displayDebugValue(parameter.value, parameter.type))}</code>
-            </div>`,
-          )
-          .join("")}
-      </section>`
-    : "";
-  const result =
-    call.kind !== "root" && call.value !== undefined
-      ? `<div class="debugger-result ${call.outcome === "raise" ? "raised" : ""}">
-          <span>${call.outcome === "raise" ? "Raised" : "Returned"}</span>
-          <code title="${escapeHtml(call.returnType || call.type || "")}">${escapeHtml(displayDebugValue(call.value, call.returnType || call.type))}</code>
-        </div>`
-      : "";
-  const childGroups = groupedChildCalls(call);
-  const children = childGroups.length
-    ? `<section class="debugger-stack debugger-calls">
-        <h3>Calls from here</h3>
-        ${childGroups
-          .map(
-            (group) => {
-              const child = group[0];
-              const arguments_ = callArguments(child);
-              const value = displayDebugValue(
-                child.value,
-                child.returnType || child.type,
-              );
-              return `<button type="button" data-debug-call="${escapeHtml(child.id)}">
-              <span>${escapeHtml(child.label)}${arguments_ ? ` <small>${escapeHtml(arguments_)}</small>` : ""}</span>
-              <small>${group.length > 1 ? `${group.length} calls` : `${child.outcome === "raise" ? "raised " : "→ "}${escapeHtml(value)}`}</small>
-            </button>`;
-            },
-          )
-          .join("")}
-      </section>`
-    : "";
-  return `<section class="debugger-panel ${debuggerState.stale ? "stale" : ""}">
+  if (siteIndex?.status === "error" && !debuggerState.focus?.site) {
+    return `<section class="debugger-panel">
+      <button type="button" class="debugger-stale" data-debug-sites-retry title="${escapeHtml(siteIndex.error || "")}">Could not read code · retry</button>
+    </section>`;
+  }
+  const executions = executionSessionFocusExecutions(debuggerState);
+  const site = debuggerState.focus?.site || null;
+  const countLabel = `${executions.length} execution${executions.length === 1 ? "" : "s"}`;
+  const choices = executions
+    .map((choice) => {
+      const summary = debugExecutionChoice(choice);
+      const selected = choice.eventIndex === debuggerState.focus?.eventIndex;
+      if (choice.call.kind === "root") {
+        if (summary.expression) {
+          return `<button
+            type="button"
+            class="execution-choice${selected ? " selected" : ""}"
+            data-execution-choice="${choice.eventIndex}"
+            ${selected ? 'aria-current="true"' : ""}
+            title="${escapeHtml(summary.title)}"
+          >
+            <code class="execution-choice-expression">${highlightedOcaml(summary.label, "expression")}</code>
+            <span class="execution-choice-arrow ${summary.raised ? "raised" : ""}">${summary.raised ? "!" : "→"}</span>
+            <code class="execution-choice-result ${summary.raised ? "raised" : ""}">${highlightedOcaml(summary.result || "…")}</code>
+          </button>`;
+        }
+        return `<button
+          type="button"
+          class="execution-choice${selected ? " selected" : ""}"
+          data-execution-choice="${choice.eventIndex}"
+          ${selected ? 'aria-current="true"' : ""}
+          title="${escapeHtml(summary.title)}"
+        ><strong>${escapeHtml(summary.label)}</strong></button>`;
+      }
+      return `<button
+        type="button"
+        class="execution-choice${selected ? " selected" : ""}"
+        data-execution-choice="${choice.eventIndex}"
+        ${selected ? 'aria-current="true"' : ""}
+        title="${escapeHtml(summary.title)}"
+      >
+        <span class="execution-choice-call">
+          <strong>${escapeHtml(summary.label)}</strong><span>(</span><code>${highlightedOcaml(summary.arguments_.join(", "))}</code><span>)</span>
+        </span>
+        <span class="execution-choice-arrow ${summary.raised ? "raised" : ""}">${summary.raised ? "!" : "→"}</span>
+        <code class="execution-choice-result ${summary.raised ? "raised" : ""}">${highlightedOcaml(summary.result || "…")}</code>
+      </button>`;
+    })
+    .join("");
+  return `<section class="debugger-panel ${debuggerState.stale || debuggerState.provisional ? "stale" : ""}">
     <div class="debugger-head">
-      <nav class="debugger-breadcrumb" aria-label="Selected call">${breadcrumb}</nav>
-      ${traceLensControls()}
+      <div class="execution-choice-heading">
+        <strong>${site ? countLabel : "Executions"}</strong>
+        ${site ? `<span>line ${site.startLine}</span>` : ""}
+      </div>
     </div>
-    <div class="debugger-location">
-      <strong>${escapeHtml(call.label)}</strong>
-      ${call.kind === "root" ? "<span>Top-level execution</span>" : ""}
-    </div>
-    ${occurrenceNavigation}
-    ${changeNavigation}
-    ${
-      debuggerState.stale
-        ? '<button type="button" class="debugger-stale" data-debug-start>Code changed · reconstruct calls</button>'
-        : ""
-    }
-    ${parameters}
-    ${result}
-    ${children}
     ${
       debuggerState.truncated
-        ? '<p class="debugger-note">Execution capture was capped; later calls may be absent.</p>'
+        ? '<p class="debugger-note">Trace capture reached its limit; later executions are not shown.</p>'
         : ""
     }
+    ${
+      choices
+        ? `<div class="execution-choices" role="list" aria-label="Executions through the cursor">${choices}</div>`
+        : `<p class="debugger-note">${site ? "No execution reached this position." : "Place the cursor in executed OCaml code."}</p>`
+    }
   </section>`;
+}
+
+function highlightedOcaml(value, context = "value") {
+  const source = String(value ?? "");
+  const matcher =
+    /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|-?\b\d+(?:\.\d+)?\b|\b[A-Z][A-Za-z0-9_']*\b|[\[\]{}(),;:=|*+\-/<>@^]+|\b(?:true|false)\b)/g;
+  let result = "";
+  let offset = 0;
+  for (const match of source.matchAll(matcher)) {
+    result += escapeHtml(source.slice(offset, match.index));
+    const token = match[0];
+    let kind = "punctuation";
+    if (token.startsWith('"') || token.startsWith("'")) kind = "string";
+    else if (/^-?\d/.test(token)) kind = "number";
+    else if (/^(?:true|false|[A-Z])/.test(token)) kind = "constructor";
+    result += `<span class="ocaml-${context}-${kind}">${escapeHtml(token)}</span>`;
+    offset = match.index + token.length;
+  }
+  return result + escapeHtml(source.slice(offset));
 }
 
 function renderInspector() {
@@ -3643,24 +3734,15 @@ function renderInspector() {
       diagnostic.line === state.cursorPosition.line,
   );
   const diagnosticsHtml = diagnostics.length
-    ? `<section class="inspect-section"><h3>Diagnostics</h3>${diagnostics.map((diagnostic) => `<button class="diagnostic" data-diagnostic-line="${diagnostic.line || ""}">${diagnostic.line ? `Line ${diagnostic.line} · ` : ""}${escapeHtml(diagnostic.message)}</button>`).join("")}</section>`
-    : "";
-  if (state.completion) {
-    return `${renderCompletion()}${diagnosticsHtml}`;
-  }
-  if (state.debugging || state.debugger) {
-    return `
-      ${renderDebugger()}
-      ${diagnosticsHtml}
-    `;
+      ? `<section class="inspect-section"><h3>Diagnostics</h3>${diagnostics.map((diagnostic) => `<button class="diagnostic" data-diagnostic-line="${diagnostic.line || ""}">${diagnostic.line ? `Line ${diagnostic.line} · ` : ""}${escapeHtml(diagnostic.message)}</button>`).join("")}</section>`
+      : "";
+  if (state.debugger || state.evaluating || state.evaluation?.ok) {
+    return renderDebugger();
   }
   const typeInfo = state.typeInfo;
-  const traceTree = traceOccurrences();
-  const selectedTrace = traceTree.occurrences.get(state.selectedTraceId);
   return `
-    ${renderDebugger()}
     ${
-      typeInfo && !traceTree.roots.length
+      typeInfo
         ? `<section class="cursor-type">
             <h2 class="inspector-title"><code>${escapeHtml(typeInfo.expression)}</code></h2>
             <div class="type-card" data-source-line="${typeInfo.startLine}" data-source-column="${typeInfo.startColumn}">${escapeHtml(typeInfo.type)}</div>
@@ -3668,22 +3750,12 @@ function renderInspector() {
         : ""
     }
     ${renderDefinitionPeek()}
-    ${renderTraceFocus(traceTree, selectedTrace, typeInfo)}
-    ${
-      traceTree.roots.length
-        ? `<section class="inspect-section trace-section">
-            <h3>Execution</h3>
-            ${renderTraceNodes(traceTree.roots)}
-          </section>`
-        : ""
-    }
     ${diagnosticsHtml}
     ${renderDependencyContext()}
     ${
       !typeInfo &&
       !state.definitionInfo &&
-      !diagnostics.length &&
-      !traceTree.roots.length
+      !diagnostics.length
         ? '<p class="context-empty">Place the cursor on OCaml code to inspect its type.</p>'
         : ""
     }`;
@@ -3932,6 +4004,49 @@ function executionInvalidation(previous, next) {
   return inlineFrom === null ? null : { blockFrom: null, inlineFrom };
 }
 
+function executionLayoutChanged(previous, next) {
+  if (!previous || !next) return false;
+  const samePosition = (left, right) =>
+    left.lineStart === right.lineStart &&
+    left.lineEnd === right.lineEnd &&
+    left.line === right.line &&
+    left.columnStart === right.columnStart &&
+    left.columnEnd === right.columnEnd;
+  return (
+    previous.blocks.some((block, index) =>
+      next.blocks[index] ? !samePosition(block, next.blocks[index]) : true,
+    ) ||
+    previous.inline.some((item, index) =>
+      next.inline[index] ? !samePosition(item, next.inline[index]) : true,
+    )
+  );
+}
+
+function remapExecutionLine(line, previous, next) {
+  if (!Number.isFinite(line)) return line;
+  const blockIndex = previous.blocks.findIndex(
+    (block) => line >= block.lineStart && line <= block.lineEnd,
+  );
+  if (blockIndex >= 0 && next.blocks[blockIndex]) {
+    return line + next.blocks[blockIndex].lineStart - previous.blocks[blockIndex].lineStart;
+  }
+  const inlineIndex = previous.inline.findIndex((item) => item.line === line);
+  return inlineIndex >= 0 && next.inline[inlineIndex]
+    ? next.inline[inlineIndex].line
+    : line;
+}
+
+function remapExecutionEvents(events, path, previous, next) {
+  return (events || []).map((event) => {
+    if (event.path !== path) return event;
+    return {
+      ...event,
+      line: remapExecutionLine(event.line, previous, next),
+      endLine: remapExecutionLine(event.endLine, previous, next),
+    };
+  });
+}
+
 function preserveUnchangedBlockIdentity(draftBlocks, previousBlocks) {
   const used = new Set();
   const preservedIds = new Set();
@@ -3971,17 +4086,113 @@ function cancelPendingEvaluation() {
   state.evaluating = false;
 }
 
-function updateSource(source, { evaluate = true } = {}) {
+function projectDebuggerThroughEdit({
+  previousSource,
+  source,
+  changes,
+  provisional,
+  invalidation,
+  previousPlan,
+  nextPlan,
+}) {
+  const debuggerState = state.debugger;
+  state.debuggerPreview = null;
+  if (
+    !debuggerState ||
+    debuggerState.status !== "ready" ||
+    debuggerState.sources?.[state.path] !== previousSource ||
+    !changes?.mapPos
+  ) {
+    return false;
+  }
+  const draft = {
+    path: state.path,
+    previousSource,
+    source,
+    changes,
+  };
+  const draftMapping = createExecutionDraftMapping(draft);
+  const projectionPlan = debuggerState.draftPlan || previousPlan;
+  const callEvents = projectExecutionDraftEvents(
+    debuggerState.callEvents || [],
+    draft,
+    { invalidation, plan: projectionPlan, mapping: draftMapping },
+  );
+  const sources = {
+    ...debuggerState.sources,
+    [state.path]: source,
+  };
+  const siteIndex = debuggerState.siteIndexes?.[state.path];
+  const siteIndexes = {
+    ...debuggerState.siteIndexes,
+    [state.path]: siteIndex
+      ? {
+          ...siteIndex,
+          source,
+          sites: mapExecutionDraftSites(siteIndex.sites || [], draft, {
+            mapping: draftMapping,
+          }),
+        }
+      : siteIndex,
+  };
+  const events = executionTimelineEvents(
+    callEvents,
+    state.project?.documents.map((document) => document.path) || [],
+  );
+  let next = {
+    ...debuggerState,
+    source,
+    sources,
+    callEvents,
+    events,
+    model: buildDebugCallModel({ callEvents }, sources),
+    siteIndexes,
+    status: "ready",
+    stale: false,
+    provisional,
+    draftPlan: nextPlan,
+  };
+  next = preferFocusedExecution(
+    executionSessionReconcileFocus(next, debuggerState, {
+      mapAuthoritativeSelection: (anchor) =>
+        mapExecutionDraftEvent(anchor, draft, { mapping: draftMapping }),
+    }),
+  );
+  state.debugger = next;
+  const session = currentSession();
+  if (session) session.debugger = next;
+  state.sourceEditorView?.dom.classList.toggle(
+    "cm-execution-lens-provisional",
+    next.provisional,
+  );
+  applyDebuggerProjection();
+  refreshExecutionTimeline();
+  return true;
+}
+
+function updateSource(
+  source,
+  { evaluate = true, changes = null, previousSource = null } = {},
+) {
   invalidateTypeLookup();
   const draft = preserveUnchangedBlockIdentity(
     parseDraftBlocks(source),
     state.document.blocks,
   );
   const nextPlan = buildExecutionPlan(source, draft.blocks);
+  const previousPlan = state.evaluationPlan;
   const invalidation =
-    state.evaluation && state.evaluationPlan
-      ? executionInvalidation(state.evaluationPlan, nextPlan)
+    state.evaluation && previousPlan
+      ? executionInvalidation(previousPlan, nextPlan)
       : { blockFrom: 0, inlineFrom: 0 };
+  const effectiveInvalidation =
+    invalidation ||
+    ((state.evaluation && !state.evaluation.ok) || state.debugger?.provisional
+      ? { blockFrom: 0, inlineFrom: 0 }
+      : null);
+  const layoutChanged =
+    !invalidation && executionLayoutChanged(previousPlan, nextPlan);
+  const debuggerPreviousSource = previousSource ?? state.document.source;
   state.document = {
     ...state.document,
     source,
@@ -3991,6 +4202,15 @@ function updateSource(source, { evaluate = true } = {}) {
     ),
     issues: [],
   };
+  projectDebuggerThroughEdit({
+    previousSource: debuggerPreviousSource,
+    source,
+    changes,
+    provisional: Boolean(effectiveInvalidation),
+    invalidation: effectiveInvalidation,
+    previousPlan,
+    nextPlan,
+  });
   state.dirty = source !== state.savedSource;
   invalidateDependencyContext({ stale: state.dirty });
   if (!state.dirty && !state.dependency && state.module) {
@@ -4004,37 +4224,33 @@ function updateSource(source, { evaluate = true } = {}) {
     storeRecoveryDraft(session, source);
     scheduleAutosave(session);
   }
-  state.evaluationInvalidation = invalidation;
-  if (invalidation) {
-    state.traceContext = null;
-    state.selectedTraceId = null;
-    state.hoveredObservationSite = null;
-    state.debugController?.abort();
-    state.debugController = null;
-    state.debugging = false;
-    state.debuggingBackground = false;
-    if (state.debugger) {
-      state.debugger.stale = true;
-      state.debugger.selectedCallId = null;
-      setMarkdownEditorDebugPosition(state.sourceEditorView, null);
-      setMarkdownEditorDebugProjection(
-        state.sourceEditorView,
-        projectionForTraceAnchor(state.traceAnchor),
-      );
-    }
+  state.evaluationInvalidation = effectiveInvalidation;
+  if (effectiveInvalidation) {
+    applyDebuggerProjection();
   } else {
     cancelPendingEvaluation();
+    if (layoutChanged && state.evaluation?.traces) {
+      state.evaluation = {
+        ...state.evaluation,
+        traces: remapExecutionEvents(
+          state.evaluation.traces,
+          state.path,
+          previousPlan,
+          nextPlan,
+        ),
+      };
+    }
     state.evaluationPlan = nextPlan;
   }
   if (state.sourceEditorView && state.evaluation) {
     setMarkdownEditorResultInvalidation(
       state.sourceEditorView,
-      invalidation,
+      effectiveInvalidation,
     );
   }
   updateStatusOnly();
   refreshInspector();
-  if (evaluate && invalidation) {
+  if (evaluate && effectiveInvalidation) {
     scheduleEvaluation(source, { plan: nextPlan });
   }
 }
@@ -4117,7 +4333,11 @@ async function startTypeLookup() {
   }
 }
 
-function scheduleTypeLookup(editor, position) {
+function scheduleTypeLookup(
+  editor,
+  position,
+  { preserveTraceFocus = false } = {},
+) {
   clearTimeout(state.typeTimer);
   state.typePending = null;
   const generation = ++state.typeGeneration;
@@ -4131,32 +4351,43 @@ function scheduleTypeLookup(editor, position) {
   );
   state.cursorPosition = block ? cursor : null;
   state.typeInfo = null;
-  if (!state.tracePinned) {
-    const anchor = block ? traceAnchorAtPosition(editor, position) : null;
-    const changed =
-      anchor?.path !== state.traceAnchor?.path ||
-      anchor?.line !== state.traceAnchor?.line ||
-      anchor?.label !== state.traceAnchor?.label;
-    state.traceAnchor = anchor;
-    if (state.debugger) {
-      state.debugger.selectedCallId = null;
-      setMarkdownEditorDebugPosition(state.sourceEditorView, null);
-      setMarkdownEditorDebugProjection(
-        state.sourceEditorView,
-        projectionForTraceAnchor(anchor),
-      );
-    }
-    if (changed) {
-      state.traceHistory = [];
-      state.traceHistoryIndex = -1;
-    }
+  if (state.debugger && preserveTraceFocus) {
+    refreshInspector();
+    return;
   }
-  refreshInspector();
+  if (state.debugger?.stale) {
+    refreshInspector();
+    return;
+  }
   if (!block) {
     state.typePending = null;
+    if (state.debugger) selectTraceSite(null, null);
+    else refreshInspector();
     return;
   }
 
+  if (state.debugger) {
+    const siteIndex = currentExecutionSiteIndex();
+    if (siteIndex?.status !== "ready") {
+      applyDebuggerProjection();
+      refreshInspector();
+      return;
+    }
+    const probe = executionCursorProbe(line.text, cursor.column);
+    const staticRange = executionSiteAt(
+      currentExecutionSites(),
+      { path: state.path, line: cursor.line, column: probe.column },
+      {
+        purpose: probe.purpose,
+        events: state.debugger.events,
+        line: line.text,
+      },
+    );
+    selectTraceSite(state.cursorPosition, staticRange);
+    state.typePending = null;
+    return;
+  }
+  refreshInspector();
   const request = {
     generation,
     path: state.path,
@@ -4635,20 +4866,10 @@ function acceptCompletion(index = state.completion?.selectedIndex ?? 0) {
 }
 
 function handleCompletionKey(action) {
-  const completion = state.completion;
-  if (!completion) return false;
+  if (!state.completion) return false;
   if (action === "dismiss") return dismissCompletion();
   if (action === "accept") return acceptCompletion();
-  if (!completion.items.length) return false;
-  const delta = action === "previous" ? -1 : 1;
-  completion.selectedIndex =
-    (completion.selectedIndex + delta + completion.items.length) %
-    completion.items.length;
-  refreshInspector();
-  document
-    .querySelector(".completion-row.selected")
-    ?.scrollIntoView({ block: "nearest" });
-  return true;
+  return false;
 }
 
 function scheduleEvaluation(
@@ -4734,10 +4955,19 @@ function scheduleEvaluation(
         }
         return;
       }
+      const previousInvalidation = state.evaluationInvalidation;
+      const evaluationSucceeded = Boolean(payload.evaluation?.ok);
       state.document = payload.document;
       state.evaluation = payload.evaluation;
-      state.evaluationPlan = request.plan;
-      state.evaluationInvalidation = null;
+      if (evaluationSucceeded) {
+        state.evaluationPlan = request.plan;
+        state.evaluationInvalidation = null;
+      } else {
+        state.evaluationInvalidation = previousInvalidation || {
+          blockFrom: 0,
+          inlineFrom: 0,
+        };
+      }
       state.pendingEvaluation = null;
       state.evaluating = false;
       if (document.activeElement?.closest(".cm-editor")) {
@@ -4751,7 +4981,20 @@ function scheduleEvaluation(
       } else {
         render();
       }
-      void startDebugger({ background: true });
+      if (state.sourceEditorView && state.cursorPosition) {
+        scheduleTypeLookup(
+          state.sourceEditorView,
+          state.sourceEditorView.state.selection.main.head,
+        );
+      }
+      if (
+        evaluationSucceeded &&
+        (!state.debugger ||
+          state.debugger.provisional ||
+          state.debugger.sources?.[state.path] !== state.document.source)
+      ) {
+        void startDebugger({ background: true });
+      }
     } catch (error) {
       if (
         state.pendingEvaluation !== request ||
@@ -4916,6 +5159,10 @@ function mountEmbeddedEditors() {
   const documentParent = document.querySelector("[data-document-editor]");
   if (documentParent) {
     const session = currentSession();
+    const mountedModule = state.module;
+    const isCurrentDocument = () =>
+      state.module === mountedModule &&
+      state.sourceEditorView?.doxModule === mountedModule;
     state.sourceEditorView = mountMarkdownEditor(documentParent, {
       doc: state.document.source,
       editorState: session?.editorState || null,
@@ -4924,6 +5171,7 @@ function mountEmbeddedEditors() {
         state.project?.documents.map((document) => document.module) ||
         [],
       onWikiNavigate: async (modulePath) => {
+        if (!isCurrentDocument()) return;
         if (
           !state.project.documents.some(
             (document) => document.module === modulePath,
@@ -4941,22 +5189,33 @@ function mountEmbeddedEditors() {
       onSave: save,
       sourceMode: state.sourceMode,
       onDefinitionRequest: (position, mode) =>
-        requestDefinition(state.sourceEditorView, position, mode),
-      onDebugNavigate: (callId) => void showDebugCall(callId),
-      onOutputNavigate: showOutputProvenance,
+        isCurrentDocument()
+          ? requestDefinition(state.sourceEditorView, position, mode)
+          : false,
+      onDebugNavigate: (...args) => {
+        return isCurrentDocument() ? navigateDebugCall(...args) : false;
+      },
+      onDebugValueRequest: (position) =>
+        isCurrentDocument()
+          ? debugValueAtEditorPosition(position)
+          : null,
+      onDebugPreviewChange: (previewSession) => {
+        if (isCurrentDocument()) setDebuggerPreview(previewSession);
+      },
       onStateChange: (editorState) => {
-        const active = currentSession();
-        if (active) active.editorState = editorState;
+        const mountedSession = state.sessions.get(mountedModule);
+        if (mountedSession) mountedSession.editorState = editorState;
       },
-      onCompletionKey: handleCompletionKey,
-      onChange: (source) => {
-        updateSource(source);
+      onCompletionKey: (...args) =>
+        isCurrentDocument() ? handleCompletionKey(...args) : false,
+      onChange: (source, edit) => {
+        if (isCurrentDocument()) updateSource(source, edit);
       },
-      onSelectionChange: (position) => {
-        if (state.suppressNextSelectionLookup) {
-          state.suppressNextSelectionLookup = false;
-          return;
-        }
+      onSelectionChange: (
+        position,
+        { docChanged = false, input = false } = {},
+      ) => {
+        if (!isCurrentDocument()) return;
         const line = state.sourceEditorView?.state.doc.lineAt(position).number;
         const block = state.document.blocks.find(
           (item) => line >= item.lineStart && line <= item.lineEnd,
@@ -4965,16 +5224,27 @@ function mountEmbeddedEditors() {
           state.selected = block.id;
           state.selectedDefinitionName = null;
         }
-        state.selectedTraceId = null;
         if (state.suppressNextCompletionLookup) {
           state.suppressNextCompletionLookup = false;
-        } else {
+        } else if (input || (docChanged && state.completion)) {
           scheduleCompletion(state.sourceEditorView, position);
+        } else if (state.completion) {
+          invalidateCompletion();
+          refreshInspector();
         }
-        scheduleTypeLookup(state.sourceEditorView, position);
+        const preserveTraceFocus = state.preserveTraceFocusForSelection;
+        state.preserveTraceFocusForSelection = false;
+        scheduleTypeLookup(state.sourceEditorView, position, {
+          preserveTraceFocus,
+        });
         scheduleDefinitionLookup(state.sourceEditorView, position);
       },
       onBlur: () => {
+        if (!isCurrentDocument()) return;
+        if (state.completion) {
+          invalidateCompletion();
+          refreshInspector();
+        }
         if (
           !state.dirty ||
           !state.evaluationInvalidation
@@ -4990,6 +5260,7 @@ function mountEmbeddedEditors() {
         });
       },
     });
+    state.sourceEditorView.doxModule = state.module;
     if (session) {
       session.editorState = state.sourceEditorView.state;
       queueMicrotask(() => {
@@ -5003,68 +5274,45 @@ function mountEmbeddedEditors() {
       blocks: state.document.blocks,
       path: state.path,
     });
-    setMarkdownEditorDebugPosition(state.sourceEditorView, null);
-    const selectedCall =
-      state.debugger?.model?.calls.get(state.debugger.selectedCallId) ||
-      state.debugger?.model?.roots.get(state.debugger?.selectedCallId);
+    renderCompletionPopup();
+    const selectedCall = currentDebugCall();
     setMarkdownEditorDebugProjection(
       state.sourceEditorView,
-      projectionForDebugCall(selectedCall),
+      state.debugger
+        ? focusedProjectionForDebugCall(selectedCall)
+        : null,
     );
+    state.sourceEditorView.dom.classList.toggle(
+      "cm-execution-lens",
+      Boolean(state.debugger),
+    );
+    state.sourceEditorView.dom.classList.toggle(
+      "cm-execution-lens-stale",
+      Boolean(state.debugger?.stale),
+    );
+    state.sourceEditorView.dom.classList.toggle(
+      "cm-execution-lens-provisional",
+      Boolean(state.debugger?.provisional),
+    );
+    const restoredEditor = state.sourceEditorView;
+    const restoredPosition = restoredEditor.state.selection.main.head;
+    queueMicrotask(() => {
+      if (
+        state.sourceEditorView === restoredEditor &&
+        state.module === mountedModule
+      ) {
+        scheduleTypeLookup(restoredEditor, restoredPosition);
+      }
+    });
     if (state.evaluationInvalidation) {
       setMarkdownEditorResultInvalidation(
         state.sourceEditorView,
         state.evaluationInvalidation,
       );
     }
-    bindSourceObservationEvents(documentParent);
     return;
   }
   state.sourceEditorView = null;
-}
-
-function clearSourceTraceHover() {
-  document
-    .querySelectorAll(".trace-source-hover")
-    .forEach((row) => row.classList.remove("trace-source-hover"));
-}
-
-function applySourceTraceHover() {
-  clearSourceTraceHover();
-  const site = state.hoveredObservationSite;
-  if (!site) return;
-  for (const trace of traceOccurrences().occurrences.values()) {
-    if (
-      trace.path === site.path &&
-      trace.line === site.line &&
-      trace.column === site.column
-    ) {
-      document
-        .querySelector(
-          `[data-trace-occurrence="${CSS.escape(trace.occurrenceId)}"]`,
-        )
-        ?.classList.add("trace-source-hover");
-    }
-  }
-}
-
-function bindSourceObservationEvents(documentParent) {
-  documentParent.onpointerover = (event) => {
-    const marker = event.target.closest("[data-observation-line]");
-    if (!marker || !documentParent.contains(marker)) return;
-    state.hoveredObservationSite = {
-      path: state.path,
-      line: Number(marker.dataset.observationLine),
-      column: Number(marker.dataset.observationColumn),
-    };
-    applySourceTraceHover();
-  };
-  documentParent.onpointerout = (event) => {
-    const marker = event.target.closest("[data-observation-line]");
-    if (!marker || marker.contains(event.relatedTarget)) return;
-    state.hoveredObservationSite = null;
-    clearSourceTraceHover();
-  };
 }
 
 async function createDocument() {
@@ -5102,293 +5350,277 @@ function openSourceLine(line) {
   editor.focus();
 }
 
-function selectSourceSpan(trace) {
-  const editor = state.sourceEditorView;
-  if (!editor) return;
-  const startLine = editor.state.doc.line(
-    Math.min(Math.max(trace.line, 1), editor.state.doc.lines),
-  );
-  const endLine = editor.state.doc.line(
-    Math.min(Math.max(trace.endLine, 1), editor.state.doc.lines),
-  );
-  const anchor = startLine.from + Math.min(trace.column, startLine.length);
-  let head = endLine.from + Math.min(trace.endColumn, endLine.length);
-  if (
-    startLine.number === endLine.number &&
-    head <= anchor + 1 &&
-    (trace.kind === "function" || trace.kind === "binding")
-  ) {
-    const markerAndName = startLine.text
-      .slice(trace.column)
-      .match(/^@[a-zA-Z_][a-zA-Z0-9_']*/)?.[0];
-    if (markerAndName) head = anchor + markerAndName.length;
-  }
-  state.suppressNextSelectionLookup = true;
-  editor.dispatch({
-    selection: { anchor, head },
-    scrollIntoView: true,
-  });
-  state.suppressNextSelectionLookup = false;
-}
-
 async function showDebugCall(
   callId,
-  { scroll = true, recordHistory = true } = {},
+  { scroll = false } = {},
 ) {
   const debuggerState = state.debugger;
-  if (!debuggerState) return;
-  if (recordHistory && state.traceHistoryIndex < 0) {
-    recordTraceVisit();
-  }
-  const previousCall =
-    debuggerState.model.calls.get(debuggerState.selectedCallId) ||
-    debuggerState.model.roots.get(debuggerState.selectedCallId);
-  let call =
+  if (debuggerState?.status !== "ready" || debuggerState.stale) return;
+  const call =
     debuggerState.model.calls.get(callId) ||
     debuggerState.model.roots.get(callId);
   if (!call) return;
-  if (call.path !== state.path) {
-    const modulePath = state.project.documents.find(
-      (document) => document.path === call.path,
-    )?.module;
-    if (
-      !modulePath ||
-      !(await loadDocument(modulePath, {
-        preserveTrace: true,
-        preserveDebugger: true,
-        history: "push",
-      }))
-    ) {
-      return;
-    }
-    debuggerState.sources[state.path] = state.document.source;
-    debuggerState.model = buildDebugCallModel(
-      debuggerState,
-      debuggerState.sources,
-    );
-    call =
-      debuggerState.model.calls.get(callId) ||
-      debuggerState.model.roots.get(callId);
-    if (!call) return;
-  }
-  const sameSourceLocation =
-    previousCall?.kind !== "root" &&
-    previousCall?.path === call.path &&
-    previousCall?.line === call.line &&
-    previousCall?.column === call.column;
-  debuggerState.selectedCallId = callId;
-  state.traceAnchor = {
-    path: call.path,
-    line: call.line,
-    column: call.column || 0,
-    label: call.label,
-  };
-  if (recordHistory) recordTraceVisit();
-  refreshInspector();
+  const next = executionSessionSelectCall(debuggerState, callId);
+  installTraceFocus(next);
+  state.sourceEditorView?.dom.classList.add("cm-execution-lens");
   const inspector = document.querySelector(".inspector");
   if (inspector) inspector.scrollTop = 0;
-  setMarkdownEditorDebugPosition(state.sourceEditorView, null);
-  setMarkdownEditorDebugProjection(
-    state.sourceEditorView,
-    projectionForDebugCall(call),
-  );
-  if (scroll && call.kind !== "root" && state.sourceEditorView) {
-    const view = state.sourceEditorView;
-    const line = view.state.doc.line(
-      Math.min(Math.max(call.line, 1), view.state.doc.lines),
-    );
-    if (!sameSourceLocation) {
-      state.suppressNextSelectionLookup = true;
-      view.dispatch({
-        selection: {
-          anchor: line.from + Math.min(call.column || 0, line.length),
-        },
-        scrollIntoView: true,
-      });
-      state.suppressNextSelectionLookup = false;
-    }
+  if (scroll && call.kind !== "root") {
+    await revealExecutionEvent(executionSessionEvent(state.debugger), {
+      allowDocumentChange: true,
+      history: "push",
+      animate: true,
+      moveCursor: true,
+      focusGeneration: state.traceFocusGeneration,
+    });
   }
 }
 
-async function startDebugger({ background = false } = {}) {
+function installDebuggerPayload(payload, snapshot) {
   if (
-    state.debugging ||
-    !state.document ||
-    !state.evaluation?.ok ||
-    state.evaluationInvalidation
+    executionSnapshotKey(snapshot) !==
+    executionSnapshotKey(debuggerSnapshot())
   ) {
-    if (state.evaluationInvalidation) {
-      if (!background) {
-        toast("Wait for the current OCaml evaluation before debugging.");
-      }
-    }
-    return;
+    return false;
   }
-  state.debugController?.abort();
-  const controller = new AbortController();
-  state.debugController = controller;
-  state.debugging = true;
-  state.debuggingBackground = background;
-  state.debugError = null;
-  if (!background) refreshInspector();
-  try {
-    const payload = await api("/api/debug", {
-      method: "POST",
-      signal: controller.signal,
-      body: JSON.stringify({
-        path: state.path,
-        source: state.document.source,
-        baseProjectVersion: state.projectVersion,
-      }),
-    });
-    if (state.debugController !== controller) return;
-    const previousDebugger = state.debugger;
-    state.debugger = {
-      ...payload.debugger,
-      sources: { [state.path]: state.document.source },
-      stale: false,
-    };
-    state.debugger.model = buildDebugCallModel(
-      state.debugger,
-      state.debugger.sources,
-    );
-    state.previousDebugger = previousDebugger;
-    state.debugger.selectedCallId = null;
-    if (!state.traceAnchor || state.traceAnchor.path !== state.path) {
-      const editor = state.sourceEditorView;
-      state.traceAnchor = editor && state.cursorPosition
-        ? traceAnchorAtPosition(editor, editor.state.selection.main.head)
-        : null;
-    }
-    state.debugging = false;
-    state.debuggingBackground = false;
-    setMarkdownEditorDebugPosition(state.sourceEditorView, null);
-    setMarkdownEditorDebugProjection(
-      state.sourceEditorView,
-      projectionForTraceAnchor(state.traceAnchor),
-    );
-    refreshInspector();
-    state.debugController = null;
-  } catch (error) {
-    if (state.debugController !== controller || error.name === "AbortError") {
-      return;
-    }
-    state.debugging = false;
-    state.debuggingBackground = false;
-    state.debugController = null;
-    state.debugError = error.message;
-    if (!background) {
-      refreshInspector();
-      toast(error.message);
-    } else {
-      refreshInspector();
-    }
-  }
-}
-
-async function restoreTraceVisit(index) {
-  const snapshot = state.traceHistory[index];
-  if (!snapshot || !state.debugger) return;
-  if (snapshot.path !== state.path) {
-    const modulePath = state.project.documents.find(
-      (document) => document.path === snapshot.path,
-    )?.module;
-    if (
-      !modulePath ||
-      !(await loadDocument(modulePath, {
-        preserveTrace: true,
-        preserveDebugger: true,
-        history: "push",
-      }))
-    ) {
-      return;
-    }
-  }
-  state.traceHistoryIndex = index;
-  state.traceAnchor = snapshot.anchor;
-  if (snapshot.callId) {
-    await showDebugCall(snapshot.callId, {
-      recordHistory: false,
-    });
-    return;
-  }
-  state.debugger.selectedCallId = null;
-  setMarkdownEditorDebugPosition(state.sourceEditorView, null);
-  setMarkdownEditorDebugProjection(
-    state.sourceEditorView,
-    projectionForTraceAnchor(state.traceAnchor),
+  const pending = executionSessionMatches(state.debugger, snapshot)
+    ? state.debugger
+    : pendingExecutionSession(snapshot);
+  const sources = { [snapshot.path]: snapshot.source };
+  const model = buildDebugCallModel(payload.debugger, sources);
+  const events = executionTimelineEvents(
+    payload.debugger.callEvents || [],
+    state.project?.documents.map((document) => document.path) || [],
   );
-  refreshInspector();
+  state.debugger = preferFocusedExecution(
+    readyExecutionSession(pending, {
+      payload: payload.debugger,
+      model,
+      events,
+    }),
+  );
+  state.debuggerPreview = null;
+  const cachedSites = state.executionSitesCache.get(
+    executionSnapshotKey(snapshot),
+  )?.sites;
+  state.debugger.siteIndexes = {
+    ...state.debugger.siteIndexes,
+    [snapshot.path]: cachedSites
+      ? { status: "ready", source: snapshot.source, sites: cachedSites }
+      : { status: "loading", source: snapshot.source, sites: [] },
+  };
+  state.sourceEditorView?.dom.classList.remove(
+    "cm-execution-lens-stale",
+  );
+  state.sourceEditorView?.dom.classList.remove(
+    "cm-execution-lens-provisional",
+  );
+  applyDebuggerProjection();
+  const session = currentSession();
+  if (session) session.debugger = state.debugger;
+  refreshExecutionTimeline();
+  if (state.sourceEditorView) {
+    scheduleTypeLookup(
+      state.sourceEditorView,
+      state.sourceEditorView.state.selection.main.head,
+    );
+  } else {
+    applyDebuggerProjection();
+  }
+  return true;
 }
 
-async function openTrace(trace) {
-  if (!trace) return;
-  invalidateTypeLookup();
-  state.selectedTraceId = trace.occurrenceId;
-  if (state.debugger) {
-    let occurrence = state.debugger.model.occurrences.get(trace.occurrenceId);
-    while (occurrence && occurrence.kind !== "function") {
-      occurrence = occurrence.rawParent;
+async function loadExecutionSites(
+  snapshot = debuggerSnapshot(),
+  { attempt = 0 } = {},
+) {
+  if (!snapshot) return [];
+  const key = executionSnapshotKey(snapshot);
+  const cached = state.executionSitesCache.get(key);
+  if (cached?.sites) {
+    if (debuggerOwnsSnapshot(state.debugger, snapshot)) {
+      state.debugger = {
+        ...state.debugger,
+        siteIndexes: {
+          ...state.debugger.siteIndexes,
+          [snapshot.path]: {
+            status: "ready",
+            source: snapshot.source,
+            sites: cached.sites,
+          },
+        },
+      };
     }
-    if (occurrence && state.debugger.model.calls.has(occurrence.id)) {
-      await showDebugCall(occurrence.id);
-      return;
+    return cached.sites;
+  }
+  if (cached?.promise) return cached.promise;
+
+  if (debuggerOwnsSnapshot(state.debugger, snapshot)) {
+    state.debugger = {
+      ...state.debugger,
+      siteIndexes: {
+        ...state.debugger.siteIndexes,
+        [snapshot.path]: {
+          status: "loading",
+          source: snapshot.source,
+          sites: [],
+        },
+      },
+    };
+    if (snapshot.path === state.path) {
+      refreshInspector();
     }
   }
-  if (trace.path !== state.path) {
-    const context = state.evaluation?.traces?.length
-      ? state.evaluation
-      : state.traceContext;
-    const modulePath = state.project.documents.find(
-      (document) => document.path === trace.path,
-    )?.module;
-    if (
-      modulePath &&
-      (await loadDocument(modulePath, {
-        preserveTrace: true,
-        preserveDebugger: true,
-      }))
-    ) {
-      state.traceContext = context;
-      state.selectedTraceId = trace.occurrenceId;
-      refreshInspector();
-      selectSourceSpan(trace);
+  const promise = api("/api/execution-sites", {
+    method: "POST",
+    body: JSON.stringify({
+      path: snapshot.path,
+      source: snapshot.source,
+      baseProjectVersion: snapshot.projectVersion,
+    }),
+  })
+    .then((payload) => {
+      const sites = payload.sites || [];
+      state.executionSitesCache.set(key, { sites });
+      while (state.executionSitesCache.size > 8) {
+        state.executionSitesCache.delete(
+          state.executionSitesCache.keys().next().value,
+        );
+      }
+      if (debuggerOwnsSnapshot(state.debugger, snapshot)) {
+        state.debugger = {
+          ...state.debugger,
+          siteIndexes: {
+            ...state.debugger.siteIndexes,
+            [snapshot.path]: {
+              status: "ready",
+              source: snapshot.source,
+              sites,
+            },
+          },
+        };
+        const session = currentSession();
+        if (session) session.debugger = state.debugger;
+        if (
+          snapshot.path === state.path &&
+          state.sourceEditorView
+        ) {
+          scheduleTypeLookup(
+            state.sourceEditorView,
+            state.sourceEditorView.state.selection.main.head,
+          );
+        }
+      }
+      return sites;
+    })
+    .catch((error) => {
+      state.executionSitesCache.delete(key);
+      if (attempt < 2 && debuggerOwnsSnapshot(state.debugger, snapshot)) {
+        state.debugger = {
+          ...state.debugger,
+          siteIndexes: {
+            ...state.debugger.siteIndexes,
+            [snapshot.path]: {
+              status: "loading",
+              source: snapshot.source,
+              sites: [],
+            },
+          },
+        };
+        window.setTimeout(() => {
+          if (debuggerOwnsSnapshot(state.debugger, snapshot)) {
+            void loadExecutionSites(snapshot, { attempt: attempt + 1 });
+          }
+        }, 40 * (attempt + 1));
+        return [];
+      }
+      if (debuggerOwnsSnapshot(state.debugger, snapshot)) {
+        state.debugger = {
+          ...state.debugger,
+          siteIndexes: {
+            ...state.debugger.siteIndexes,
+            [snapshot.path]: {
+              status: "error",
+              source: snapshot.source,
+              sites: [],
+              error: error.message,
+            },
+          },
+        };
+        if (snapshot.path === state.path) {
+          refreshInspector();
+        }
+      }
+      return [];
+    });
+  state.executionSitesCache.set(key, { promise });
+  return promise;
+}
+
+async function startDebugger({
+  background = false,
+  snapshot = debuggerSnapshot(),
+} = {}) {
+  if (!state.document || !snapshot) return;
+  if (
+    debuggerMatchesSnapshot(state.debugger, snapshot) &&
+    state.debugger.status === "ready"
+  ) {
+    applyDebuggerProjection();
+    const siteIndex = state.debugger.siteIndexes?.[snapshot.path];
+    if (!siteIndex || siteIndex.status === "error") {
+      void loadExecutionSites(snapshot);
     }
     return;
   }
-  refreshInspector();
-  selectSourceSpan(trace);
+  if (!state.evaluation?.ok || state.evaluationInvalidation) {
+    if (!background && state.evaluationInvalidation) {
+      toast("Execution is updating for the current OCaml source.");
+    }
+    return;
+  }
+  state.debugger = pendingExecutionSession(snapshot, {
+    previous: state.debugger,
+  });
+  if (!background) refreshInspector();
+  installDebuggerPayload(
+    {
+      debugger: {
+        callEvents: state.evaluation.traces || [],
+        truncated: Boolean(state.evaluation.traceTruncated),
+        durationMs: state.evaluation.durationMs,
+        evaluationId: state.evaluation.evaluationId,
+      },
+    },
+    snapshot,
+  );
+  void loadExecutionSites(snapshot);
+  refreshInspector({ revealExecutionChoice: true });
 }
 
 function bindInspectorEvents() {
-  document.querySelectorAll("[data-debug-start]").forEach((button) => {
+  const inspector = document.querySelector(".inspector");
+  inspector?.querySelectorAll("[data-debug-start]").forEach((button) => {
     button.addEventListener("click", () => void startDebugger());
   });
-  document.querySelectorAll("[data-debug-call]").forEach((button) => {
+  inspector
+    ?.querySelector("[data-debug-sites-retry]")
+    ?.addEventListener("click", () =>
+      void loadExecutionSites(debuggerSnapshot()),
+    );
+  inspector?.querySelectorAll("[data-debug-call]").forEach((button) => {
     button.addEventListener("click", () =>
-      void showDebugCall(button.dataset.debugCall),
+      void showDebugCall(button.dataset.debugCall, { scroll: true }),
     );
   });
-  document.querySelector("[data-trace-pin]")?.addEventListener("click", () => {
-    state.tracePinned = !state.tracePinned;
-    if (!state.tracePinned && state.sourceEditorView) {
-      state.traceAnchor = traceAnchorAtPosition(
-        state.sourceEditorView,
-        state.sourceEditorView.state.selection.main.head,
-      );
-      if (state.debugger) state.debugger.selectedCallId = null;
-      setMarkdownEditorDebugProjection(
-        state.sourceEditorView,
-        projectionForTraceAnchor(state.traceAnchor),
-      );
-    }
-    refreshInspector();
-  });
-  document.querySelectorAll("[data-trace-history]").forEach((button) => {
+  inspector?.querySelectorAll("[data-execution-choice]").forEach((button) => {
     button.addEventListener("click", () => {
-      const index =
-        state.traceHistoryIndex + Number(button.dataset.traceHistory);
-      void restoreTraceVisit(index);
+      const eventIndex = Number(button.dataset.executionChoice);
+      if (!Number.isFinite(eventIndex)) return;
+      selectTraceEvent(eventIndex, { revealSource: false });
+      document
+        .querySelector(`[data-execution-choice="${eventIndex}"]`)
+        ?.focus({ preventScroll: true });
     });
   });
   document
@@ -5402,46 +5634,11 @@ function bindInspectorEvents() {
       }),
     );
   });
-  document.querySelectorAll("[data-completion-index]").forEach((button) => {
-    button.addEventListener("pointerdown", (event) => event.preventDefault());
-    button.addEventListener("click", () =>
-      acceptCompletion(Number(button.dataset.completionIndex)),
-    );
-  });
   document.querySelectorAll("[data-diagnostic-line]").forEach((diagnostic) => {
     diagnostic.addEventListener("click", () =>
       openSourceLine(Number(diagnostic.dataset.diagnosticLine)),
     );
   });
-  const traces = traceOccurrences().occurrences;
-  const clearTraceHover = () => {
-    document
-      .querySelectorAll(".trace-descendant-hover")
-      .forEach((row) => row.classList.remove("trace-descendant-hover"));
-  };
-  document.querySelectorAll("[data-trace-occurrence]").forEach((button) => {
-    const trace = traces.get(button.dataset.traceOccurrence);
-    button.addEventListener("click", () =>
-      openTrace(trace),
-    );
-    if (trace?.kind === "function") {
-      button.addEventListener("pointerenter", () => {
-        clearTraceHover();
-        const descendants = [...trace.children];
-        while (descendants.length) {
-          const descendant = descendants.shift();
-          document
-            .querySelector(
-              `[data-trace-occurrence="${CSS.escape(descendant.occurrenceId)}"]`,
-            )
-            ?.classList.add("trace-descendant-hover");
-          descendants.push(...descendant.children);
-        }
-      });
-      button.addEventListener("pointerleave", clearTraceHover);
-    }
-  });
-  applySourceTraceHover();
 }
 
 function paneWidthLimits(pane) {
@@ -5503,7 +5700,7 @@ function bindPaneResizers() {
       event.preventDefault();
     });
     separator.addEventListener("dblclick", () => {
-      setPaneWidth(pane, pane === "sidebar" ? 220 : 280, {
+      setPaneWidth(pane, pane === "sidebar" ? 160 : 340, {
         persist: true,
       });
     });
@@ -5517,6 +5714,119 @@ function bindPaneResizers() {
         { persist: true },
       );
       event.preventDefault();
+    });
+  });
+}
+
+function clampPaneWidths() {
+  if (window.matchMedia("(max-width: 1000px)").matches) return;
+  setPaneWidth("sidebar", state.paneWidths.sidebar);
+  setPaneWidth("inspector", state.paneWidths.inspector);
+  setPaneWidth("sidebar", state.paneWidths.sidebar);
+}
+
+function bindExecutionTimelineEvents() {
+  const scrubber = document.querySelector("[data-execution-scrubber]");
+  if (
+    !scrubber ||
+    scrubber.disabled ||
+    scrubber.dataset.bound === "true"
+  ) return;
+  clearExecutionTimelineInteraction();
+  scrubber.dataset.bound = "true";
+  const main = document.querySelector(".main");
+  const timeline = scrubber.closest("[data-execution-timeline]");
+  let pointerId = null;
+
+  const follow = (allowDocumentChange = false) => {
+    selectTraceEvent(scrubber.value, {
+      revealSource: true,
+      allowDocumentChange,
+    });
+  };
+  const seekToPointer = (event) => {
+    if (pointerId !== null && event.pointerId !== pointerId) return;
+    const bounds = scrubber.getBoundingClientRect();
+    const ratio = Math.min(
+      Math.max((event.clientX - bounds.left) / bounds.width, 0),
+      1,
+    );
+    scrubber.value = String(
+      Math.round(ratio * Number(scrubber.max || 0)),
+    );
+    follow(false);
+  };
+  const move = (event) => {
+    if (pointerId === null) return;
+    seekToPointer(event);
+  };
+  const cleanup = () => {
+    pointerId = null;
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    state.executionTimelineScrubbing = false;
+    main?.classList.remove("timeline-following");
+    timeline?.classList.remove("scrubbing");
+    state.sourceEditorView?.dom.classList.remove(
+      "cm-timeline-scrubbing",
+    );
+  };
+  const finish = (event) => {
+    if (
+      pointerId !== null &&
+      Number.isFinite(event?.pointerId) &&
+      event.pointerId !== pointerId
+    ) {
+      return;
+    }
+    cleanup();
+    if (state.executionTimelineCleanup === cleanup) {
+      state.executionTimelineCleanup = null;
+    }
+    follow(true);
+  };
+  state.executionTimelineCleanup = cleanup;
+
+  scrubber.addEventListener("pointerdown", (event) => {
+    if (pointerId !== null) return;
+    pointerId = event.pointerId;
+    state.executionTimelineScrubbing = true;
+    main?.classList.add("timeline-following");
+    timeline?.classList.add("scrubbing");
+    state.sourceEditorView?.dom.classList.add("cm-timeline-scrubbing");
+    scrubber.focus({ preventScroll: true });
+    seekToPointer(event);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    event.preventDefault();
+  });
+  scrubber.addEventListener("pointercancel", finish);
+  scrubber.addEventListener("input", () => follow(false));
+  scrubber.addEventListener("change", () => {
+    if (!state.executionTimelineScrubbing) follow(true);
+  });
+  scrubber.addEventListener("keydown", (event) => {
+    const current = Number(scrubber.value);
+    const maximum = Number(scrubber.max);
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? maximum
+          : event.key === "PageUp"
+            ? current - 10
+            : event.key === "PageDown"
+              ? current + 10
+              : event.key === "ArrowLeft" || event.key === "ArrowDown"
+                ? current - 1
+                : event.key === "ArrowRight" || event.key === "ArrowUp"
+                  ? current + 1
+                  : null;
+    if (next === null) return;
+    event.preventDefault();
+    selectTraceEvent(next, {
+      revealSource: true,
+      allowDocumentChange: true,
     });
   });
 }
@@ -5549,6 +5859,7 @@ function setSourceMode(mode) {
 function bindEvents() {
   mountOutlineEditor();
   bindPaneResizers();
+  bindExecutionTimelineEvents();
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => {
       state.view = button.dataset.view;
@@ -5616,24 +5927,42 @@ function bindEvents() {
   mountEmbeddedEditors();
 }
 
-function refreshInspector() {
+function refreshInspector({ revealExecutionChoice = false } = {}) {
   const inspector = document.querySelector(".inspector");
   if (inspector) {
+    const html = renderInspector();
+    if (
+      inspector.dataset.rendered === "true" &&
+      state.inspectorHtml === html
+    ) {
+      renderCompletionPopup();
+      if (revealExecutionChoice) {
+        inspector
+          .querySelector('[data-execution-choice][aria-current="true"]')
+          ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+      return;
+    }
     const scrollTop = inspector.scrollTop;
-    const focusedTrace =
-      document.activeElement?.dataset?.traceOccurrence || null;
-    inspector.innerHTML = renderInspector();
+    inspector.innerHTML = html;
+    inspector.dataset.rendered = "true";
+    state.inspectorHtml = html;
     inspector.scrollTop = scrollTop;
-    if (focusedTrace) {
+    if (revealExecutionChoice) {
       inspector
-        .querySelector(`[data-trace-occurrence="${CSS.escape(focusedTrace)}"]`)
-        ?.focus({ preventScroll: true });
+        .querySelector('[data-execution-choice][aria-current="true"]')
+        ?.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
   }
+  renderCompletionPopup();
   bindInspectorEvents();
 }
 
 initialize();
+
+window.addEventListener("resize", scheduleCompletionPopupPosition);
+window.addEventListener("resize", clampPaneWidths);
+document.addEventListener("scroll", scheduleCompletionPopupPosition, true);
 
 window.addEventListener("popstate", (event) => {
   state.navigationGeneration += 1;

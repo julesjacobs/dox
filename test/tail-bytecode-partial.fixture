@@ -1,0 +1,7 @@
+    let rec loop accumulator remaining =
+      if remaining = 0 then accumulator
+      else
+        let next = Sys.opaque_identity (loop (accumulator + 1)) in
+        next (remaining - 1)
+    let result = loop 0 100000
+    let () = print_endline (string_of_int result)
