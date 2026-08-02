@@ -66,8 +66,45 @@ let fence_info line =
     Some info
   else None
 
+let generic_fence_marker line =
+  let rec leading_spaces index =
+    if index < String.length line && index < 4 && line.[index] = ' ' then
+      leading_spaces (index + 1)
+    else index
+  in
+  let start = leading_spaces 0 in
+  if start > 3 || start >= String.length line then None
+  else
+    let marker = line.[start] in
+    if marker <> '`' && marker <> '~' then None
+    else
+      let rec count cursor =
+        if cursor < String.length line && line.[cursor] = marker then
+          count (cursor + 1)
+        else cursor - start
+      in
+      let length = count start in
+      if length >= 3 then Some (marker, length, start + length) else None
+
+let info_fields info =
+  let is_space = function ' ' | '\t' -> true | _ -> false in
+  let rec skip index =
+    if index < String.length info && is_space info.[index] then skip (index + 1)
+    else index
+  in
+  let rec take start index fields =
+    if index = String.length info || is_space info.[index] then
+      let fields = String.sub info start (index - start) :: fields in
+      let next = skip index in
+      if next = String.length info then List.rev fields
+      else take next next fields
+    else take start (index + 1) fields
+  in
+  let start = skip 0 in
+  if start = String.length info then [] else take start start []
+
 let name_from_info info =
-  let parts = String.split_on_char ' ' info in
+  let parts = info_fields info in
   List.find_map
     (fun part ->
       if Util.starts_with ~prefix:"name=" part then
@@ -81,7 +118,7 @@ let code_block_id info line =
   | None -> block_id "code" line
 
 let code_kind info =
-  match String.split_on_char ' ' info with
+  match info_fields info with
   | "ocaml" :: _ -> Some Program
   | "ocaml-example" :: _ -> Some Example
   | _ -> None
@@ -145,32 +182,66 @@ let parse_blocks source =
                 let code_buffer = Buffer.create 256 in
                 inside (line_number + 1) line_number info kind code_buffer
                   blocks issues rest
-            | None ->
-                Buffer.add_string prose_buffer line;
-                outside (line_number + 1) prose_start prose_buffer blocks issues
-                  false rest)
+            | None -> (
+                match generic_fence_marker line with
+                | Some (marker, length, _) ->
+                    Buffer.add_string prose_buffer line;
+                    inside_prose_fence (line_number + 1) prose_start prose_buffer
+                      blocks issues marker length rest
+                | None ->
+                    Buffer.add_string prose_buffer line;
+                    outside (line_number + 1) prose_start prose_buffer blocks
+                      issues false rest))
         | None -> (
-            match indented_code_line line with
-            | Some code_line when not list_context ->
-                let blocks =
-                  flush_prose prose_start (line_number - 1) prose_buffer blocks
-                in
-                let code_buffer = Buffer.create 256 in
-                Buffer.add_string code_buffer code_line;
-                inside_indented (line_number + 1) line_number code_buffer blocks
-                  issues rest
-            | Some _ | None ->
+            match generic_fence_marker line with
+            | Some (marker, length, _) ->
                 Buffer.add_string prose_buffer line;
-                let next_list_context =
-                  if String.equal (String.trim line) "" then false
-                  else if markdown_list_item line then true
-                  else
-                    list_context
-                    && (Util.starts_with ~prefix:"    " line
-                       || Util.starts_with ~prefix:"\t" line)
-                in
-                outside (line_number + 1) prose_start prose_buffer blocks issues
-                  next_list_context rest))
+                inside_prose_fence (line_number + 1) prose_start prose_buffer
+                  blocks issues marker length rest
+            | None -> (
+                match indented_code_line line with
+                | Some code_line when not list_context ->
+                    let blocks =
+                      flush_prose prose_start (line_number - 1) prose_buffer blocks
+                    in
+                    let code_buffer = Buffer.create 256 in
+                    Buffer.add_string code_buffer code_line;
+                    inside_indented (line_number + 1) line_number code_buffer
+                      blocks issues rest
+                | Some _ | None ->
+                    Buffer.add_string prose_buffer line;
+                    let next_list_context =
+                      if String.equal (String.trim line) "" then false
+                      else if markdown_list_item line then true
+                      else
+                        list_context
+                        && (Util.starts_with ~prefix:"    " line
+                           || Util.starts_with ~prefix:"\t" line)
+                    in
+                    outside (line_number + 1) prose_start prose_buffer blocks
+                      issues next_list_context rest)))
+  and inside_prose_fence line_number prose_start prose_buffer blocks issues
+      marker opening_length = function
+    | [] ->
+        outside line_number prose_start prose_buffer blocks issues false []
+    | line :: rest ->
+        Buffer.add_string prose_buffer line;
+        let closes =
+          match generic_fence_marker line with
+          | Some (candidate, length, after) ->
+              candidate = marker && length >= opening_length
+              && String.equal
+                   (String.sub line after (String.length line - after)
+                   |> String.trim)
+                   ""
+          | None -> false
+        in
+        if closes then
+          outside (line_number + 1) prose_start prose_buffer blocks issues false
+            rest
+        else
+          inside_prose_fence (line_number + 1) prose_start prose_buffer blocks
+            issues marker opening_length rest
   and inside line_number fence_line info kind code_buffer blocks issues =
     function
     | [] ->
@@ -517,33 +588,13 @@ let inline_expressions document =
         line_number >= position.line_start && line_number <= position.line_end)
       code_lines
   in
-  let fence_marker line =
-    let rec leading_spaces index =
-      if index < String.length line && index < 4 && line.[index] = ' ' then
-        leading_spaces (index + 1)
-      else index
-    in
-    let start = leading_spaces 0 in
-    if start > 3 || start >= String.length line then None
-    else
-      let marker = line.[start] in
-      if marker <> '`' && marker <> '~' then None
-      else
-        let rec count cursor =
-          if cursor < String.length line && line.[cursor] = marker then
-            count (cursor + 1)
-          else cursor - start
-        in
-        let length = count start in
-        if length >= 3 then Some (marker, length, start + length) else None
-  in
   let fence = ref None in
   String.split_on_char '\n' document.source
   |> List.iteri (fun offset line ->
       let line_number = offset + 1 in
       match !fence with
       | Some (marker, opening_length) -> (
-          match fence_marker line with
+          match generic_fence_marker line with
           | Some (candidate, length, after)
             when candidate = marker && length >= opening_length
                  && String.equal
@@ -553,7 +604,7 @@ let inline_expressions document =
               fence := None
           | _ -> ())
       | None -> (
-          match fence_marker line with
+          match generic_fence_marker line with
           | Some (marker, length, _) -> fence := Some (marker, length)
           | None ->
               if not (is_code_line line_number) then scan_line line_number line));
@@ -565,6 +616,24 @@ let program_source document =
     | Code { source; kind = Program; _ } -> Some source
     | _ -> None)
   |> String.concat "\n"
+
+let execution_identity_parts document =
+  let blocks =
+    document.blocks
+    |> List.filter_map (function
+      | Code { source; source_line; kind = Program; _ } ->
+          Some (source_line, 0, "block", source)
+      | _ -> None)
+  in
+  let inline =
+    inline_expressions document
+    |> List.map (fun (expression : inline_expression) ->
+        (expression.line, expression.column_start, "inline", expression.expression))
+  in
+  blocks @ inline
+  |> List.sort (fun (left_line, left_column, _, _) (right_line, right_column, _, _) ->
+      compare (left_line, left_column) (right_line, right_column))
+  |> List.map (fun (_, _, kind, source) -> (kind, source))
 
 let compilation_source document =
   document.blocks

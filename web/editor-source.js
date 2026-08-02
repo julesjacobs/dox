@@ -35,17 +35,10 @@ import {
   dropCursor,
   highlightActiveLine,
   keymap,
-  showTooltip,
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
-import { distributeDebugAnnotationRails } from "./debug-annotation-layout.mjs";
-import {
-  debugBindingHasVisibleTarget,
-  debugBindingKeysMatch,
-  debugHoverTooltipPosition,
-  debugValueTooltipGap,
-} from "./debug-hover.js";
 import { createDebugNavigationGate } from "./debug-navigation.js";
+import { executionAnnotationColumn } from "./execution-annotation-layout.js";
 import {
   indentOutlineSubtree,
   moveOutlineSibling,
@@ -66,131 +59,78 @@ const colors = {
 
 const setEditorMode = StateEffect.define();
 const setDebugProjection = StateEffect.define();
-const setDebugHoverRange = StateEffect.define();
 
-const debugAnnotationValueLimit = 360;
-
-function debugAnnotationDisplayValue(value) {
-  const fullValue = String(value ?? "");
-  const singleLine = fullValue.replace(/\s*\n\s*/g, " ");
-  const characters = Array.from(singleLine);
-  if (characters.length <= debugAnnotationValueLimit) {
-    return { value: singleLine, summarized: false };
-  }
-  return {
-    value: `${characters.slice(0, 272).join("")} … ${characters.slice(-80).join("")}`,
-    summarized: true,
-  };
-}
-
-function debugBindingKey(item) {
-  if (
-    item?.kind !== "value" ||
-    !Number.isFinite(item.line) ||
-    !Number.isFinite(item.column) ||
-    !Number.isFinite(item.endColumn)
-  ) {
-    return null;
-  }
+function debugAnnotationKey(item, sourceLine, order) {
   return [
-    item.path || "",
-    item.line,
-    item.column,
-    item.endColumn,
-    item.name || "",
+    "annotation",
+    sourceLine,
+    order,
+    item?.kind || "value",
+    item?.occurrenceId || "",
   ].join(":");
 }
 
 class DebugAnnotationsWidget extends WidgetType {
-  constructor(items, activity = null) {
+  constructor(items, sourceLine = 0, sourceLength = 0) {
     super();
     this.items = items;
-    this.activity = activity;
+    this.sourceLine = sourceLine;
+    this.sourceLength = sourceLength;
   }
 
   eq(other) {
     return (
       JSON.stringify(this.items) === JSON.stringify(other.items) &&
-      JSON.stringify(this.activity) === JSON.stringify(other.activity)
+      this.sourceLine === other.sourceLine &&
+      this.sourceLength === other.sourceLength
     );
   }
 
   toDOM() {
     const row = document.createElement("span");
     row.className = "cm-debug-annotations";
-    const orderedItems = this.items;
-    let lastValue = null;
-    orderedItems.forEach((item) => {
-      const value = document.createElement(
-        item.kind === "call" ? "button" : "span",
-      );
+    row.dataset.debugAnnotationSourceLine = String(this.sourceLine);
+    row.style.setProperty(
+      "--execution-annotation-column",
+      `${executionAnnotationColumn(this.sourceLength)}ch`,
+    );
+    const item = this.items[0];
+    if (item) {
+      const value = document.createElement("span");
       value.className = `cm-debug-annotation cm-debug-annotation-${item.kind || "value"}`;
-      const bindingKey = debugBindingKey(item);
-      if (bindingKey) {
-        value.classList.add("cm-debug-binding-bubble");
-        value.dataset.debugBindingTarget = bindingKey;
-      }
-      if (item.callId) {
-        value.dataset.debugCall = item.callId;
-        value.type = "button";
-        value.setAttribute(
-          "aria-label",
-          `Call to ${item.name || "function"}; click to open`,
-        );
-      }
-      if (item.name && !bindingKey) {
-        const name = document.createElement("span");
-        name.className = "cm-debug-annotation-name";
-        name.textContent = item.name;
-        const nameSeparator = document.createElement("span");
-        nameSeparator.className = "cm-debug-annotation-name-separator";
-        nameSeparator.textContent = ["call", "return", "raise"].includes(
-          item.kind,
-        )
-          ? "\u00a0"
-          : "\u00a0=\u00a0";
-        value.append(name, nameSeparator);
-      }
+      value.dataset.debugAnnotationId = debugAnnotationKey(item, this.sourceLine, 0);
+      value.dataset.debugAnnotationSourceLine = String(this.sourceLine);
+      value.dataset.debugAnnotationOrder = "0";
+      value.dataset.debugAnnotationKind = item.kind || "value";
       const code = document.createElement("code");
       const fullValue = item.fullValue || item.value;
-      const displayValue = debugAnnotationDisplayValue(fullValue);
-      code.textContent = displayValue.value;
-      code.classList.toggle("is-summarized", displayValue.summarized);
-      const description = [item.type, displayValue.summarized ? fullValue : ""]
+      const displayValue = String(item.value ?? "…");
+      const segments = Array.isArray(item.segments) ? item.segments : [];
+      if (segments.length) {
+        for (const segment of segments) {
+          const from = Math.min(Math.max(segment.from || 0, 0), displayValue.length);
+          const to = Math.min(
+            Math.max(segment.to || from, from),
+            displayValue.length,
+          );
+          const span = document.createElement("span");
+          const role = ["shape", "literal", "constructor", "variable"].includes(segment.role)
+            ? segment.role
+            : "neutral";
+          span.className = `execution-runtime-${role}`;
+          span.textContent = displayValue.slice(from, to);
+          code.append(span);
+        }
+      } else {
+        code.textContent = displayValue;
+      }
+      code.classList.toggle("is-summarized", Boolean(item.truncated));
+      const description = [item.type, item.truncated ? fullValue : ""]
         .filter(Boolean)
         .join("\n");
       if (description) code.setAttribute("aria-label", description);
-      if (bindingKey) {
-        value.setAttribute(
-          "aria-label",
-          `${item.name} = ${fullValue}${item.type ? `, type ${item.type}` : ""}`,
-        );
-      }
       value.append(code);
-      if (item.occurrenceTotal > 1) {
-        const occurrence = document.createElement("span");
-        occurrence.className = "cm-debug-annotation-occurrence";
-        occurrence.textContent = `${item.occurrenceIndex} of ${item.occurrenceTotal}`;
-        value.append(occurrence);
-      }
       row.append(value);
-      lastValue = value;
-    });
-    if (this.activity) {
-      const activity = document.createElement("span");
-      activity.className = `cm-debug-rail-activity${this.activity.exceptions ? " has-exception" : ""}`;
-      activity.textContent = this.activity.exceptions
-        ? "!"
-        : `×${this.activity.count}`;
-      activity.setAttribute("aria-label", [
-        `${this.activity.count} recorded occurrence${this.activity.count === 1 ? "" : "s"}`,
-        this.activity.exceptions
-          ? `${this.activity.exceptions} exception${this.activity.exceptions === 1 ? "" : "s"}`
-          : "",
-      ]
-        .filter(Boolean)
-        .join(" · "));
-      (lastValue || row).append(activity);
     }
     return row;
   }
@@ -206,179 +146,77 @@ function debugProjectionDecorations(state, projection) {
   const rails = new Map();
   const railFor = (line) => {
     if (!rails.has(line)) {
-      rails.set(line, { items: [], activity: null });
+      rails.set(line, { items: [] });
     }
     return rails.get(line);
   };
-  const activationRange = projection.activationRange;
-  if (activationRange) {
-    const startLine = Math.max(1, activationRange.startLine || 1);
-    const endLine = Math.min(
-      state.doc.lines,
-      activationRange.endLine || startLine,
-    );
-    const inline =
-      Number.isFinite(activationRange.startColumn) &&
-      Number.isFinite(activationRange.endColumn);
-    if (inline) {
-      const start = state.doc.line(startLine);
-      const end = state.doc.line(endLine);
-      const from =
-        start.from +
-        Math.min(Math.max(activationRange.startColumn, 0), start.length);
-      const to =
-        end.from +
-        Math.min(Math.max(activationRange.endColumn, 0), end.length);
-      if (to > from) {
-        decorations.push(
-          Decoration.mark({ class: "cm-debug-activation-span" }).range(from, to),
-        );
-      }
-    }
-    for (
-      let lineNumber = startLine;
-      !inline && lineNumber <= endLine;
-      lineNumber += 1
+  const offsetsFor = (range) => {
+    if (
+      !range ||
+      range.startLine < 1 ||
+      range.startLine > state.doc.lines ||
+      range.endLine < range.startLine ||
+      range.endLine > state.doc.lines
     ) {
-      const classes = ["cm-debug-activation-line"];
-      if (lineNumber === startLine) classes.push("cm-debug-activation-start");
-      if (lineNumber === endLine) classes.push("cm-debug-activation-end");
+      return null;
+    }
+    const start = state.doc.line(range.startLine);
+    const end = state.doc.line(range.endLine);
+    const from = start.from + Math.min(Math.max(range.startColumn || 0, 0), start.length);
+    const to = end.from + Math.min(Math.max(range.endColumn || 0, 0), end.length);
+    return to > from ? { from, to } : null;
+  };
+  for (const range of projection.activeRanges || []) {
+    const offsets = offsetsFor(range);
+    if (offsets) {
       decorations.push(
-        Decoration.line({ class: classes.join(" ") }).range(
-          state.doc.line(lineNumber).from,
+        Decoration.mark({ class: "cm-debug-active-range" }).range(
+          offsets.from,
+          offsets.to,
         ),
       );
     }
   }
-  for (const range of projection.activeRanges || []) {
-    if (
-      range.startLine < 1 ||
-      range.startLine > state.doc.lines ||
-      range.endLine !== range.startLine
-    ) {
-      continue;
-    }
-    const line = state.doc.line(range.startLine);
-    const from =
-      line.from + Math.min(Math.max(range.startColumn, 0), line.length);
-    const to =
-      line.from + Math.min(Math.max(range.endColumn, 0), line.length);
-    if (to > from) {
-      decorations.push(
-        Decoration.mark({ class: "cm-debug-active-range" }).range(from, to),
-      );
-    }
-  }
   for (const range of projection.inactiveRanges || []) {
-    if (
-      range.startLine < 1 ||
-      range.startLine > state.doc.lines ||
-      range.endLine !== range.startLine
-    ) {
-      continue;
-    }
-    const line = state.doc.line(range.startLine);
-    const from =
-      line.from + Math.min(Math.max(range.startColumn, 0), line.length);
-    const to =
-      line.from + Math.min(Math.max(range.endColumn, 0), line.length);
-    if (to > from) {
+    const offsets = offsetsFor(range);
+    if (offsets) {
       decorations.push(
-        Decoration.mark({ class: "cm-debug-inactive-range" }).range(from, to),
+        Decoration.mark({ class: "cm-debug-inactive-range" }).range(
+          offsets.from,
+          offsets.to,
+        ),
       );
     }
   }
   for (const range of projection.activationInactiveRanges || []) {
-    if (
-      range.startLine < 1 ||
-      range.startLine > state.doc.lines ||
-      range.endLine !== range.startLine
-    ) {
-      continue;
-    }
-    const line = state.doc.line(range.startLine);
-    const from =
-      line.from + Math.min(Math.max(range.startColumn, 0), line.length);
-    const to =
-      line.from + Math.min(Math.max(range.endColumn, 0), line.length);
-    if (to > from) {
+    const offsets = offsetsFor(range);
+    if (offsets) {
       decorations.push(
         Decoration.mark({
           class: "cm-debug-activation-inactive-range",
-        }).range(from, to),
+        }).range(offsets.from, offsets.to),
       );
     }
   }
   const cursorFocus = projection.cursorFocus;
-  if (
-    cursorFocus &&
-    cursorFocus.line >= 1 &&
-    cursorFocus.line <= state.doc.lines
-  ) {
-    const line = state.doc.line(cursorFocus.line);
-    let from =
-      line.from +
-      Math.min(Math.max(cursorFocus.column || 0, 0), line.length);
-    let to =
-      line.from +
-      Math.min(
-        Math.max(cursorFocus.endColumn, cursorFocus.column || 0),
-        line.length,
-      );
-    if (to <= from && line.length) {
-      if (from < line.to) to = from + 1;
-      else from = Math.max(line.from, from - 1);
-    }
-    if (to > from) {
+  if (cursorFocus) {
+    const offsets = offsetsFor(cursorFocus);
+    if (offsets) {
       decorations.push(
-        Decoration.mark({ class: "cm-debug-cursor-focus" }).range(from, to),
+        Decoration.mark({ class: "cm-debug-cursor-focus" }).range(
+          offsets.from,
+          offsets.to,
+        ),
       );
     }
   }
   for (const group of projection.annotations || []) {
     if (group.line < 1 || group.line > state.doc.lines) continue;
     const line = state.doc.line(group.line);
-    for (const item of group.items) {
-      if (
-        item.kind === "value" &&
-        Number.isFinite(item.column) &&
-        Number.isFinite(item.endColumn)
-      ) {
-        const from =
-          line.from +
-          Math.min(Math.max(item.column, 0), line.length);
-        const to =
-          line.from +
-          Math.min(Math.max(item.endColumn, item.column + 1), line.length);
-        if (to > from) {
-          const bindingKey = debugBindingKey(item);
-          decorations.push(
-            Decoration.mark({
-              class: "cm-debug-binder",
-              attributes: {
-                "aria-label": `${item.name} = ${item.fullValue || item.value}`,
-                ...(bindingKey
-                  ? { "data-debug-binding-source": bindingKey }
-                  : {}),
-              },
-            }).range(from, to),
-          );
-        }
-      }
-      railFor(group.line).items.push(item);
-    }
+    if (group.items[0]) railFor(group.line).items.push(group.items[0]);
   }
-  for (const activity of projection.activity || []) {
-    if (activity.line < 1 || activity.line > state.doc.lines) continue;
-    railFor(activity.line).activity = activity;
-  }
-  const distributedRails = distributeDebugAnnotationRails(
-    rails,
-    state.doc.lines,
-    (number) => state.doc.line(number).text.startsWith("    "),
-  );
-  for (const [number, rail] of distributedRails) {
-    if (!rail.items.length && !rail.activity) continue;
+  for (const [number, rail] of rails) {
+    if (!rail.items.length) continue;
     const line = state.doc.line(number);
     decorations.push(
       Decoration.line({
@@ -389,7 +227,8 @@ function debugProjectionDecorations(state, projection) {
       Decoration.widget({
         widget: new DebugAnnotationsWidget(
           rail.items,
-          rail.activity,
+          number,
+          line.length,
         ),
         side: 1,
       }).range(line.to),
@@ -410,8 +249,8 @@ function debugProjectionDecorations(state, projection) {
           "data-debug-call": link.callId,
           "aria-label":
             link.kind === "parent"
-              ? "Caller; click to open"
-              : `Call to ${link.label}; click to open`,
+              ? "Caller; Shift-click to open"
+              : `Call to ${link.label}; Shift-click to open`,
         },
       }).range(from, to),
     );
@@ -432,546 +271,6 @@ const debugProjectionField = StateField.define({
   },
   provide: (field) => EditorView.decorations.from(field),
 });
-
-function renderDebugValueTooltip(dom, cursorValue, mode) {
-  const wasVisible = dom.classList.contains("visible");
-  dom.className = `cm-debug-value-tooltip cm-debug-value-tooltip-${mode}${cursorValue.raised ? " raised" : ""}`;
-  if (wasVisible) dom.classList.add("visible");
-  dom.setAttribute("role", "tooltip");
-  dom.setAttribute(
-    "aria-label",
-    `${cursorValue.expression} ${cursorValue.raised ? "raised" : "evaluated to"} ${cursorValue.fullValue || cursorValue.value}${cursorValue.type ? `, type ${cursorValue.type}` : ""}`,
-  );
-  if (cursorValue.fullValue && cursorValue.fullValue !== cursorValue.value) {
-    dom.title = cursorValue.fullValue;
-  } else {
-    dom.removeAttribute("title");
-  }
-  const value = document.createElement("code");
-  value.className = "cm-debug-value-tooltip-value";
-  value.textContent = cursorValue.value;
-  dom.replaceChildren(value);
-  if (cursorValue.type) {
-    const type = document.createElement("code");
-    type.className = "cm-debug-value-tooltip-type";
-    type.textContent = `: ${cursorValue.type}`;
-    dom.append(type);
-  }
-}
-
-function debugValueTooltipDescriptor(cursorValue, from, to, mode) {
-  return {
-    pos: from,
-    end: Math.max(from, to),
-    above: false,
-    cursorValue,
-    mode,
-    create: createDebugValueTooltip,
-  };
-}
-
-function createDebugValueTooltip(view) {
-  const dom = document.createElement("div");
-  let valueKey = null;
-  const render = (state) => {
-    const descriptor = state.field(debugValueTooltipField, false);
-    const cursorValue = descriptor?.cursorValue;
-    if (!cursorValue) return;
-    const nextKey = JSON.stringify([
-      cursorValue.expression,
-      cursorValue.value,
-      cursorValue.fullValue,
-      cursorValue.type,
-      cursorValue.raised,
-    ]);
-    if (nextKey !== valueKey) {
-      valueKey = nextKey;
-      renderDebugValueTooltip(dom, cursorValue, "cursor");
-    }
-  };
-  render(view.state);
-  return {
-    dom,
-    offset: { x: debugValueTooltipGap.x, y: debugValueTooltipGap.y },
-    update(update) {
-      render(update.state);
-    },
-  };
-}
-
-function debugValueTooltip(state, projection) {
-  const focus = projection?.cursorFocus;
-  const cursorValue = projection?.cursorValue;
-  const anchor = projection?.cursorAnchor || focus;
-  if (
-    !focus ||
-    !cursorValue ||
-    !anchor ||
-    anchor.line < 1 ||
-    anchor.line > state.doc.lines
-  ) {
-    return null;
-  }
-  const line = state.doc.line(anchor.line);
-  const position =
-    line.from + Math.min(Math.max(anchor.column || 0, 0), line.length);
-  return debugValueTooltipDescriptor(
-    cursorValue,
-    position,
-    position,
-    "cursor",
-  );
-}
-
-const debugValueTooltipField = StateField.define({
-  create: () => null,
-  update(value, transaction) {
-    if (transaction.docChanged) value = null;
-    for (const effect of transaction.effects) {
-      if (effect.is(setDebugProjection)) {
-        value = debugValueTooltip(transaction.state, effect.value);
-      }
-    }
-    return value;
-  },
-  provide: (field) => showTooltip.from(field),
-});
-
-const debugHoverRangeField = StateField.define({
-  create: () => Decoration.none,
-  update(value, transaction) {
-    value = transaction.docChanged
-      ? Decoration.none
-      : value.map(transaction.changes);
-    for (const effect of transaction.effects) {
-      if (!effect.is(setDebugHoverRange)) continue;
-      const range = effect.value;
-      value = range && range.to > range.from
-        ? Decoration.set([
-            Decoration.mark({ class: "cm-debug-hover-focus" }).range(
-              range.from,
-              range.to,
-            ),
-          ])
-        : Decoration.none;
-    }
-    return value;
-  },
-  provide: (field) => EditorView.decorations.from(field),
-});
-
-function debugValueHoverExtension(
-  onDebugValueRequest,
-  onDebugPreviewChange,
-) {
-  return ViewPlugin.fromClass(
-    class {
-      constructor(view) {
-        this.view = view;
-        this.pointer = null;
-        this.rangeKey = null;
-        this.valueKey = null;
-        this.frame = null;
-        this.destroyed = false;
-        this.previewKey = null;
-        this.dom = document.createElement("div");
-        this.dom.className =
-          "cm-debug-value-tooltip cm-debug-value-tooltip-hover";
-        this.view.dom.append(this.dom);
-        this.onPointerMove = (event) => {
-          if (event.pointerType && event.pointerType !== "mouse") return;
-          this.pointer = { x: event.clientX, y: event.clientY };
-          this.view.dom.classList.add("cm-debug-pointer-active");
-          this.inspect(event.target);
-          this.schedulePosition();
-        };
-        this.onPointerDown = (event) => {
-          if (event.pointerType && event.pointerType !== "mouse") return;
-          this.view.dom.classList.add("cm-debug-pointer-active");
-        };
-        this.onWindowMouseMove = (event) => {
-          if (!this.view.dom.contains(event.target)) this.hide();
-        };
-        this.onPointerLeave = () => this.hide();
-        this.onScroll = () => this.hide();
-        view.dom.addEventListener("pointermove", this.onPointerMove, {
-          passive: true,
-        });
-        view.dom.addEventListener("mousemove", this.onPointerMove, {
-          passive: true,
-        });
-        view.dom.addEventListener("pointerdown", this.onPointerDown, {
-          passive: true,
-        });
-        view.dom.addEventListener("mousedown", this.onPointerDown, {
-          passive: true,
-        });
-        view.dom.addEventListener("pointerleave", this.onPointerLeave, {
-          passive: true,
-        });
-        view.dom.addEventListener("mouseleave", this.onPointerLeave, {
-          passive: true,
-        });
-        window.addEventListener("mousemove", this.onWindowMouseMove, {
-          passive: true,
-        });
-        view.scrollDOM.addEventListener("scroll", this.onScroll, {
-          passive: true,
-        });
-      }
-
-      update(update) {
-        if (update.selectionSet && !update.docChanged) {
-          const pointerSelection = update.transactions.some((transaction) =>
-            transaction.annotation(Transaction.userEvent)?.includes("pointer")
-          );
-          if (pointerSelection) {
-            this.view.dom.classList.add("cm-debug-pointer-active");
-          } else {
-            this.view.dom.classList.remove("cm-debug-pointer-active");
-            queueMicrotask(() => {
-              if (!this.destroyed) this.hide();
-            });
-          }
-        }
-        if (update.docChanged) {
-          this.hide({ clearRange: false });
-          return;
-        }
-        const projectionChanged = update.transactions.some((transaction) =>
-          transaction.effects.some((effect) => effect.is(setDebugProjection))
-        );
-        if (projectionChanged && this.pointer) {
-          queueMicrotask(() => {
-            if (!this.destroyed && this.pointer) this.inspect();
-          });
-        }
-      }
-
-      inspect(target = null) {
-        const bindingSource = target?.closest?.(
-          "[data-debug-binding-source]",
-        );
-        const bindingKey = bindingSource?.dataset.debugBindingSource;
-        if (
-          bindingKey &&
-          debugBindingHasVisibleTarget(
-            bindingKey,
-            [...this.view.dom.querySelectorAll(
-              "[data-debug-binding-target]",
-            )].map((value) => value.dataset.debugBindingTarget),
-          )
-        ) {
-          this.hide();
-          return;
-        }
-        if (
-          !this.pointer ||
-          target?.closest?.(".cm-debug-annotations")
-        ) {
-          this.hide();
-          return;
-        }
-        const position = this.view.posAtCoords(this.pointer);
-        const cursorValue = Number.isFinite(position)
-          ? onDebugValueRequest?.(position)
-          : null;
-        if (
-          !cursorValue ||
-          cursorValue.line < 1 ||
-          cursorValue.line > this.view.state.doc.lines
-        ) {
-          this.hide();
-          return;
-        }
-        this.setPreview(cursorValue.previewSession);
-        const line = this.view.state.doc.line(cursorValue.line);
-        const from =
-          line.from +
-          Math.min(Math.max(cursorValue.column || 0, 0), line.length);
-        const to =
-          line.from +
-          Math.min(
-            Math.max(cursorValue.endColumn, cursorValue.column || 0),
-            line.length,
-          );
-        if (to <= from) {
-          this.hide();
-          return;
-        }
-        const rangeKey = `${from}:${to}`;
-        const valueKey = JSON.stringify([
-          cursorValue.expression,
-          cursorValue.value,
-          cursorValue.fullValue,
-          cursorValue.type,
-          cursorValue.raised,
-        ]);
-        if (valueKey !== this.valueKey) {
-          this.valueKey = valueKey;
-          renderDebugValueTooltip(this.dom, cursorValue, "hover");
-        }
-        if (rangeKey !== this.rangeKey) {
-          this.rangeKey = rangeKey;
-          this.view.dispatch({
-            effects: setDebugHoverRange.of({ from, to }),
-          });
-        }
-        this.view.dom.classList.add("cm-debug-value-hovering");
-        if (!this.dom.classList.contains("visible")) {
-          this.positionTooltip();
-        }
-        this.dom.classList.add("visible");
-      }
-
-      positionTooltip() {
-        if (!this.pointer) return;
-        const bounds = this.dom.getBoundingClientRect();
-        const position = debugHoverTooltipPosition({
-          pointerX: this.pointer.x,
-          pointerY: this.pointer.y,
-          width: bounds.width,
-          height: bounds.height,
-          viewportWidth: window.innerWidth,
-          viewportHeight: window.innerHeight,
-        });
-        this.dom.style.transform =
-          `translate3d(${position.x}px, ${position.y}px, 0)`;
-        this.dom.classList.toggle("connector-left", position.x < this.pointer.x);
-        this.dom.classList.toggle("connector-above", position.y < this.pointer.y);
-      }
-
-      schedulePosition() {
-        if (this.frame !== null) return;
-        this.frame = requestAnimationFrame(() => {
-          this.frame = null;
-          if (!this.pointer || !this.dom.classList.contains("visible")) return;
-          this.positionTooltip();
-        });
-      }
-
-      hide({ clearRange = true } = {}) {
-        if (
-          !this.dom.classList.contains("visible") &&
-          this.rangeKey === null
-        ) {
-          this.pointer = null;
-          this.setPreview(null);
-          return;
-        }
-        this.pointer = null;
-        this.rangeKey = null;
-        this.valueKey = null;
-        this.dom.classList.remove("visible");
-        this.view.dom.classList.remove("cm-debug-value-hovering");
-        this.setPreview(null);
-        if (clearRange) {
-          this.view.dispatch({ effects: setDebugHoverRange.of(null) });
-        }
-      }
-
-      setPreview(previewSession) {
-        const focus = previewSession?.focus;
-        const site = focus?.site;
-        const nextKey = Number.isFinite(focus?.eventIndex)
-          ? [
-              previewSession.evaluationId || previewSession.source || "",
-              focus.eventIndex,
-              site?.startLine,
-              site?.startColumn,
-              site?.endLine,
-              site?.endColumn,
-            ].join(":")
-          : null;
-        if (nextKey === this.previewKey) return;
-        this.previewKey = nextKey;
-        onDebugPreviewChange?.(nextKey ? previewSession : null);
-      }
-
-      destroy() {
-        this.destroyed = true;
-        if (this.frame !== null) cancelAnimationFrame(this.frame);
-        this.view.dom.removeEventListener("pointermove", this.onPointerMove);
-        this.view.dom.removeEventListener("mousemove", this.onPointerMove);
-        this.view.dom.removeEventListener("pointerdown", this.onPointerDown);
-        this.view.dom.removeEventListener("mousedown", this.onPointerDown);
-        this.view.dom.removeEventListener("pointerleave", this.onPointerLeave);
-        this.view.dom.removeEventListener("mouseleave", this.onPointerLeave);
-        window.removeEventListener("mousemove", this.onWindowMouseMove);
-        this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
-        this.setPreview(null);
-        this.dom.remove();
-      }
-    },
-  );
-}
-
-function debugBindingConnectorExtension() {
-  return ViewPlugin.fromClass(
-    class {
-      constructor(view) {
-        this.view = view;
-        this.frame = null;
-        this.svg = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "svg",
-        );
-        this.svg.classList.add("cm-debug-binding-connectors");
-        this.svg.setAttribute("aria-hidden", "true");
-        view.dom.append(this.svg);
-        this.hoveredBinding = null;
-        this.onGeometryChange = () => this.schedule();
-        this.onBindingOver = (event) => {
-          const key = this.bindingKeyAt(event.target);
-          if (key) this.setHoveredBinding(key);
-        };
-        this.onBindingOut = (event) => {
-          const from = this.bindingKeyAt(event.target);
-          if (!from) return;
-          const to = this.bindingKeyAt(event.relatedTarget);
-          if (!debugBindingKeysMatch(from, to)) {
-            this.setHoveredBinding(null);
-          }
-        };
-        view.dom.addEventListener("pointerover", this.onBindingOver);
-        view.dom.addEventListener("pointerout", this.onBindingOut);
-        view.scrollDOM.addEventListener("scroll", this.onGeometryChange, {
-          passive: true,
-        });
-        view.dom.addEventListener("scroll", this.onGeometryChange, {
-          capture: true,
-          passive: true,
-        });
-        window.addEventListener("resize", this.onGeometryChange, {
-          passive: true,
-        });
-        this.schedule();
-      }
-
-      update(update) {
-        if (
-          update.docChanged ||
-          update.geometryChanged ||
-          update.viewportChanged ||
-          update.transactions.some((transaction) =>
-            transaction.effects.some((effect) =>
-              effect.is(setDebugProjection)
-            )
-          )
-        ) {
-          this.schedule();
-        }
-      }
-
-      schedule() {
-        if (this.frame !== null) return;
-        this.frame = requestAnimationFrame(() => {
-          this.frame = null;
-          this.draw();
-        });
-      }
-
-      bindingKeyAt(node) {
-        const binding = node?.closest?.(
-          "[data-debug-binding-source], [data-debug-binding-target]",
-        );
-        if (!binding || !this.view.dom.contains(binding)) return null;
-        return (
-          binding.dataset.debugBindingSource ||
-          binding.dataset.debugBindingTarget ||
-          null
-        );
-      }
-
-      applyHoveredBinding() {
-        for (const node of this.view.dom.querySelectorAll(
-          ".cm-debug-binding-hover",
-        )) {
-          node.classList.remove("cm-debug-binding-hover");
-        }
-        if (!this.hoveredBinding) return;
-        for (const node of this.view.dom.querySelectorAll(
-          "[data-debug-binding-source], [data-debug-binding-target], [data-debug-binding-connector]",
-        )) {
-          const key =
-            node.dataset.debugBindingSource ||
-            node.dataset.debugBindingTarget ||
-            node.dataset.debugBindingConnector;
-          if (debugBindingKeysMatch(this.hoveredBinding, key)) {
-            node.classList.add("cm-debug-binding-hover");
-          }
-        }
-      }
-
-      setHoveredBinding(key) {
-        this.hoveredBinding = key || null;
-        this.applyHoveredBinding();
-      }
-
-      draw() {
-        const root = this.view.dom.getBoundingClientRect();
-        if (!root.width || !root.height) return;
-        this.svg.setAttribute("viewBox", `0 0 ${root.width} ${root.height}`);
-        this.svg.replaceChildren();
-        const sources = new Map(
-          [...this.view.dom.querySelectorAll("[data-debug-binding-source]")]
-            .map((node) => [node.dataset.debugBindingSource, node]),
-        );
-        for (const target of this.view.dom.querySelectorAll(
-          "[data-debug-binding-target]",
-        )) {
-          const source = sources.get(target.dataset.debugBindingTarget);
-          if (!source) continue;
-          const sourceRect = source.getBoundingClientRect();
-          const targetRect = target.getBoundingClientRect();
-          if (
-            sourceRect.bottom < root.top ||
-            sourceRect.top > root.bottom ||
-            targetRect.bottom < root.top ||
-            targetRect.top > root.bottom
-          ) {
-            continue;
-          }
-          const startX = sourceRect.right - root.left + 3;
-          const startY = sourceRect.top - root.top + sourceRect.height * 0.68;
-          const endX = targetRect.left - root.left - 4;
-          const endY = targetRect.top - root.top + targetRect.height * 0.55;
-          if (endX <= startX + 5) continue;
-          const bend = Math.min(34, Math.max(12, (endX - startX) * 0.22));
-          const path = document.createElementNS(
-            "http://www.w3.org/2000/svg",
-            "path",
-          );
-          path.setAttribute(
-            "d",
-            `M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`,
-          );
-          path.dataset.debugBindingConnector =
-            target.dataset.debugBindingTarget;
-          this.svg.append(path);
-        }
-        this.applyHoveredBinding();
-      }
-
-      destroy() {
-        if (this.frame !== null) cancelAnimationFrame(this.frame);
-        this.view.scrollDOM.removeEventListener(
-          "scroll",
-          this.onGeometryChange,
-        );
-        this.view.dom.removeEventListener(
-          "scroll",
-          this.onGeometryChange,
-          true,
-        );
-        window.removeEventListener("resize", this.onGeometryChange);
-        this.view.dom.removeEventListener("pointerover", this.onBindingOver);
-        this.view.dom.removeEventListener("pointerout", this.onBindingOut);
-        this.svg.remove();
-      }
-    },
-  );
-}
 
 function debugCallAtPosition(view, position) {
   let callId = null;
@@ -1022,6 +321,7 @@ const embeddedTheme = EditorView.theme({
   },
   ".cm-line": {
     padding: "0 10px",
+    position: "relative",
   },
   ".cm-cursor, .cm-dropCursor": {
     borderLeftColor: colors.green,
@@ -1035,33 +335,13 @@ const embeddedTheme = EditorView.theme({
   },
   ".cm-debug-active-range": {
     borderRadius: "2px",
-    backgroundColor: "transparent",
-    boxShadow: "none",
+    backgroundColor: "rgba(40, 95, 78, 0.052)",
+    boxShadow: "inset 0 -1px rgba(40, 95, 78, 0.11)",
     transition: "background-color 90ms ease, box-shadow 90ms ease",
   },
-  ".cm-debug-activation-line": {
-    background:
-      "linear-gradient(90deg, rgba(40, 95, 78, 0.045), rgba(40, 95, 78, 0.018) 72%, transparent)",
-  },
-  ".cm-debug-activation-start": {
-    borderRadius: "6px 6px 0 0",
-    boxShadow: "inset 0 1px rgba(40, 95, 78, 0.09)",
-  },
-  ".cm-debug-activation-end": {
-    borderRadius: "0 0 6px 6px",
-    boxShadow: "inset 0 -1px rgba(40, 95, 78, 0.075)",
-  },
-  ".cm-debug-activation-start.cm-debug-activation-end": {
-    borderRadius: "6px",
-  },
-  ".cm-debug-activation-span": {
-    borderRadius: "4px",
-    backgroundColor: "rgba(40, 95, 78, 0.055)",
-    boxShadow: "inset 0 0 0 1px rgba(40, 95, 78, 0.07)",
-  },
   ".cm-debug-activation-inactive-range": {
-    opacity: "0.3",
-    filter: "saturate(0.5)",
+    opacity: "0.46",
+    filter: "saturate(0.62)",
     transition: "opacity 90ms ease, filter 90ms ease",
   },
   ".cm-debug-inactive-range": {
@@ -1075,117 +355,11 @@ const embeddedTheme = EditorView.theme({
     boxShadow: "inset 0 -1px rgba(155, 91, 48, 0.42)",
     transition: "background-color 90ms ease, box-shadow 90ms ease",
   },
-  ".cm-debug-hover-focus": {
-    borderRadius: "2px",
-    backgroundColor: "rgba(184, 106, 53, 0.14)",
-    boxShadow: "inset 0 -1px rgba(155, 91, 48, 0.5)",
-    transition: "background-color 60ms ease, box-shadow 60ms ease",
-  },
-  ".cm-debug-value-tooltip": {
-    position: "relative",
-    display: "flex",
-    alignItems: "baseline",
-    flexWrap: "wrap",
-    gap: "5px",
-    maxWidth: "min(720px, calc(100vw - 32px))",
-    maxHeight: "calc(100vh - 32px)",
-    border: "1px solid rgba(61, 79, 70, 0.14)",
-    borderRadius: "6px",
-    padding: "4px 7px 5px",
-    backgroundColor: "rgba(253, 252, 248, 0.97)",
-    boxShadow: "0 5px 18px rgba(42, 52, 47, 0.09)",
-    color: "#5d4738",
-    font: "10.5px/1.35 SFMono-Regular, Consolas, Liberation Mono, monospace",
-    pointerEvents: "none",
-    overflow: "hidden",
-    animation: "cm-debug-value-tooltip-in 70ms ease 110ms both",
-  },
-  "&.cm-debug-value-hovering .cm-debug-value-tooltip-cursor": {
-    display: "none",
-  },
-  "&.cm-debug-pointer-active .cm-debug-value-tooltip-cursor": {
-    display: "none",
-  },
-  ".cm-debug-value-tooltip::before": {
-    content: '\"\"',
-    position: "absolute",
-    top: "-8px",
-    left: "-10px",
-    width: "14px",
-    height: "1px",
-    backgroundColor: "rgba(112, 126, 119, 0.32)",
-    transform: "rotate(42deg)",
-    transformOrigin: "right center",
-    pointerEvents: "none",
-  },
-  ".cm-debug-value-tooltip-hover": {
-    position: "fixed",
-    top: "0",
-    left: "0",
-    zIndex: "120",
-    visibility: "hidden",
-    opacity: "0",
-    animation: "none",
-    willChange: "transform, opacity",
-    transition:
-      "transform 65ms cubic-bezier(.2,.7,.2,1), opacity 55ms ease, visibility 0s linear 55ms",
-  },
-  ".cm-debug-value-tooltip-hover.visible": {
-    visibility: "visible",
-    opacity: "1",
-    transition:
-      "transform 65ms cubic-bezier(.2,.7,.2,1), opacity 55ms ease, visibility 0s linear 0s",
-  },
-  ".cm-debug-value-tooltip-hover.connector-left::before": {
-    right: "-10px",
-    left: "auto",
-    transform: "rotate(-42deg)",
-    transformOrigin: "left center",
-  },
-  ".cm-debug-value-tooltip-hover.connector-above::before": {
-    top: "auto",
-    bottom: "-8px",
-    transform: "rotate(-42deg)",
-  },
-  ".cm-debug-value-tooltip-hover.connector-left.connector-above::before": {
-    transform: "rotate(42deg)",
-  },
-  ".cm-debug-value-tooltip code": {
-    overflow: "visible",
-    maxWidth: "100%",
-    font: "inherit",
-    overflowWrap: "anywhere",
-    whiteSpace: "pre-wrap",
-  },
-  ".cm-debug-value-tooltip-value": {
-    color: "#6e513d",
-  },
-  ".cm-debug-value-tooltip-type": {
-    flex: "0 1 auto",
-    color: "#87928c",
-    fontSize: "9px !important",
-  },
-  ".cm-debug-value-tooltip.raised .cm-debug-value-tooltip-value": {
-    color: "#9a4f45",
-  },
-  "@keyframes cm-debug-value-tooltip-in": {
-    from: { opacity: "0", transform: "translateY(2px)" },
-    to: { opacity: "1", transform: "translateY(0)" },
-  },
-  "&.cm-execution-lens .cm-line.cm-md-indented-code": {
-    paddingRight: "206px",
-  },
   ".cm-debug-annotation-lines": {
     position: "relative",
   },
   "&.cm-execution-lens-stale .cm-debug-annotations, &.cm-execution-lens-stale .cm-debug-call-link": {
     opacity: "0.38",
-  },
-  "&.cm-execution-lens-provisional .cm-debug-annotations, &.cm-execution-lens-provisional .cm-debug-call-link": {
-    opacity: "0.62",
-  },
-  "&.cm-execution-lens-provisional .cm-debug-activation-line, &.cm-execution-lens-provisional .cm-debug-activation-span": {
-    filter: "saturate(0.72)",
   },
   "&.cm-execution-lens-stale .cm-debug-active-range": {
     backgroundColor: "transparent",
@@ -1202,64 +376,24 @@ const embeddedTheme = EditorView.theme({
   ".cm-debug-annotations": {
     position: "absolute",
     top: "0",
-    right:
-      "calc(100% - 100vw + var(--dox-main-left-width) + var(--dox-main-right-width) + var(--dox-document-left-inset) + var(--dox-main-right-inset))",
-    left: "calc(100% - 206px)",
+    left: "var(--execution-annotation-column, 72ch)",
     zIndex: "2",
-    display: "flex",
-    flexDirection: "row",
-    alignItems: "baseline",
-    gap: "12px",
+    display: "block",
     boxSizing: "border-box",
-    width: "auto",
-    minWidth: "0",
+    width: "0",
+    height: "0",
     marginLeft: "0",
     padding: "0",
-    overflowX: "auto",
-    overflowY: "visible",
-    overscrollBehaviorX: "contain",
-    scrollbarWidth: "none",
-    color: "#76817b",
-    font: "10.5px/1.35 SFMono-Regular, Consolas, Liberation Mono, monospace",
-    pointerEvents: "auto",
+    overflow: "visible",
+    color: "#6d7972",
+    font: "13px/1.64 SFMono-Regular, Consolas, Liberation Mono, monospace",
+    pointerEvents: "none",
     whiteSpace: "nowrap",
   },
-  ".cm-debug-binding-connectors": {
-    position: "absolute",
-    inset: "0",
-    zIndex: "1",
-    width: "100%",
-    height: "100%",
-    overflow: "visible",
-    pointerEvents: "none",
-  },
-  ".cm-debug-binding-connectors path": {
-    fill: "none",
-    stroke: "rgba(137, 125, 104, 0.27)",
-    strokeWidth: "1",
-    vectorEffect: "non-scaling-stroke",
-  },
-  ".cm-debug-annotations::-webkit-scrollbar": {
-    display: "none",
-  },
-  ".cm-debug-binder": {
-    borderRadius: "2px",
-    transition: "background-color 80ms ease",
-  },
-  ".cm-debug-binder:hover": {
-    backgroundColor: "rgba(184, 106, 53, 0.1)",
-  },
-  ".cm-debug-binder.cm-debug-binding-hover": {
-    backgroundColor: "rgba(184, 106, 53, 0.12)",
-  },
-  ".cm-debug-binding-bubble.cm-debug-binding-hover": {
-    color: "#765640",
-    backgroundColor: "rgba(184, 106, 53, 0.08)",
-  },
-  ".cm-debug-binding-connectors path.cm-debug-binding-hover": {
-    stroke: "rgba(184, 106, 53, 0.42)",
-  },
   ".cm-debug-annotation": {
+    position: "static",
+    top: "0",
+    left: "0",
     display: "flex",
     flex: "0 0 auto",
     alignItems: "baseline",
@@ -1274,24 +408,8 @@ const embeddedTheme = EditorView.theme({
     font: "inherit",
     textAlign: "left",
     whiteSpace: "nowrap",
-  },
-  ".cm-debug-binding-bubble": {
-    boxSizing: "border-box",
-    border: "1px solid rgba(137, 125, 104, 0.16)",
-    borderRadius: "5px",
-    padding: "0 5px 1px",
-    backgroundColor: "rgba(253, 252, 248, 0.94)",
-    boxShadow: "0 2px 8px rgba(42, 52, 47, 0.045)",
-    color: "#655240",
-    lineHeight: "1.2",
-  },
-  ".cm-debug-annotation-name": {
-    flex: "0 0 auto",
-    color: "#9a7a4d",
-  },
-  ".cm-debug-annotation-name-separator": {
-    flex: "0 0 auto",
-    whiteSpace: "pre",
+    pointerEvents: "auto",
+    transition: "color 80ms ease",
   },
   ".cm-debug-annotation code": {
     display: "block",
@@ -1303,36 +421,8 @@ const embeddedTheme = EditorView.theme({
     font: "inherit",
     whiteSpace: "nowrap",
   },
-  ".cm-debug-annotation-return .cm-debug-annotation-name": {
-    color: "#557263",
-  },
-  ".cm-debug-annotation-raise .cm-debug-annotation-name, .cm-debug-annotation-raise code": {
+  ".cm-debug-annotation-function-raise code": {
     color: "#9a4f45",
-  },
-  ".cm-debug-annotation-call": {
-    cursor: "pointer",
-  },
-  ".cm-debug-annotation-call:hover": {
-    color: colors.green,
-  },
-  ".cm-debug-annotation-call .cm-debug-annotation-name": {
-    color: "#536e62",
-  },
-  ".cm-debug-annotation-occurrence": {
-    flex: "0 0 auto",
-    marginLeft: "6px",
-    color: "#99a19d",
-    fontSize: "0.82em",
-  },
-  ".cm-debug-rail-activity": {
-    flex: "0 0 auto",
-    marginLeft: "6px",
-    color: "#929b96",
-    fontSize: "0.86em",
-  },
-  ".cm-debug-rail-activity.has-exception": {
-    color: "#a55449",
-    fontWeight: "700",
   },
   ".cm-debug-call-link": {
     borderRadius: "3px",
@@ -1488,6 +578,7 @@ const embeddedTheme = EditorView.theme({
     fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
     fontSize: "0.77em",
     lineHeight: "1.62",
+    whiteSpace: "pre",
   },
   ".cm-ocaml-keyword": { color: "#785a3a", fontWeight: "600" },
   ".cm-ocaml-definition, .cm-ocaml-module-definition": {
@@ -2748,10 +1839,17 @@ function installDebugNavigationCapture(parent, view, onDebugNavigate) {
   parent.addEventListener(
     "click",
     (event) => {
-      if (event.shiftKey || event.button !== 0) return;
       const call = event.target.closest?.("[data-debug-call]");
       if (!call || !view.dom.contains(call)) return;
-      if (!navigationGate.shouldNavigateClick(event)) {
+      const requiresShift = call.classList.contains("cm-debug-call-link");
+      if (!navigationGate.shouldNavigateClick(event, requiresShift)) {
+        if (!requiresShift || event.shiftKey) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+        return;
+      }
+      if (event.button !== 0) {
         event.preventDefault();
         event.stopImmediatePropagation();
         return;
@@ -2765,11 +1863,16 @@ function installDebugNavigationCapture(parent, view, onDebugNavigate) {
   parent.addEventListener(
     "pointerdown",
     (event) => {
-      if (!navigationGate.canNavigatePointerdown(event)) return;
       const explicitCall = event.target.closest?.("[data-debug-call]");
       const explicitCallInEditor =
         explicitCall && view.dom.contains(explicitCall);
       if (explicitCallInEditor) {
+        const requiresShift = explicitCall.classList.contains(
+          "cm-debug-call-link",
+        );
+        if (!navigationGate.canNavigatePointerdown(event, requiresShift)) {
+          return;
+        }
         const callId = explicitCall.dataset.debugCall;
         if (!onDebugNavigate(callId, null)) return;
         const suppression = navigationGate.suppressClickAfterPointerdown();
@@ -2784,6 +1887,7 @@ function installDebugNavigationCapture(parent, view, onDebugNavigate) {
         event.stopImmediatePropagation();
         return;
       }
+      if (!navigationGate.canNavigatePointerdown(event)) return;
       if (!event.shiftKey) return;
       if (
         !view.dom.classList.contains("cm-execution-lens")
@@ -2831,8 +1935,6 @@ function mountEditor(
     onCompletionKey,
     onDefinitionRequest,
     onDebugNavigate,
-    onDebugValueRequest,
-    onDebugPreviewChange,
     onOutputNavigate,
     sourceMode = "literate",
     wikiModules = [],
@@ -2864,13 +1966,6 @@ function mountEditor(
     indentUnit.of("    "),
     blockResultsField,
     debugProjectionField,
-    debugValueTooltipField,
-    debugHoverRangeField,
-    debugValueHoverExtension(
-      onDebugValueRequest,
-      onDebugPreviewChange,
-    ),
-    debugBindingConnectorExtension(),
     wikiConfigField,
     editorModeField,
     Prec.highest(keymap.of([
@@ -2979,15 +2074,19 @@ function mountEditor(
           event.preventDefault();
           return true;
         }
-        if (!(event.metaKey || event.ctrlKey)) return false;
         const link = event.target.closest?.("[data-wiki-module]");
-        if (link && view.dom.contains(link)) {
+        if (
+          (event.metaKey || event.ctrlKey) &&
+          link &&
+          view.dom.contains(link)
+        ) {
           view.state
             .field(wikiConfigField)
             .onNavigate?.(link.dataset.wikiModule);
           event.preventDefault();
           return true;
         }
+        if (!event.shiftKey) return false;
         if (position === null || !onDefinitionRequest) return false;
         if (!onDefinitionRequest(position, "navigate")) return false;
         event.preventDefault();

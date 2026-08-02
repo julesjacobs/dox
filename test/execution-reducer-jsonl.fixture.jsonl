@@ -1,0 +1,4 @@
+{"kind":"cursor-moved","position":{"path":"fib.ml.md","line":8,"column":22}}
+{"kind":"document-edited","path":"fib.ml.md","change":{"from":7,"to":7,"insert":"brief "},"projectDigest":"project-prose"}
+{"kind":"document-edited","path":"fib.ml.md","change":{"from":117,"to":118,"insert":"3"},"projectDigest":"project-code"}
+{"kind":"evaluation-failed","token":"pending","diagnostics":["fixture syntax error"]}

@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "audit:execution": "node scripts/audit-execution.mjs",
+    "audit:execution:reducer": "node scripts/audit-execution-reducer.mjs",
+    "check:execution": "dune runtest src/test_execution_contract.exe && node scripts/check-execution-corpus.mjs",
     "build:web": "esbuild web/editor-source.js --bundle --format=esm --minify --outfile=web/editor.bundle.js",
     "check:web": "npm run build:web && node --check web/app.js && node --test web/*.test.mjs"
   },

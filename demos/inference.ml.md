@@ -281,4 +281,4 @@ Type variables are rendered with familiar letter names:
 
 The result is `int * bool`. Select an `infer_step` or `unify_step` occurrence in
 the context pane to inspect the expression or type equation for that exact
-step. Clicking the trace returns to the source that produced the event.
+step. Selecting an occurrence row returns to the source that produced it.

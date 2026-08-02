@@ -11,6 +11,8 @@ asks for mutation.
     let language = "OCaml"
     let square number = number * number
     let greeting name = "Hello, " ^ name ^ "!"
+    let foo = greeting "hi"
+
 
 The compiler infers that `square` accepts and returns integers. Put the cursor
 on its name or body to inspect that type. The same definitions are available to

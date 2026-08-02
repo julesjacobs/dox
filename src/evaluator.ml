@@ -31,8 +31,15 @@ type inline_result = {
   error : string option;
 }
 
+type inline_marker = {
+  virtual_path : string;
+  document_path : string;
+  inline_expression : Document.inline_expression;
+}
+
 type trace_event = {
   sequence : int;
+  domain_id : int;
   phase : string;
   occurrence_id : string;
   parent_id : string option;
@@ -45,6 +52,7 @@ type trace_event = {
   source_end_line : int;
   source_end_column : int;
   type_ : string;
+  value_complete : bool;
   detail : string;
 }
 
@@ -85,6 +93,75 @@ type compiler_token = {
   token_operator : bool;
 }
 
+type compiler_construct = {
+  construct_id : string;
+  construct_category : string;
+  construct_semantic_kind : string;
+  construct_generated_path : string;
+  construct_start_byte : int;
+  construct_end_byte : int;
+  construct_start_line : int;
+  construct_start_column : int;
+  construct_end_line : int;
+  construct_end_column : int;
+  construct_ghost : bool;
+  construct_parent_id : string option;
+  construct_owner_scope_id : string;
+  construct_lexical_scope_id : string;
+  construct_syntax_fingerprint : string;
+  construct_lexical_ancestry_fingerprint : string;
+}
+
+type compiler_execution_scope = {
+  scope_id : string;
+  scope_kind : string;
+  scope_function_construct_id : string option;
+}
+
+type compiler_selector = {
+  selector_id : string;
+  selector_role : string;
+  selector_subject_id : string;
+  selector_generated_path : string;
+  selector_start_byte : int;
+  selector_end_byte : int;
+  selector_start_line : int;
+  selector_start_column : int;
+  selector_end_line : int;
+  selector_end_column : int;
+  selector_priority : int;
+  selector_tie_break_rank : int;
+  selector_syntax_fingerprint : string;
+}
+
+type compiler_manifest = {
+  manifest_unit_name : string;
+  manifest_generated_path : string;
+  manifest_byte_length : int;
+  manifest_source_digest : string;
+  manifest_top_level_scope_id : string;
+  manifest_execution_scopes : compiler_execution_scope list;
+  manifest_constructs : compiler_construct list;
+  manifest_selectors : compiler_selector list;
+}
+
+type source_map_entry = {
+  map_selector_id : string;
+  map_generated_path : string;
+  map_start_byte : int;
+  map_end_byte : int;
+  map_document_path : string;
+  map_start_utf16 : int;
+  map_end_utf16 : int;
+}
+
+type compiled_document_units = {
+  compiled_signature : string;
+  compiled_executable : string;
+  compiled_warnings : string;
+  compiled_manifests : compiler_manifest list;
+}
+
 type definition_info = {
   name : string;
   kind : string;
@@ -107,7 +184,13 @@ type result = {
   ok : bool;
   status : string;
   evaluation_id : string;
+  request_code_digest : string;
+  code_revision_id : string;
   document_version : string;
+  document_revision_id : string;
+  sources_digest : string;
+  extracted_code_digest : string;
+  project_digest : string;
   project_version : string option;
   started_at : string;
   compiler : string;
@@ -119,10 +202,13 @@ type result = {
   inline_results : inline_result list;
   views : view list;
   traces : trace_event list;
+  compiler_manifests : compiler_manifest list;
+  source_map_entries : source_map_entry list;
   trace_truncated : bool;
   tail_handoffs : int;
   tail_linked_enters : int;
   tail_handoff_outcomes : int;
+  tail_handoff_occurrences : string list;
   diagnostics : diagnostic list;
   duration_ms : int;
 }
@@ -138,6 +224,60 @@ type process_result = {
 exception Cancelled
 
 let successful = function Unix.WEXITED 0 -> true | _ -> false
+
+(* This transport checksum detects accidental corruption. Revision identity and
+   cache correctness use SHA-256 separately; this is not an authentication
+   boundary. Keeping the synchronous checksum small avoids adding latency to
+   every large execution artifact in the browser. *)
+let execution_checksum input =
+  let hash = ref 0x811c9dc5l in
+  String.iter
+    (fun character ->
+      hash :=
+        Int32.mul
+          (Int32.logxor !hash (Int32.of_int (Char.code character)))
+          0x01000193l)
+    input;
+  Printf.sprintf "%08lx" !hash
+
+let execution_canonical_json json =
+  let buffer = Buffer.create 4096 in
+  let add_length_prefixed prefix value =
+    Buffer.add_char buffer prefix;
+    Buffer.add_string buffer (string_of_int (String.length value));
+    Buffer.add_char buffer ':';
+    Buffer.add_string buffer value
+  in
+  let rec encode = function
+    | `Null -> Buffer.add_char buffer 'n'
+    | `Bool false -> Buffer.add_string buffer "b0"
+    | `Bool true -> Buffer.add_string buffer "b1"
+    | `Int value -> add_length_prefixed 'i' (string_of_int value)
+    | `Intlit value -> add_length_prefixed 'i' value
+    | `Float value ->
+        add_length_prefixed 'd' (Printf.sprintf "%.17g" value)
+    | `String value -> add_length_prefixed 's' value
+    | `List values ->
+        Buffer.add_char buffer 'l';
+        Buffer.add_string buffer (string_of_int (List.length values));
+        Buffer.add_char buffer ':';
+        List.iter encode values
+    | `Assoc fields ->
+        let fields = List.sort (fun (left, _) (right, _) -> String.compare left right) fields in
+        Buffer.add_char buffer 'o';
+        Buffer.add_string buffer (string_of_int (List.length fields));
+        Buffer.add_char buffer ':';
+        List.iter
+          (fun (name, value) ->
+            add_length_prefixed 's' name;
+            encode value)
+          fields
+    | `Tuple values -> encode (`List values)
+    | `Variant (name, None) -> encode (`String name)
+    | `Variant (name, Some value) -> encode (`List [ `String name; value ])
+  in
+  encode json;
+  Buffer.contents buffer
 
 let environment_with additions =
   let keys = List.map (fun (key, _) -> key ^ "=") additions in
@@ -160,6 +300,115 @@ let read_file_prefix path limit =
         let length = min limit (in_channel_length channel) in
         really_input_string channel length)
   with Sys_error _ -> ""
+
+let decode_hex value =
+  let nibble = function
+    | '0' .. '9' as character -> Char.code character - Char.code '0'
+    | 'a' .. 'f' as character -> 10 + Char.code character - Char.code 'a'
+    | 'A' .. 'F' as character -> 10 + Char.code character - Char.code 'A'
+    | _ -> invalid_arg "invalid hexadecimal character"
+  in
+  if String.length value mod 2 <> 0 then invalid_arg "odd hexadecimal string";
+  String.init (String.length value / 2) (fun index ->
+      Char.chr
+        ((nibble value.[index * 2] lsl 4) lor nibble value.[(index * 2) + 1]))
+
+let read_compiler_manifest path =
+  match Util.read_file path with
+  | Error message -> Error message
+  | Ok contents -> (
+      try
+        match String.split_on_char '\n' contents with
+        | header :: entries -> (
+            match String.split_on_char '\t' header with
+            | [ "dox-construct-manifest"; "6"; unit_name;
+                top_level_scope_id; generated_path; byte_length;
+                source_digest ] ->
+                let constructs = ref [] in
+                let execution_scopes = ref [] in
+                let selectors = ref [] in
+                let parse_entry entry =
+                  match String.split_on_char '\t' entry with
+                  | [ "C"; id; category; semantic_kind; source_path; start_byte; end_byte;
+                      start_line; start_column; end_line; end_column; ghost;
+                      parent_id; owner_scope_id; lexical_scope_id;
+                      syntax_fingerprint; lexical_ancestry_fingerprint ] ->
+                      constructs :=
+                        {
+                          construct_id = decode_hex id;
+                          construct_category = category;
+                          construct_semantic_kind = semantic_kind;
+                          construct_generated_path = decode_hex source_path;
+                          construct_start_byte = int_of_string start_byte;
+                          construct_end_byte = int_of_string end_byte;
+                          construct_start_line = int_of_string start_line;
+                          construct_start_column = int_of_string start_column;
+                          construct_end_line = int_of_string end_line;
+                          construct_end_column = int_of_string end_column;
+                          construct_ghost = String.equal ghost "1";
+                          construct_parent_id =
+                            (if String.equal parent_id "-" then None
+                             else Some (decode_hex parent_id));
+                          construct_owner_scope_id = decode_hex owner_scope_id;
+                          construct_lexical_scope_id =
+                            decode_hex lexical_scope_id;
+                          construct_syntax_fingerprint = syntax_fingerprint;
+                          construct_lexical_ancestry_fingerprint =
+                            lexical_ancestry_fingerprint;
+                        }
+                        :: !constructs
+                  | [ "S"; id; kind; function_construct_id ] ->
+                      execution_scopes :=
+                        {
+                          scope_id = decode_hex id;
+                          scope_kind = kind;
+                          scope_function_construct_id =
+                            (if String.equal function_construct_id "-" then None
+                             else Some (decode_hex function_construct_id));
+                        }
+                        :: !execution_scopes
+                  | [ "L"; id; role; subject_id; source_path; start_byte;
+                      end_byte; start_line; start_column; end_line; end_column;
+                      priority; tie_break_rank; syntax_fingerprint ] ->
+                      selectors :=
+                        {
+                          selector_id = decode_hex id;
+                          selector_role = role;
+                          selector_subject_id = decode_hex subject_id;
+                          selector_generated_path = decode_hex source_path;
+                          selector_start_byte = int_of_string start_byte;
+                          selector_end_byte = int_of_string end_byte;
+                          selector_start_line = int_of_string start_line;
+                          selector_start_column = int_of_string start_column;
+                          selector_end_line = int_of_string end_line;
+                          selector_end_column = int_of_string end_column;
+                          selector_priority = int_of_string priority;
+                          selector_tie_break_rank = int_of_string tie_break_rank;
+                          selector_syntax_fingerprint = syntax_fingerprint;
+                        }
+                        :: !selectors
+                  | _ -> invalid_arg "invalid construct row"
+                in
+                entries
+                |> List.filter (fun entry -> not (String.equal entry ""))
+                |> List.iter parse_entry;
+                Ok
+                  {
+                    manifest_unit_name = decode_hex unit_name;
+                    manifest_generated_path = decode_hex generated_path;
+                    manifest_byte_length = int_of_string byte_length;
+                    manifest_source_digest = source_digest;
+                    manifest_top_level_scope_id =
+                      decode_hex top_level_scope_id;
+                    manifest_execution_scopes = List.rev !execution_scopes;
+                    manifest_constructs = List.rev !constructs;
+                    manifest_selectors = List.rev !selectors;
+                  }
+            | _ -> Error "Unsupported compiler construct manifest header.")
+        | [] -> Error "Empty compiler construct manifest."
+      with
+      | Invalid_argument message | Failure message ->
+          Error ("Invalid compiler construct manifest: " ^ message))
 
 let run_process ?cwd ?stdin ?(environment = []) ?(extra_output_paths = [])
     ?(timeout_seconds = 10.) ?(output_limit = 2_000_000)
@@ -316,6 +565,7 @@ let trace_event sequence content =
   match String.split_on_char '\x1f' content with
   | [
    phase;
+   domain_id;
    occurrence_id;
    parent_id;
    site_id;
@@ -327,15 +577,18 @@ let trace_event sequence content =
    end_line;
    end_column;
    type_;
+   value_complete;
    detail;
   ] ->
-      Option.bind (int_of_string_opt line) (fun line ->
+      Option.bind (int_of_string_opt domain_id) (fun domain_id ->
+        Option.bind (int_of_string_opt line) (fun line ->
           Option.bind (int_of_string_opt column) (fun column ->
               Option.bind (int_of_string_opt end_line) (fun end_line ->
                   Option.map
                     (fun end_column ->
                       {
                         sequence;
+                        domain_id;
                         phase;
                         occurrence_id;
                         parent_id =
@@ -350,9 +603,10 @@ let trace_event sequence content =
                         source_end_line = end_line;
                         source_end_column = end_column;
                         type_;
+                        value_complete = String.equal value_complete "1";
                         detail;
                       })
-                    (int_of_string_opt end_column))))
+                    (int_of_string_opt end_column)))))
   | _ -> None
 
 let parse_runtime_events contents =
@@ -382,65 +636,72 @@ let runtime_events_truncated contents =
   String.split_on_char '\n' contents
   |> List.exists (Util.starts_with ~prefix:"trace-truncated\t")
 
-let complete_tail_outcomes traces =
+let runtime_events_malformed contents =
+  String.split_on_char '\n' contents
+  |> List.exists (fun line ->
+      if String.equal line ""
+         || Util.starts_with ~prefix:"trace-truncated\t" line
+      then false
+      else
+        match String.split_on_char '\t' line with
+        | [ kind; id; content ] -> (
+            match (hex_decode id, hex_decode content) with
+            | Ok _, Ok content when String.equal kind "observe" ->
+              Option.is_none (trace_event 0 content)
+            | Ok _, Ok _ -> false
+            | Error _, _ | _, Error _ -> true)
+        | _ -> true)
+
+let tail_relation_detail detail =
+  match String.split_on_char ':' detail with
+  | [ handoff; remaining ] ->
+      Option.bind (int_of_string_opt handoff) (fun handoff ->
+          Option.map (fun remaining -> handoff, remaining)
+            (int_of_string_opt remaining))
+  | _ -> None
+
+let complete_tail_outcomes ~trace_truncated traces =
   let enters = Hashtbl.create (List.length traces) in
   let outcomes = Hashtbl.create (List.length traces) in
-  let tail_events = Hashtbl.create 32 in
-  let first_tail_events = Hashtbl.create 32 in
-  let children = Hashtbl.create 32 in
+  let handoffs = Hashtbl.create 32 in
+  let links = Hashtbl.create 32 in
+  let malformed = ref false in
   List.iter
     (fun event ->
-      if String.equal event.phase "enter" then (
-        Hashtbl.replace enters event.occurrence_id event;
-        Option.iter
-          (fun parent ->
-            Hashtbl.replace children parent
-              (event
-              :: Option.value ~default:[] (Hashtbl.find_opt children parent)))
-          event.parent_id)
+      if String.equal event.phase "enter" then
+        Hashtbl.replace enters event.occurrence_id event
       else if String.equal event.phase "return"
               || String.equal event.phase "raise"
       then Hashtbl.replace outcomes event.occurrence_id event
-      else if String.equal event.phase "tail" then (
-        if not (Hashtbl.mem first_tail_events event.occurrence_id)
-        then Hashtbl.replace first_tail_events event.occurrence_id event;
-        Hashtbl.replace tail_events event.occurrence_id event))
+      else if String.equal event.phase "tail-handoff" then
+        match tail_relation_detail event.detail with
+        | Some (handoff, remaining) when not (Hashtbl.mem handoffs handoff) ->
+            Hashtbl.add handoffs handoff (event, remaining)
+        | Some _ | None -> malformed := true
+      else if String.equal event.phase "tail-link" then
+        match tail_relation_detail event.detail with
+        | Some (handoff, remaining) when not (Hashtbl.mem links handoff) ->
+            Hashtbl.add links handoff (event, remaining)
+        | Some _ | None -> malformed := true)
     traces;
-  let children occurrence =
-    Option.value ~default:[] (Hashtbl.find_opt children occurrence)
-  in
-  let tail_target tail =
-    let tailing_call =
-      children tail.occurrence_id
-      |> List.filter_map (fun child ->
-          Option.map
-            (fun child_tail -> (child, child_tail))
-            (Hashtbl.find_opt first_tail_events child.occurrence_id))
-      |> List.filter (fun (child, child_tail) ->
-          child.sequence < tail.sequence
-          && child_tail.sequence < tail.sequence)
-      |> List.sort (fun (left, _) (right, _) ->
-          Int.compare right.sequence left.sequence)
-      |> List.map fst
-      |> function child :: _ -> Some child | [] -> None
-    in
-    match tailing_call with
-    | Some _ as target -> target
-    | None ->
-      children tail.occurrence_id
-      |> List.filter (fun child -> child.sequence > tail.sequence)
-      |> List.sort (fun left right -> Int.compare left.sequence right.sequence)
-      |> function child :: _ -> Some child | [] -> None
-  in
-  let later_outcomes =
-    traces
-    |> List.filter (fun event ->
-        String.equal event.phase "return" || String.equal event.phase "raise")
-    |> List.sort (fun left right -> Int.compare left.sequence right.sequence)
-  in
-  let first_outcome_after tail =
-    List.find_opt (fun event -> event.sequence > tail.sequence) later_outcomes
-  in
+  let targets = Hashtbl.create 32 in
+  Hashtbl.iter
+    (fun handoff (source, source_remaining) ->
+      match Hashtbl.find_opt links handoff with
+      | Some (target, target_remaining)
+        when source_remaining = target_remaining
+             && target.sequence > source.sequence
+             && target.parent_id = Some source.occurrence_id ->
+          if source_remaining = 0 then
+            Hashtbl.replace targets source.occurrence_id target.occurrence_id
+      | Some _ -> malformed := true
+      | None when not trace_truncated -> malformed := true
+      | None -> ())
+    handoffs;
+  Hashtbl.iter
+    (fun handoff _ ->
+      if not (Hashtbl.mem handoffs handoff) then malformed := true)
+    links;
   let resolving = Hashtbl.create 32 in
   let rec outcome occurrence =
     match Hashtbl.find_opt outcomes occurrence with
@@ -449,16 +710,7 @@ let complete_tail_outcomes traces =
     | None ->
       Hashtbl.replace resolving occurrence ();
       let resolved =
-        Option.bind (Hashtbl.find_opt tail_events occurrence) (fun tail ->
-            match tail_target tail with
-            | Some child -> outcome child.occurrence_id
-            | None ->
-              (match tail.parent_id with
-               | Some parent when not (String.equal parent occurrence) ->
-                 (match outcome parent with
-                  | Some _ as resolved -> resolved
-                  | None -> first_outcome_after tail)
-               | None | Some _ -> first_outcome_after tail))
+        Option.bind (Hashtbl.find_opt targets occurrence) outcome
       in
       Hashtbl.remove resolving occurrence;
       resolved
@@ -477,14 +729,10 @@ let complete_tail_outcomes traces =
        && not (Hashtbl.mem completed_occurrences occurrence)
     then (
       Hashtbl.replace completed_occurrences occurrence ();
-      match Hashtbl.find_opt tail_events occurrence with
+      match Hashtbl.find_opt targets occurrence with
       | None -> ()
-      | Some tail ->
-        Option.iter
-          (fun child ->
-            if Hashtbl.mem tail_events child.occurrence_id
-            then complete child.occurrence_id)
-          (tail_target tail);
+      | Some target ->
+        if Hashtbl.mem targets target then complete target;
         match Hashtbl.find_opt enters occurrence, outcome occurrence with
         | Some entered, Some returned ->
           let event =
@@ -492,6 +740,7 @@ let complete_tail_outcomes traces =
               entered with
               sequence = !next_sequence;
               phase = returned.phase;
+              value_complete = returned.value_complete;
               detail = returned.detail;
             }
           in
@@ -500,29 +749,30 @@ let complete_tail_outcomes traces =
           completed := event :: !completed
         | _ -> ())
   in
-  tail_events
-  |> Hashtbl.to_seq_values |> List.of_seq
-  |> List.sort (fun left right -> Int.compare left.sequence right.sequence)
-  |> List.iter (fun tail -> complete tail.occurrence_id);
-  List.filter (fun event -> not (String.equal event.phase "tail")) traces
-  @ List.rev !completed
+  targets |> Hashtbl.to_seq_keys |> List.of_seq |> List.sort String.compare
+  |> List.iter complete;
+  ( List.filter
+      (fun event ->
+        not
+          (String.equal event.phase "tail-handoff"
+          || String.equal event.phase "tail-link"))
+      traces
+    @ List.rev !completed,
+    !malformed )
 
 let raw_tail_stats traces =
   let handed_off = Hashtbl.create 32 in
   let tail_handoffs = ref 0 in
   List.iter
     (fun event ->
-      if String.equal event.phase "tail" then (
+      if String.equal event.phase "tail-handoff" then (
         incr tail_handoffs;
         Hashtbl.replace handed_off event.occurrence_id ()))
     traces;
   let tail_linked_enters =
     List.fold_left
       (fun count event ->
-        if String.equal event.phase "enter"
-           && Option.fold ~none:false
-                ~some:(fun parent -> Hashtbl.mem handed_off parent)
-                event.parent_id
+        if String.equal event.phase "tail-link"
         then count + 1
         else count)
       0 traces
@@ -537,7 +787,10 @@ let raw_tail_stats traces =
         else count)
       0 traces
   in
-  !tail_handoffs, tail_linked_enters, tail_handoff_outcomes
+  ( !tail_handoffs,
+    tail_linked_enters,
+    tail_handoff_outcomes,
+    handed_off |> Hashtbl.to_seq_keys |> List.of_seq |> List.sort String.compare )
 
 let prelude =
   {|
@@ -649,6 +902,129 @@ let compiler_source_line document line =
 let source_column_of_merlin document line column =
   let source = compiler_source_line document line in
   source_indentation document line + utf16_column_of_utf8_byte source column
+
+let absolute_source_utf16_offset document line column =
+  let lines = String.split_on_char '\n' document.Document.source in
+  let editor_line_length source =
+    let length = String.length source in
+    let length =
+      if length > 0 && source.[length - 1] = '\r' then length - 1 else length
+    in
+    utf16_column_of_utf8_byte source length
+  in
+  let rec preceding total index = function
+    | [] -> None
+    | source :: rest ->
+        if index = line then Some (total + column)
+        else
+          preceding
+            (total + editor_line_length source + 1)
+            (index + 1) rest
+  in
+  preceding 0 1 lines
+
+let absolute_utf16_offset document line column =
+  absolute_source_utf16_offset document line
+    (source_indentation document line
+    + utf16_column_of_utf8_byte (compiler_source_line document line) column)
+
+let source_map_entries documents inline_markers manifests =
+  let document_for_path path =
+    List.find_opt
+      (fun document -> String.equal document.Document.path path)
+      documents
+  in
+  manifests
+  |> List.concat_map (fun manifest ->
+      manifest.manifest_selectors
+      |> List.filter_map (fun selector ->
+          match document_for_path selector.selector_generated_path with
+          | Some document -> (
+              match
+                ( absolute_utf16_offset document selector.selector_start_line
+                    selector.selector_start_column,
+                  absolute_utf16_offset document selector.selector_end_line
+                    selector.selector_end_column )
+              with
+              | Some start_utf16, Some end_utf16 ->
+                  Some
+                    {
+                      map_selector_id = selector.selector_id;
+                      map_generated_path = manifest.manifest_generated_path;
+                      map_start_byte = selector.selector_start_byte;
+                      map_end_byte = selector.selector_end_byte;
+                      map_document_path = document.path;
+                      map_start_utf16 = start_utf16;
+                      map_end_utf16 = end_utf16;
+                    }
+              | None, _ | _, None -> None)
+          | None -> (
+              match
+                List.find_opt
+                  (fun marker ->
+                    String.equal marker.virtual_path
+                      selector.selector_generated_path)
+                  inline_markers
+              with
+              | None -> None
+              | Some marker -> (
+                  match document_for_path marker.document_path with
+                  | None -> None
+                  | Some marker_document ->
+                  let expression = marker.inline_expression in
+                  let prefix_length = String.length "let () = try ignore (@(" in
+                  let expression_end =
+                    prefix_length + String.length expression.expression
+                  in
+                  if
+                    selector.selector_start_line <> 1
+                    || selector.selector_end_line <> 1
+                    || selector.selector_start_column < prefix_length
+                    || selector.selector_end_column > expression_end
+                  then None
+                  else
+                    let column column =
+                      expression.column_start
+                      + utf16_column_of_utf8_byte expression.expression
+                          (column - prefix_length)
+                    in
+                    match
+                      ( absolute_source_utf16_offset marker_document
+                          expression.line
+                          (column selector.selector_start_column),
+                        absolute_source_utf16_offset marker_document
+                          expression.line
+                          (column selector.selector_end_column) )
+                    with
+                    | Some start_utf16, Some end_utf16 ->
+                        Some
+                          {
+                            map_selector_id = selector.selector_id;
+                            map_generated_path = manifest.manifest_generated_path;
+                            map_start_byte = selector.selector_start_byte;
+                            map_end_byte = selector.selector_end_byte;
+                            map_document_path = marker.document_path;
+                            map_start_utf16 = start_utf16;
+                            map_end_utf16 = end_utf16;
+                          }
+                    | None, _ | _, None -> None))))
+  |> List.sort (fun left right ->
+      let by_path =
+        String.compare left.map_generated_path right.map_generated_path
+      in
+      if by_path <> 0 then by_path
+      else
+        let by_start = compare left.map_start_byte right.map_start_byte in
+        if by_start <> 0 then by_start
+        else
+          let by_end = compare left.map_end_byte right.map_end_byte in
+          if by_end <> 0 then by_end
+          else
+            let by_document =
+              String.compare left.map_document_path right.map_document_path
+            in
+            if by_document <> 0 then by_document
+            else String.compare left.map_selector_id right.map_selector_id)
 
 let normalize_trace_event documents (event : trace_event) =
   match
@@ -1110,6 +1486,33 @@ let enrich_execution_sites sites tokens =
         is_expression child && is_operator_site child)
       children
   in
+  let enclosing_definition parent_site =
+    let parent_range = execution_site_range parent_site in
+    let range_size range =
+      ((range.range_end_line - range.range_start_line) * 1_000_000)
+      + max 0 (range.range_end_column - range.range_start_column)
+    in
+    sites
+    |> List.filter (fun candidate ->
+           is_pattern candidate
+           && Option.fold ~none:false
+                ~some:(fun selection ->
+                  execution_range_contains selection parent_range)
+                candidate.site_selection)
+    |> List.sort (fun left right ->
+           let left_size =
+             Option.fold ~none:max_int ~some:range_size
+               left.site_selection
+           in
+           let right_size =
+             Option.fold ~none:max_int ~some:range_size
+               right.site_selection
+           in
+           Int.compare left_size right_size)
+    |> function
+    | definition :: _ -> Some definition
+    | [] -> None
+  in
   let direct_patterns = Hashtbl.create (List.length sites) in
   let alternatives =
     tokens
@@ -1172,44 +1575,92 @@ let enrich_execution_sites sites tokens =
       mark_adjacent leaves)
     patterns_by_target;
   let is_direct_pattern site = Hashtbl.mem direct_patterns site.site_id in
+  let enriched =
+    List.map
+      (fun site ->
+        let direct = is_pattern site && is_direct_pattern site in
+        match parent site with
+        | Some parent_site
+          when is_expression site && is_expression parent_site ->
+            let range = execution_site_range site in
+            let parent_range = execution_site_range parent_site in
+            if is_operator_site site then
+              {
+                site with
+                site_target = Some parent_range;
+                site_role = Some "operator";
+                site_direct = direct;
+              }
+            else if
+              range.range_start_line = parent_range.range_start_line
+              && range.range_start_column = parent_range.range_start_column
+              && not (parent_is_operator_application parent_site)
+            then
+              {
+                site with
+                site_target = Some parent_range;
+                site_role = Some "callee";
+                site_direct = direct;
+              }
+            else { site with site_direct = direct }
+        | Some parent_site
+          when is_pattern site && is_expression parent_site
+               && site.site_target = None
+               && Option.is_none site.site_selection -> (
+            match
+              if parent_site.site_ghost then
+                Option.map execution_site_range
+                  (enclosing_definition parent_site)
+              else Some (execution_site_range parent_site)
+            with
+            | Some target ->
+                {
+                  site with
+                  site_target = Some target;
+                  site_role = Some "lambda-parameter";
+                  site_direct = direct;
+                }
+            | None -> { site with site_direct = direct })
+        | Some _ | None -> { site with site_direct = direct })
+      sites
+  in
+  let enriched_by_id = Hashtbl.create (List.length enriched) in
+  List.iter
+    (fun site -> Hashtbl.replace enriched_by_id site.site_id site)
+    enriched;
+  let inherited_targets = Hashtbl.create (List.length enriched) in
+  let resolving_targets = Hashtbl.create 16 in
+  let rec inherited_pattern_target site =
+    match Hashtbl.find_opt inherited_targets site.site_id with
+    | Some target -> target
+    | None when Hashtbl.mem resolving_targets site.site_id -> None
+    | None ->
+        Hashtbl.replace resolving_targets site.site_id ();
+        let target =
+          match site.site_target with
+          | Some target -> Some (target, site.site_role)
+          | None -> (
+              match site.site_parent_id with
+              | Some parent_id -> (
+                  match Hashtbl.find_opt enriched_by_id parent_id with
+                  | Some parent_site when is_pattern parent_site ->
+                      inherited_pattern_target parent_site
+                  | Some _ | None -> None)
+              | None -> None)
+        in
+        Hashtbl.remove resolving_targets site.site_id;
+        Hashtbl.replace inherited_targets site.site_id target;
+        target
+  in
   List.map
     (fun site ->
-      let direct = is_pattern site && is_direct_pattern site in
-      match parent site with
-      | Some parent_site
-        when is_expression site && is_expression parent_site ->
-          let range = execution_site_range site in
-          let parent_range = execution_site_range parent_site in
-          if is_operator_site site then
-            {
-              site with
-              site_target = Some parent_range;
-              site_role = Some "operator";
-              site_direct = direct;
-            }
-          else if
-            range.range_start_line = parent_range.range_start_line
-            && range.range_start_column = parent_range.range_start_column
-            && not (parent_is_operator_application parent_site)
-          then
-            {
-              site with
-              site_target = Some parent_range;
-              site_role = Some "callee";
-              site_direct = direct;
-            }
-          else { site with site_direct = direct }
-      | Some parent_site
-        when is_pattern site && is_expression parent_site
-             && site.site_target = None && not parent_site.site_ghost ->
-          {
-            site with
-            site_target = Some (execution_site_range parent_site);
-            site_role = Some "lambda-parameter";
-            site_direct = direct;
-          }
-      | Some _ | None -> { site with site_direct = direct })
-    sites
+      if not (is_pattern site) || Option.is_some site.site_target then site
+      else
+        match inherited_pattern_target site with
+        | Some (target, role) ->
+            { site with site_target = Some target; site_role = role }
+        | None -> site)
+    enriched
 
 let execution_range_size range =
   ((range.range_end_line - range.range_start_line) * 1_000_000)
@@ -1245,6 +1696,60 @@ let syntax_execution_sites sites tokens =
     match candidates with
     | Some _ -> candidates
     | None -> containing all_expressions
+  in
+  let definition_target range =
+    sites
+    |> List.filter (fun site ->
+           site.site_kind = "pattern"
+           && site.site_end_line = range.range_start_line
+           && Option.fold ~none:false
+                ~some:(fun selection ->
+                  execution_range_contains selection range
+                  && not
+                       (List.exists
+                          (fun wrapper ->
+                            wrapper.site_kind = "expression"
+                            && execution_range_size
+                                 (execution_site_range wrapper)
+                               > execution_range_size range
+                            && execution_range_contains selection
+                                 (execution_site_range wrapper)
+                            && execution_range_contains
+                                 (execution_site_range wrapper)
+                                 range)
+                          sites))
+                site.site_selection)
+    |> List.sort (fun left right ->
+           Int.compare
+             (execution_range_size
+                (Option.get left.site_selection))
+             (execution_range_size
+                (Option.get right.site_selection)))
+    |> function
+    | definition :: _ -> Some (execution_site_range definition)
+    | [] -> None
+  in
+  let function_starts_at range =
+    List.exists
+      (fun token ->
+        token.token_role = Some "function"
+        && token.token_range.range_start_line = range.range_start_line
+        && token.token_range.range_start_column = range.range_start_column)
+      tokens
+  in
+  let containing_pattern token =
+    sites
+    |> List.filter (fun site ->
+           site.site_kind = "pattern"
+           && execution_range_contains (execution_site_range site)
+                token.token_range)
+    |> List.sort (fun left right ->
+           Int.compare
+             (execution_range_size (execution_site_range left))
+             (execution_range_size (execution_site_range right)))
+    |> function
+    | pattern :: _ -> Some (execution_site_range pattern)
+    | [] -> None
   in
   let starts_after token site =
     execution_position_compare site.site_start_line site.site_start_column
@@ -1366,25 +1871,54 @@ let syntax_execution_sites sites tokens =
          None
     |> fun site -> Option.bind site (fun site -> site.site_target)
   in
+  let gap_selection token role target =
+    if
+      List.mem role
+        [ "then"; "else"; "in"; "when"; "do"; "arrow" ]
+      && execution_position_compare token.token_range.range_end_line
+           token.token_range.range_end_column target.range_start_line
+           target.range_start_column
+         <= 0
+    then
+      Some
+        {
+          range_start_line = token.token_range.range_start_line;
+          range_start_column = token.token_range.range_start_column;
+          range_end_line = target.range_start_line;
+          range_end_column = target.range_start_column;
+        }
+    else None
+  in
   let target_for token role =
     let container = containing_expression token in
-    match role with
-    | "arrow" -> preceding_pattern_target token container
-    | "alternative" ->
-        Option.bind container (fun container ->
-            next_pattern_target token (Some container))
-    | "then" | "else" | "in" | "when" | "do" ->
-        Option.bind container (fun container ->
-            Option.map execution_site_range
-              (next_expression token container))
-    | _ -> (
-        match container with
-        | None ->
-            if role = "let" || role = "rec" then
-              Option.map execution_site_range (next_expression_any token)
-            else None
-        | Some container ->
-            Some (execution_site_range container))
+    let target =
+      match role with
+      | "as" -> containing_pattern token
+      | "arrow" -> preceding_pattern_target token container
+      | "alternative" ->
+          Option.bind container (fun container ->
+              next_pattern_target token (Some container))
+      | "then" | "else" | "in" | "when" | "do" ->
+          Option.bind container (fun container ->
+              Option.map execution_site_range
+                (next_expression token container))
+      | _ -> (
+          match container with
+          | None ->
+              if role = "let" || role = "rec" then
+                Option.map execution_site_range (next_expression_any token)
+              else None
+          | Some container ->
+              Some (execution_site_range container))
+    in
+    Option.map
+      (fun target ->
+        if
+          role = "function"
+          || ((role = "let" || role = "rec") && function_starts_at target)
+        then Option.value ~default:target (definition_target target)
+        else target)
+      target
   in
   tokens
   |> List.filter_map (fun token ->
@@ -1411,7 +1945,8 @@ let syntax_execution_sites sites tokens =
                    site_end_line = range.range_end_line;
                    site_end_column = range.range_end_column;
                    site_target = target;
-                   site_selection = None;
+                   site_selection =
+                     Option.bind target (gap_selection token role);
                    site_role = Some role;
                    site_direct = false;
                  }))
@@ -1992,8 +2527,9 @@ let compiler_identity_value =
   lazy
     (let path = compiler () in
      let executable_digest executable =
-       try Digest.file executable |> Digest.to_hex
-       with Sys_error _ -> "unreadable"
+       match Util.read_file executable with
+       | Ok contents -> Util.sha256 contents
+       | Error _ -> "unreadable"
      in
      let version =
        run_process ~timeout_seconds:2. ~output_limit:16_384 path [ "-version" ]
@@ -2011,7 +2547,7 @@ let compiler_identity_value =
 let compiler_identity () = Lazy.force compiler_identity_value
 
 let artifact_builder_identity () =
-  Util.digest
+  Util.sha256
     ("dox-artifact-v2\000" ^ compiler_identity () ^ "\000unix.cma\000"
    ^ artifact_prelude)
 
@@ -2128,12 +2664,6 @@ let compile_source ~directory ~source ~cancelled =
 
 type block_marker = { index : int; path : string; block_id : string }
 
-type inline_marker = {
-  virtual_path : string;
-  document_path : string;
-  inline_expression : Document.inline_expression;
-}
-
 let block_marker evaluation_id index phase =
   Printf.sprintf "\030DOX:%s:%d:%c\031" evaluation_id index phase
 
@@ -2194,6 +2724,9 @@ let instrumented_compilation_source evaluation_id documents target =
 
 let compile_document_units ?(prelude_source = prelude) ?entry
     ?(environment = []) ~directory ~sources ~target ~cancelled () =
+  let emit_manifests =
+    List.assoc_opt "DOX_TRACE_ALL" environment = Some "1"
+  in
   let unit_name document =
     match Module_path.of_source_path document.Document.path with
     | Ok module_path -> Module_path.compiler_unit module_path
@@ -2295,8 +2828,15 @@ let compile_document_units ?(prelude_source = prelude) ?entry
                     |> List.fold_left
                          (fun (succeeded, failed, warnings) item ->
                            let _, path, _ = item in
+                           let manifest_path = path ^ ".dox-constructs" in
+                           let compile_environment =
+                             if emit_manifests then
+                               ("DOX_EXECUTION_MANIFEST", manifest_path)
+                               :: environment
+                             else environment
+                           in
                            let result =
-                             compile ~environment
+                             compile ~environment:compile_environment
                                [
                                  "-g";
                                  "-I";
@@ -2327,6 +2867,23 @@ let compile_document_units ?(prelude_source = prelude) ?entry
             in
             Result.bind (compile_pass [] prepared [])
               (fun (compiled, warnings) ->
+                let manifests =
+                  if not emit_manifests then Ok []
+                  else
+                    compiled
+                    |> List.fold_left
+                         (fun result (_, path, _) ->
+                           Result.bind result (fun manifests ->
+                               Result.map
+                                 (fun manifest -> manifest :: manifests)
+                                 (read_compiler_manifest
+                                    (path ^ ".dox-constructs"))))
+                         (Ok [])
+                    |> Result.map List.rev
+                    |> Result.map_error (fun message ->
+                        diagnostic ~stage:"compile" ~severity:"error" message)
+                in
+                Result.bind manifests (fun manifests ->
                 let target_path =
                   compiled
                   |> List.find_map (fun (document, path, _) ->
@@ -2397,12 +2954,16 @@ let compile_document_units ?(prelude_source = prelude) ?entry
                         Error (process_failure ~stage:"compile" linked)
                       else
                         Ok
-                          ( signature.stdout,
-                            executable,
-                            signature.stderr :: linked.stderr :: warnings
-                            |> List.filter (fun value ->
-                                not (String.equal (String.trim value) ""))
-                            |> String.concat "\n" ))))
+                          {
+                            compiled_signature = signature.stdout;
+                            compiled_executable = executable;
+                            compiled_warnings =
+                              signature.stderr :: linked.stderr :: warnings
+                              |> List.filter (fun value ->
+                                  not (String.equal (String.trim value) ""))
+                              |> String.concat "\n";
+                            compiled_manifests = manifests;
+                          }))))
 
 let split_block_output evaluation_id markers output =
   let marker_prefix = Printf.sprintf "\030DOX:%s:" evaluation_id in
@@ -2592,12 +3153,94 @@ let normalize_inline_trace_event inline_markers (event : trace_event) =
         source_end_column = column event.source_end_column;
       }
 
-let evaluate_documents ?project_version ?(cancelled = fun () -> false)
+let add_identity_field buffer value =
+  Buffer.add_string buffer (string_of_int (String.length value));
+  Buffer.add_char buffer ':';
+  Buffer.add_string buffer value
+
+let source_identity ~domain entries =
+  let buffer = Buffer.create 4096 in
+  add_identity_field buffer domain;
+  entries
+  |> List.sort (fun (left, _) (right, _) -> String.compare left right)
+  |> List.iter (fun (path, parts) ->
+      add_identity_field buffer path;
+      add_identity_field buffer (string_of_int (List.length parts));
+      List.iter
+        (fun (kind, value) ->
+          add_identity_field buffer kind;
+          add_identity_field buffer value)
+        parts);
+  Util.sha256 (Buffer.contents buffer)
+
+let trim_identity_source source =
+  if String.ends_with ~suffix:"\n" source then
+    String.sub source 0 (String.length source - 1)
+  else source
+
+let request_code_digest_for_document (document : Document.t) =
+  let parts =
+    Document.execution_identity_parts document
+    |> List.map (fun (kind, source) -> (kind, trim_identity_source source))
+  in
+  source_identity ~domain:"dox-executable-source-v1" [ (document.path, parts) ]
+
+let document_revision_id (document : Document.t) =
+  source_identity ~domain:"dox-document-source-v1"
+    [ (document.path, [ ("source", document.source) ]) ]
+
+let project_digest ~documents ~(target : Document.t) =
+  documents
+  |> List.filter (fun document ->
+      not (String.equal document.Document.path target.Document.path))
+  |> List.map (fun document ->
+      ( document.Document.path,
+        [ ("compilation", Document.compilation_source document) ] ))
+  |> source_identity ~domain:"dox-project-source-v1"
+
+let evaluate_documents ?project_version ?request_code_digest
+    ?(cancelled = fun () -> false)
     ~documents ~target () =
   let started = Unix.gettimeofday () in
   let started_at = Util.timestamp () in
   let evaluation_id =
     Util.random_token () |> fun token -> String.sub token 0 24
+  in
+  let ordered_documents =
+    List.sort
+      (fun left right -> String.compare left.Document.path right.path)
+      documents
+  in
+  let document_revision_id = document_revision_id target in
+  let sources_digest =
+    ordered_documents
+    |> List.map (fun document ->
+        (document.Document.path, [ ("source", document.Document.source) ]))
+    |> source_identity ~domain:"dox-project-documents-v1"
+  in
+  let compilation_entries =
+    ordered_documents
+    |> List.map (fun document ->
+        ( document.Document.path,
+          [ ("compilation", Document.compilation_source document) ] ))
+  in
+  let extracted_code_digest =
+    source_identity ~domain:"dox-extracted-code-v1" compilation_entries
+  in
+  (* The project digest identifies compiler inputs outside the edited target.
+     It deliberately excludes the target source, whose identity is carried by
+     [request_code_digest]. This makes A -> B -> A artifact reuse valid even
+     after either draft was autosaved, without allowing dependency changes to
+     reuse an artifact. *)
+  let project_digest = project_digest ~documents:ordered_documents ~target in
+  let code_revision_id =
+    source_identity ~domain:"dox-code-revision-v1"
+      (("\000compiler", [ ("identity", compiler_identity ()) ])
+      :: compilation_entries)
+  in
+  let computed_request_code_digest = request_code_digest_for_document target in
+  let request_code_digest =
+    Option.value ~default:computed_request_code_digest request_code_digest
   in
   let directory = Filename.temp_dir "dox-eval-" "" in
   let event_path = Filename.concat directory "events" in
@@ -2623,7 +3266,10 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
   in
   let evaluated =
     Fun.protect
-      ~finally:(fun () -> remove_temp_directory directory)
+      ~finally:(fun () ->
+        match Sys.getenv_opt "DOX_KEEP_EVAL_DIR" with
+        | Some ("1" | "true") -> prerr_endline ("DOX_EVAL_DIR " ^ directory)
+        | None | Some _ -> remove_temp_directory directory)
       (fun () ->
         if cancelled () then raise Cancelled;
         if
@@ -2631,8 +3277,8 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
             (fun diagnostic -> String.equal diagnostic.severity "error")
             parse_diagnostics
         then
-          ("invalid", "", "", "", [], [], false, 0, 0, 0,
-           parse_diagnostics)
+          ("invalid", "", "", "", [], [], [], false, 0, 0, 0,
+           [], parse_diagnostics)
         else
           match
             compile_document_units
@@ -2640,9 +3286,9 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
               ~directory ~sources:document_sources ~target ~cancelled ()
           with
           | Error compilation ->
-              ("compile-error", "", "", "", [], [], false, 0, 0, 0,
-               [ compilation ])
-          | Ok (signature, executable, warnings) ->
+              ("compile-error", "", "", "", [], [], [], false, 0, 0, 0,
+               [], [ compilation ])
+          | Ok compiled ->
               let runtime =
                 run_process ~timeout_seconds:5. ~cancelled
                   ~environment:
@@ -2651,53 +3297,104 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
                       ("DOCLANG_TRACE_PATH", trace_path);
                     ]
                   ~extra_output_paths:[ event_path ]
-                  (ocamlrun ()) [ executable ]
+                  (ocamlrun ()) [ compiled.compiled_executable ]
               in
               let view_events = read_file_prefix event_path 2_000_000 in
-              let trace_events = read_file_prefix trace_path 2_000_000 in
-              let trace_truncated = runtime_events_truncated trace_events in
+              let trace_events = read_file_prefix trace_path 12_200_000 in
+              let trace_malformed = runtime_events_malformed trace_events in
+              let raw_trace_truncated =
+                runtime_events_truncated trace_events || trace_malformed
+              in
               let views, _ = parse_runtime_events view_events in
               let _, traces = parse_runtime_events trace_events in
-              let tail_handoffs, tail_linked_enters, tail_handoff_outcomes =
+              let multiple_trace_domains =
+                traces
+                |> List.map (fun event -> event.domain_id)
+                |> List.sort_uniq Int.compare
+                |> List.length
+                |> fun count -> count > 1
+              in
+              let tail_handoffs, tail_linked_enters, tail_handoff_outcomes,
+                  tail_handoff_occurrences =
                 raw_tail_stats traces
               in
-              let traces = complete_tail_outcomes traces in
+              let traces, tail_relations_malformed =
+                complete_tail_outcomes ~trace_truncated:raw_trace_truncated
+                  traces
+              in
+              let trace_truncated =
+                raw_trace_truncated || tail_relations_malformed
+              in
               let traces = List.map (normalize_trace_event documents) traces in
               let warning_diagnostics =
-                if String.equal warnings "" then []
-                else
-                  [ diagnostic ~stage:"compile" ~severity:"warning" warnings ]
+                (if String.equal compiled.compiled_warnings "" then []
+                 else
+                   [
+                     diagnostic ~stage:"compile" ~severity:"warning"
+                       compiled.compiled_warnings;
+                   ])
+                @ (if trace_malformed || tail_relations_malformed then
+                    [
+                      diagnostic ~stage:"runtime" ~severity:"warning"
+                        "Execution data was incomplete because runtime trace relations were malformed.";
+                    ]
+                  else [])
+                @ if multiple_trace_domains then
+                    [
+                      diagnostic ~stage:"runtime" ~severity:"error"
+                        "Execution tracing currently supports one OCaml domain; this program produced events on multiple domains.";
+                    ]
+                  else []
               in
-              if successful runtime.status && not runtime.output_limited then
-                ( "ready",
-                  signature,
+              if multiple_trace_domains then
+                ( "runtime-error",
+                  compiled.compiled_signature,
                   runtime.stdout,
                   runtime.stderr,
                   views,
                   traces,
+                  compiled.compiled_manifests,
+                  true,
+                  tail_handoffs,
+                  tail_linked_enters,
+                  tail_handoff_outcomes,
+                  tail_handoff_occurrences,
+                  warning_diagnostics )
+              else if successful runtime.status && not runtime.output_limited then
+                ( "ready",
+                  compiled.compiled_signature,
+                  runtime.stdout,
+                  runtime.stderr,
+                  views,
+                  traces,
+                  compiled.compiled_manifests,
                   trace_truncated,
                   tail_handoffs,
                   tail_linked_enters,
                   tail_handoff_outcomes,
+                  tail_handoff_occurrences,
                   warning_diagnostics )
               else
                 ( (if runtime.timed_out then "timed-out"
                    else if runtime.output_limited then "output-limited"
                    else "runtime-error"),
-                  signature,
+                  compiled.compiled_signature,
                   runtime.stdout,
                   runtime.stderr,
                   views,
                   traces,
+                  compiled.compiled_manifests,
                   trace_truncated,
                   tail_handoffs,
                   tail_linked_enters,
                   tail_handoff_outcomes,
+                  tail_handoff_occurrences,
                   warning_diagnostics
                   @ [ process_failure ~stage:"runtime" runtime ] ))
   in
-  let status, signature, stdout, stderr, views, traces, trace_truncated,
-      tail_handoffs, tail_linked_enters, tail_handoff_outcomes, diagnostics =
+  let status, signature, stdout, stderr, views, traces, compiler_manifests,
+      trace_truncated, tail_handoffs, tail_linked_enters,
+      tail_handoff_outcomes, tail_handoff_occurrences, diagnostics =
     evaluated
   in
   let inline_results = inline_results inline_markers traces diagnostics in
@@ -2722,11 +3419,20 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
             { path = marker.path; block_id = marker.block_id; stdout; stderr })
   in
   let duration_ms = int_of_float ((Unix.gettimeofday () -. started) *. 1000.) in
+  let source_map_entries =
+    source_map_entries documents inline_markers compiler_manifests
+  in
   {
     ok = String.equal status "ready";
     status;
     evaluation_id;
+    request_code_digest;
+    code_revision_id;
     document_version = target.Document.version;
+    document_revision_id;
+    sources_digest;
+    extracted_code_digest;
+    project_digest;
     project_version;
     started_at;
     compiler = compiler_identity ();
@@ -2738,10 +3444,13 @@ let evaluate_documents ?project_version ?(cancelled = fun () -> false)
     inline_results;
     views;
     traces;
+    compiler_manifests;
+    source_map_entries;
     trace_truncated;
     tail_handoffs;
     tail_linked_enters;
     tail_handoff_outcomes;
+    tail_handoff_occurrences;
     diagnostics;
     duration_ms;
   }
@@ -2813,6 +3522,7 @@ let trace_event_to_json (event : trace_event) =
   `Assoc
     [
       ("sequence", `Int event.sequence);
+      ("domainId", `Int event.domain_id);
       ("phase", `String event.phase);
       ("occurrenceId", `String event.occurrence_id);
       ( "parentId",
@@ -2828,20 +3538,822 @@ let trace_event_to_json (event : trace_event) =
       ("endLine", `Int event.source_end_line);
       ("endColumn", `Int event.source_end_column);
       ("type", `String event.type_);
+      ("valueComplete", `Bool event.value_complete);
       ("detail", `String event.detail);
     ]
 
+let compiler_construct_to_json construct =
+  `Assoc
+    [
+      ("id", `String construct.construct_id);
+      ("category", `String construct.construct_category);
+      ("semanticKind", `String construct.construct_semantic_kind);
+      ("sourcePath", `String construct.construct_generated_path);
+      ("startByte", `Int construct.construct_start_byte);
+      ("endByte", `Int construct.construct_end_byte);
+      ("startLine", `Int construct.construct_start_line);
+      ("startColumn", `Int construct.construct_start_column);
+      ("endLine", `Int construct.construct_end_line);
+      ("endColumn", `Int construct.construct_end_column);
+      ("ghost", `Bool construct.construct_ghost);
+      ( "parentId",
+        Option.fold ~none:`Null
+          ~some:(fun id -> `String id)
+          construct.construct_parent_id );
+      ("ownerScopeId", `String construct.construct_owner_scope_id);
+      ("lexicalScopeId", `String construct.construct_lexical_scope_id);
+      ("syntaxFingerprint", `String construct.construct_syntax_fingerprint);
+      ( "lexicalAncestryFingerprint",
+        `String construct.construct_lexical_ancestry_fingerprint );
+    ]
+
+let compiler_execution_scope_to_json scope =
+  `Assoc
+    [
+      ("id", `String scope.scope_id);
+      ("kind", `String scope.scope_kind);
+      ( "functionConstructId",
+        Option.fold ~none:`Null
+          ~some:(fun id -> `String id)
+          scope.scope_function_construct_id );
+    ]
+
+let compiler_selector_to_json selector =
+  `Assoc
+    [
+      ("id", `String selector.selector_id);
+      ("role", `String selector.selector_role);
+      ("subjectId", `String selector.selector_subject_id);
+      ("sourcePath", `String selector.selector_generated_path);
+      ("startByte", `Int selector.selector_start_byte);
+      ("endByte", `Int selector.selector_end_byte);
+      ("startLine", `Int selector.selector_start_line);
+      ("startColumn", `Int selector.selector_start_column);
+      ("endLine", `Int selector.selector_end_line);
+      ("endColumn", `Int selector.selector_end_column);
+      ("priority", `Int selector.selector_priority);
+      ("tieBreakRank", `Int selector.selector_tie_break_rank);
+      ("syntaxFingerprint", `String selector.selector_syntax_fingerprint);
+    ]
+
+let compiler_manifest_to_json manifest =
+  `Assoc
+    [
+      ("unitName", `String manifest.manifest_unit_name);
+      ("generatedPath", `String manifest.manifest_generated_path);
+      ("byteLength", `Int manifest.manifest_byte_length);
+      ("sourceDigest", `String manifest.manifest_source_digest);
+      ("topLevelScopeId", `String manifest.manifest_top_level_scope_id);
+      ( "executionScopes",
+        `List
+          (List.map compiler_execution_scope_to_json
+             manifest.manifest_execution_scopes) );
+      ( "constructs",
+        `List
+          (List.map compiler_construct_to_json manifest.manifest_constructs) );
+      ( "selectors",
+        `List (List.map compiler_selector_to_json manifest.manifest_selectors) );
+    ]
+
+let user_execution_traces manifests traces =
+  let sites = Hashtbl.create 256 in
+  List.iter
+    (fun manifest ->
+      List.iter
+        (fun construct ->
+          Hashtbl.replace sites construct.construct_id ())
+        manifest.manifest_constructs)
+    manifests;
+  List.filter
+    (fun (event : trace_event) -> Hashtbl.mem sites event.site_id)
+    traces
+
+let mapped_selector_ids source_map_entries =
+  let ids = Hashtbl.create 256 in
+  List.iter
+    (fun entry -> Hashtbl.replace ids entry.map_selector_id ())
+    source_map_entries;
+  ids
+
+let compiler_static_program_to_json ?mapped_selector_ids ~code_revision_id
+    ~compiler_inputs_digest manifests =
+  let construct_fingerprint id =
+    manifests
+    |> List.find_map (fun manifest ->
+        manifest.manifest_constructs
+        |> List.find_map (fun construct ->
+            if String.equal construct.construct_id id then
+              Some construct.construct_syntax_fingerprint
+            else None))
+    |> Option.value ~default:""
+  in
+  let compilation_units =
+    manifests
+    |> List.map (fun manifest ->
+        `Assoc
+          [
+            ("id", `String manifest.manifest_unit_name);
+            ("modulePath", `String manifest.manifest_unit_name);
+            ("generatedPath", `String manifest.manifest_generated_path);
+            ("byteLength", `Int manifest.manifest_byte_length);
+            ("sourceDigest", `String manifest.manifest_source_digest);
+            ("topLevelScopeId", `String manifest.manifest_top_level_scope_id);
+          ])
+  in
+  let execution_scopes =
+    manifests
+    |> List.concat_map (fun manifest ->
+        manifest.manifest_execution_scopes
+        |> List.map (fun scope ->
+            `Assoc
+              ([
+                 ("id", `String scope.scope_id);
+                 ("kind", `String scope.scope_kind);
+                 ("unitId", `String manifest.manifest_unit_name);
+               ]
+              @
+              match scope.scope_function_construct_id with
+              | None -> []
+              | Some id ->
+                  [
+                    ("functionConstructId", `String id);
+                    ("functionFingerprint", `String (construct_fingerprint id));
+                  ])))
+  in
+  let constructs =
+    manifests
+    |> List.concat_map (fun manifest ->
+        manifest.manifest_constructs
+        |> List.map (fun construct ->
+            `Assoc
+              [
+                ("id", `String construct.construct_id);
+                ("category", `String construct.construct_category);
+                ("semanticKind", `String construct.construct_semantic_kind);
+                ( "compilerRange",
+                  `Assoc
+                    [
+                      ("generatedPath", `String manifest.manifest_generated_path);
+                      ("startByte", `Int construct.construct_start_byte);
+                      ("endByte", `Int construct.construct_end_byte);
+                    ] );
+                ( "parentId",
+                  Option.fold ~none:`Null
+                    ~some:(fun id -> `String id)
+                    construct.construct_parent_id );
+                ("ownerScopeId", `String construct.construct_owner_scope_id);
+                ( "lexicalScopeId",
+                  `String construct.construct_lexical_scope_id );
+                ( "syntaxFingerprint",
+                  `String construct.construct_syntax_fingerprint );
+                ( "lexicalAncestryFingerprint",
+                  `String construct.construct_lexical_ancestry_fingerprint );
+                ("ghost", `Bool construct.construct_ghost);
+              ]))
+  in
+  let selectors =
+    manifests
+    |> List.concat_map (fun manifest ->
+        manifest.manifest_selectors
+        |> List.filter (fun selector ->
+            match mapped_selector_ids with
+            | None -> true
+            | Some ids -> Hashtbl.mem ids selector.selector_id)
+        |> List.map (fun selector ->
+            `Assoc
+              [
+                ("id", `String selector.selector_id);
+                ( "compilerRange",
+                  `Assoc
+                    [
+                      ("generatedPath", `String manifest.manifest_generated_path);
+                      ("startByte", `Int selector.selector_start_byte);
+                      ("endByte", `Int selector.selector_end_byte);
+                    ] );
+                ("subjectId", `String selector.selector_subject_id);
+                ("role", `String selector.selector_role);
+                ("priority", `Int selector.selector_priority);
+                ("tieBreakRank", `Int selector.selector_tie_break_rank);
+                ( "syntaxFingerprint",
+                  `String selector.selector_syntax_fingerprint );
+              ]))
+  in
+  `Assoc
+    [
+      ("codeRevisionId", `String code_revision_id);
+      ("compilerInputsDigest", `String compiler_inputs_digest);
+      ("compilationUnits", `List compilation_units);
+      ("executionScopes", `List execution_scopes);
+      ("constructs", `List constructs);
+      ("selectors", `List selectors);
+    ]
+
+let normalized_execution_to_json manifests (traces : trace_event list)
+    ~tail_handoff_occurrences ~trace_truncated =
+  let final_sequence =
+    List.fold_left
+      (fun maximum (event : trace_event) -> max maximum event.sequence)
+      0 traces
+  in
+  let enters = Hashtbl.create 256 in
+  let outcomes = Hashtbl.create 256 in
+  let call_attempt_opens = ref [] in
+  let call_attempt_outcomes = Hashtbl.create 256 in
+  let call_attempt_consumptions = ref [] in
+  let closure_creations = ref [] in
+  let activation_closures = Hashtbl.create 256 in
+  let writes = ref [] in
+  let parameters = ref [] in
+  List.iter
+    (fun event ->
+      match event.phase with
+      | "enter" -> Hashtbl.replace enters event.occurrence_id event
+      | "return" | "raise" ->
+          Hashtbl.replace outcomes event.occurrence_id event
+      | "call-attempt-open" -> call_attempt_opens := event :: !call_attempt_opens
+      | "call-attempt-return" | "call-attempt-raise" ->
+          Hashtbl.replace call_attempt_outcomes event.occurrence_id event
+      | "call-attempt-consumed" ->
+          call_attempt_consumptions := event :: !call_attempt_consumptions
+      | "closure-created" -> closure_creations := event :: !closure_creations
+      | "activation-closure" ->
+          Hashtbl.replace activation_closures event.occurrence_id event.detail
+      | "write" -> writes := event :: !writes
+      | "parameter" -> parameters := event :: !parameters
+      | _ -> ())
+    traces;
+  let construct_manifest = Hashtbl.create 256 in
+  let scope_by_construct = Hashtbl.create 256 in
+  let function_scope_by_construct = Hashtbl.create 256 in
+  List.iter
+    (fun manifest ->
+      List.iter
+        (fun scope ->
+          Option.iter
+            (fun construct_id ->
+              Hashtbl.replace function_scope_by_construct construct_id
+                scope.scope_id)
+            scope.scope_function_construct_id)
+        manifest.manifest_execution_scopes;
+      List.iter
+        (fun construct ->
+          Hashtbl.replace construct_manifest construct.construct_id manifest;
+          Hashtbl.replace scope_by_construct construct.construct_id
+            construct.construct_owner_scope_id)
+        manifest.manifest_constructs)
+    manifests;
+  let root_activation_id manifest =
+    "activation:top:" ^ manifest.manifest_unit_name
+  in
+  let manifest_for_site site_id = Hashtbl.find_opt construct_manifest site_id in
+  let activation_scope_for_construct construct_id =
+    match Hashtbl.find_opt function_scope_by_construct construct_id with
+    | Some scope_id -> scope_id
+    | None ->
+      Hashtbl.find_opt scope_by_construct construct_id
+      |> Option.value ~default:"unknown-scope"
+  in
+  let fallback_manifest = match manifests with manifest :: _ -> Some manifest | [] -> None in
+  let manifest_for_event (event : trace_event) =
+    match manifest_for_site event.site_id with
+    | Some _ as manifest -> manifest
+    | None -> fallback_manifest
+  in
+  let rec enclosing_function occurrence_id =
+    Option.bind (Hashtbl.find_opt enters occurrence_id) (fun event ->
+        if String.equal event.kind "function" then Some event
+        else Option.bind event.parent_id enclosing_function)
+  in
+  let rec enclosing_call occurrence_id =
+    Option.bind (Hashtbl.find_opt enters occurrence_id) (fun event ->
+        if String.equal event.kind "call" then Some event
+        else Option.bind event.parent_id enclosing_call)
+  in
+  let activation_id_for_event (event : trace_event) =
+    let function_ =
+      match enclosing_function event.occurrence_id with
+      | Some _ as function_ -> function_
+      | None -> Option.bind event.parent_id enclosing_function
+    in
+    match function_ with
+    | Some function_ -> "activation:" ^ function_.occurrence_id
+    | None ->
+        manifest_for_event event
+        |> Option.map root_activation_id
+        |> Option.value ~default:"activation:top:unknown"
+  in
+  let captured_value (event : trace_event) =
+    let complete = event.value_complete in
+    `Assoc
+      [
+        ("type", `String event.type_);
+        ("display", `String event.detail);
+        ( "fingerprint",
+          if complete then `String (Util.digest (event.type_ ^ "\000" ^ event.detail))
+          else `Null );
+        ("complete", `Bool complete);
+      ]
+  in
+  let incomplete_outcome =
+    `Assoc
+      [
+        ("kind", `String "incomplete");
+        ("value", `Null);
+        ("source", `String "truncated");
+      ]
+  in
+  let outcome occurrence_id =
+    match Hashtbl.find_opt outcomes occurrence_id with
+    | Some event ->
+        `Assoc
+          [
+            ("kind", `String event.phase);
+            ("value", captured_value event);
+            ("source", `String "runtime");
+          ]
+    | None -> incomplete_outcome
+  in
+  let call_attempt_outcome occurrence_id =
+    let event =
+      match Hashtbl.find_opt call_attempt_outcomes occurrence_id with
+      | Some event -> Some event
+      | None -> Hashtbl.find_opt outcomes occurrence_id
+    in
+    match event with
+    | Some event ->
+        `Assoc
+          [
+            ( "kind",
+              `String
+                (if String.equal event.phase "call-attempt-raise"
+                    || String.equal event.phase "raise"
+                 then "raise" else "return") );
+            ("value", captured_value event);
+            ("source", `String "call-attempt");
+          ]
+    | None -> incomplete_outcome
+  in
+  let occurrence_kind (event : trace_event) =
+    match event.kind with
+    | "function" -> "function"
+    | "call" -> "call"
+    | "pattern" -> "pattern"
+    | "binding" -> "binder"
+    | "boundary" -> "boundary"
+    | _ -> "expression"
+  in
+  let enter_events =
+    Hashtbl.to_seq_values enters |> List.of_seq
+    |> List.sort (fun left right -> Int.compare left.sequence right.sequence)
+  in
+  let same_activation (left : trace_event) (right : trace_event) =
+    String.equal (activation_id_for_event left) (activation_id_for_event right)
+  in
+  let occurrence_json (event : trace_event) =
+    let parent_occurrence_id =
+      if String.equal event.kind "function" then None
+      else
+        Option.bind event.parent_id (fun parent_id ->
+            Option.bind (Hashtbl.find_opt enters parent_id) (fun parent ->
+                if same_activation event parent then Some parent_id else None))
+    in
+    `Assoc
+      [
+        ("id", `String event.occurrence_id);
+        ("constructId", `String event.site_id);
+        ("activationId", `String (activation_id_for_event event));
+        ( "parentOccurrenceId",
+          Option.fold ~none:`Null
+            ~some:(fun id -> `String id)
+            parent_occurrence_id );
+        ("kind", `String (occurrence_kind event));
+        ("enteredAt", `Int event.sequence);
+        ( "outcomeAt",
+          Option.fold ~none:`Null
+            ~some:(fun outcome -> `Int outcome.sequence)
+            (Hashtbl.find_opt outcomes event.occurrence_id) );
+        ("outcome", outcome event.occurrence_id);
+      ]
+  in
+  let parameter_occurrence_id (event : trace_event) =
+    Printf.sprintf "%s:parameter:%d" event.occurrence_id event.sequence
+  in
+  let parameter_json (event : trace_event) =
+    `Assoc
+      [
+        ("id", `String (parameter_occurrence_id event));
+        ("constructId", `String event.site_id);
+        ("activationId", `String ("activation:" ^ event.occurrence_id));
+        ("parentOccurrenceId", `String event.occurrence_id);
+        ("kind", `String "parameter");
+        ("enteredAt", `Int event.sequence);
+        ("outcomeAt", `Int event.sequence);
+        ( "outcome",
+          `Assoc
+            [
+              ("kind", `String "return");
+              ("value", captured_value event);
+              ("source", `String "runtime");
+            ] );
+      ]
+  in
+  let parameters = List.rev !parameters in
+  let all_occurrence_entries =
+    List.map
+      (fun event ->
+        ( event.occurrence_id,
+          activation_id_for_event event,
+          event.sequence,
+          occurrence_json event ))
+      enter_events
+    @ List.map
+        (fun event ->
+          ( parameter_occurrence_id event,
+            "activation:" ^ event.occurrence_id,
+            event.sequence,
+            parameter_json event ))
+        parameters
+  in
+  let occurrences_for_activation activation_id =
+    all_occurrence_entries
+    |> List.filter (fun (_, owner, _, _) -> String.equal owner activation_id)
+    |> List.sort (fun (_, _, left, _) (_, _, right, _) -> Int.compare left right)
+  in
+  let function_events =
+    List.filter
+      (fun (event : trace_event) -> String.equal event.kind "function")
+      enter_events
+  in
+  let callsite_for_function (event : trace_event) =
+    Option.bind event.parent_id enclosing_call
+  in
+  let attempt_occurrence_for_consumption (consumed : trace_event) =
+    Option.bind consumed.parent_id enclosing_call
+    |> Option.map (fun (call : trace_event) -> call.occurrence_id)
+  in
+  let consumed_attempt_for_function (event : trace_event) =
+    Option.bind
+      (List.find_opt
+         (fun consumed ->
+           String.equal consumed.occurrence_id event.occurrence_id)
+         !call_attempt_consumptions)
+      attempt_occurrence_for_consumption
+  in
+  let function_activation_json (event : trace_event) =
+    let activation_id = "activation:" ^ event.occurrence_id in
+    let callsite = callsite_for_function event in
+    let dynamic_parent =
+      match Option.bind event.parent_id enclosing_function with
+      | Some parent -> Some ("activation:" ^ parent.occurrence_id)
+      | None -> Option.map activation_id_for_event callsite
+    in
+    let owned = occurrences_for_activation activation_id in
+    let parameter_ids =
+      parameters
+      |> List.filter (fun parameter ->
+          String.equal parameter.occurrence_id event.occurrence_id)
+      |> List.map parameter_occurrence_id
+    in
+    let outcome_event = Hashtbl.find_opt outcomes event.occurrence_id in
+    let outcome_fingerprint =
+      Option.bind outcome_event (fun returned ->
+          match captured_value returned with
+          | `Assoc fields -> (
+              match List.assoc_opt "fingerprint" fields with
+              | Some (`String fingerprint) -> Some fingerprint
+              | _ -> None)
+          | _ -> None)
+    in
+    `Assoc
+      [
+        ("id", `String activation_id);
+        ( "scopeId",
+          `String (activation_scope_for_construct event.site_id) );
+        ("functionOccurrenceId", `String event.occurrence_id);
+        ("functionConstructId", `String event.site_id);
+        ( "closureId",
+          match Hashtbl.find_opt activation_closures event.occurrence_id with
+          | Some id when not (String.equal id "") -> `String ("closure:" ^ id)
+          | Some _ | None -> `Null );
+        ( "dynamicParentId",
+          Option.fold ~none:`Null
+            ~some:(fun id -> `String id)
+            dynamic_parent );
+        ( "callsiteOccurrenceId",
+          Option.fold ~none:`Null
+            ~some:(fun (callsite : trace_event) ->
+              `String callsite.occurrence_id)
+            callsite );
+        ( "consumedCallAttemptId",
+          Option.fold ~none:`Null
+            ~some:(fun occurrence_id -> `String ("attempt:" ^ occurrence_id))
+            (consumed_attempt_for_function event) );
+        ( "occurrenceIds",
+          `List (List.map (fun (id, _, _, _) -> `String id) owned) );
+        ("parameterOccurrenceIds", `List (List.map (fun id -> `String id) parameter_ids));
+        ("enteredAt", `Int event.sequence);
+        ( "outcomeAt",
+          Option.fold ~none:`Null
+            ~some:(fun returned -> `Int returned.sequence)
+            outcome_event );
+        ("outcome", outcome event.occurrence_id);
+        ( "signature",
+          `Assoc
+            [
+              ("functionKey", `String event.site_id);
+              ( "callsiteKey",
+                Option.fold ~none:`Null
+                  ~some:(fun (callsite : trace_event) ->
+                    `String callsite.site_id)
+                  callsite );
+              ( "parameterFingerprints",
+                `List
+                  (parameters
+                  |> List.filter (fun parameter ->
+                      String.equal parameter.occurrence_id event.occurrence_id)
+                  |> List.map (fun parameter ->
+                      match captured_value parameter with
+                      | `Assoc fields ->
+                          Option.value ~default:`Null
+                            (List.assoc_opt "fingerprint" fields)
+                      | _ -> `Null)) );
+              ( "outcomeFingerprint",
+                Option.fold ~none:`Null
+                  ~some:(fun fingerprint -> `String fingerprint)
+                  outcome_fingerprint );
+            ] );
+      ]
+  in
+  let root_activation_json manifest =
+    let activation_id = root_activation_id manifest in
+    let owned = occurrences_for_activation activation_id in
+    let entered_at =
+      match owned with (_, _, sequence, _) :: _ -> sequence | [] -> 0
+    in
+    let outcome_at, outcome, outcome_fingerprint =
+      if trace_truncated then
+        ( `Null,
+          `Assoc
+            [
+              ("kind", `String "incomplete");
+              ("value", `Null);
+              ("source", `String "truncated");
+            ],
+          `Null )
+      else
+        ( `Int final_sequence,
+          `Assoc
+            [
+              ("kind", `String "return");
+              ( "value",
+                `Assoc
+                  [
+                    ("type", `String "unit");
+                    ("display", `String "()");
+                    ("fingerprint", `String (Util.digest "unit\000()"));
+                    ("complete", `Bool true);
+                  ] );
+              ("source", `String "runtime");
+            ],
+          `String (Util.digest "unit\000()") )
+    in
+    `Assoc
+      [
+        ("id", `String activation_id);
+        ("scopeId", `String manifest.manifest_top_level_scope_id);
+        ("functionOccurrenceId", `Null);
+        ("functionConstructId", `Null);
+        ("closureId", `Null);
+        ("dynamicParentId", `Null);
+        ("callsiteOccurrenceId", `Null);
+        ("consumedCallAttemptId", `Null);
+        ( "occurrenceIds",
+          `List (List.map (fun (id, _, _, _) -> `String id) owned) );
+        ("parameterOccurrenceIds", `List []);
+        ("enteredAt", `Int entered_at);
+        ("outcomeAt", outcome_at);
+        ("outcome", outcome);
+        ( "signature",
+          `Assoc
+            [
+              ("functionKey", `String manifest.manifest_unit_name);
+              ("callsiteKey", `Null);
+              ("parameterFingerprints", `List []);
+              ("outcomeFingerprint", outcome_fingerprint);
+            ] );
+      ]
+  in
+  let producer_ids (call : trace_event) =
+    List.rev !call_attempt_consumptions
+    |> List.filter_map (fun consumed ->
+        match attempt_occurrence_for_consumption consumed with
+        | Some occurrence_id when String.equal occurrence_id call.occurrence_id ->
+            Some ("activation:" ^ consumed.occurrence_id)
+        | Some _ | None -> None)
+  in
+  let call_attempt_json (opened : trace_event) =
+    let call =
+      Hashtbl.find_opt enters opened.occurrence_id
+      |> Option.value ~default:opened
+    in
+    let returned =
+      match Hashtbl.find_opt call_attempt_outcomes call.occurrence_id with
+      | Some event -> Some event
+      | None -> Hashtbl.find_opt outcomes call.occurrence_id
+    in
+    `Assoc
+      [
+        ("id", `String ("attempt:" ^ call.occurrence_id));
+        ("ownerActivationId", `String (activation_id_for_event call));
+        ("callOccurrenceId", `String call.occurrence_id);
+        ( "tail",
+          `Bool (List.mem call.occurrence_id tail_handoff_occurrences) );
+        ("openedAt", `Int opened.sequence);
+        ("producerActivationIds", `List (List.map (fun id -> `String id) (producer_ids call)));
+        ( "outcomeAt",
+          Option.fold ~none:`Null
+            ~some:(fun event -> `Int event.sequence)
+            returned );
+        ("outcome", call_attempt_outcome call.occurrence_id);
+      ]
+  in
+  let call_events =
+    List.rev !call_attempt_opens
+    |> List.filter (fun opened ->
+        match Hashtbl.find_opt enters opened.occurrence_id with
+        | Some event -> String.equal event.kind "call"
+        | None -> false)
+  in
+  let closure_json (event : trace_event) =
+    let origin_activation_id =
+      Option.bind event.parent_id (fun parent_id ->
+          Option.map activation_id_for_event (Hashtbl.find_opt enters parent_id))
+    in
+    `Assoc
+      [
+        ("id", `String ("closure:" ^ event.occurrence_id));
+        ("functionConstructId", `String event.site_id);
+        ("createdAt", `Int event.sequence);
+        ( "originActivationId",
+          Option.fold ~none:`Null ~some:(fun id -> `String id)
+            origin_activation_id );
+      ]
+  in
+  let closure_provenance_json (event : trace_event) =
+    match String.split_on_char ':' event.detail with
+    | [ "derived"; source_id ] ->
+        Some
+          (`Assoc
+            [
+              ("closureId", `String ("closure:" ^ event.occurrence_id));
+              ("sequence", `Int event.sequence);
+              ("kind", `String "derived");
+              ("activationId", `Null);
+              ("callsiteOccurrenceId", `Null);
+              ("sourceClosureId", `String ("closure:" ^ source_id));
+            ])
+    | _ -> None
+  in
+  let closure_creations = List.rev !closure_creations in
+  let writes =
+    List.rev !writes
+    |> List.map (fun (event : trace_event) ->
+        `Assoc
+          [
+            ("id", `String ("write:" ^ event.occurrence_id));
+            ("sequence", `Int event.sequence);
+            ("activationId", `String (activation_id_for_event event));
+            ("constructId", `String event.site_id);
+            ("operation", `String event.label);
+            ("targetId", `Null);
+            ("oldValue", `Null);
+            ("newValue", captured_value event);
+          ])
+  in
+  `Assoc
+    [
+      ( "occurrences",
+        `List (List.map (fun (_, _, _, json) -> json) all_occurrence_entries) );
+      ( "activations",
+        `List
+          (List.map root_activation_json manifests
+          @ List.map function_activation_json function_events) );
+      ("closures", `List (List.map closure_json closure_creations));
+      ( "closureProvenance",
+        `List (List.filter_map closure_provenance_json closure_creations) );
+      ("callAttempts", `List (List.map call_attempt_json call_events));
+      ("writes", `List writes);
+    ]
+
+let execution_artifact_to_json result =
+  if not result.ok then `Null
+  else
+    let traces =
+      user_execution_traces result.compiler_manifests result.traces
+    in
+    let compiler_inputs_digest =
+      source_identity ~domain:"dox-compiler-input-v1"
+        [ ("\000compiler", [ ("identity", result.compiler) ]) ]
+    in
+    let mapped_selector_ids = mapped_selector_ids result.source_map_entries in
+    let static_program =
+      compiler_static_program_to_json
+        ~mapped_selector_ids
+        ~code_revision_id:result.code_revision_id ~compiler_inputs_digest
+        result.compiler_manifests
+    in
+    let execution =
+      normalized_execution_to_json result.compiler_manifests traces
+        ~tail_handoff_occurrences:result.tail_handoff_occurrences
+        ~trace_truncated:result.trace_truncated
+    in
+    let final_sequence =
+      List.fold_left
+        (fun maximum event -> max maximum event.sequence)
+        0 traces
+    in
+    let terminal_without_checksum =
+      `Assoc
+        ([
+           ( "kind",
+             `String
+               (if result.trace_truncated then "truncated" else "complete") );
+           ("finalSequence", `Int final_sequence);
+         ]
+        @ if result.trace_truncated then [ ("reason", `String "size-limit") ]
+          else [])
+    in
+    let terminal_checksum =
+      terminal_without_checksum |> execution_canonical_json
+      |> execution_checksum
+    in
+    let terminal =
+      match terminal_without_checksum with
+      | `Assoc fields -> `Assoc (fields @ [ ("checksum", `String terminal_checksum) ])
+      | _ -> assert false
+    in
+    let source_maps =
+      let entry_to_json entry =
+        `Assoc
+          [
+            ("selectorId", `String entry.map_selector_id);
+            ("generatedPath", `String entry.map_generated_path);
+            ("startByte", `Int entry.map_start_byte);
+            ("endByte", `Int entry.map_end_byte);
+            ("documentPath", `String entry.map_document_path);
+            ("startUtf16", `Int entry.map_start_utf16);
+            ("endUtf16", `Int entry.map_end_utf16);
+          ]
+      in
+      `Assoc
+        [
+          ("documentRevisionId", `String result.document_revision_id);
+          ("codeRevisionId", `String result.code_revision_id);
+          ("sourcesDigest", `String result.sources_digest);
+          ("extractedCodeDigest", `String result.extracted_code_digest);
+          ("entries", `List (List.map entry_to_json result.source_map_entries));
+        ]
+    in
+    let fields =
+      [
+        ("schemaVersion", `Int 1);
+        ("evaluationId", `String result.evaluation_id);
+        ("requestCodeDigest", `String result.request_code_digest);
+        ( "projectDigest",
+          `String result.project_digest );
+        ("codeRevisionId", `String result.code_revision_id);
+        ("compilerInputsDigest", `String compiler_inputs_digest);
+        ("staticProgram", static_program);
+        ("sourceMaps", source_maps);
+        ("execution", execution);
+        ("terminal", terminal);
+      ]
+    in
+    let artifact_checksum =
+      `Assoc fields |> execution_canonical_json |> execution_checksum
+    in
+    `Assoc (fields @ [ ("artifactChecksum", `String artifact_checksum) ])
+
 let to_json result =
+  let compiler_inputs_digest =
+    source_identity ~domain:"dox-compiler-input-v1"
+      [ ("\000compiler", [ ("identity", result.compiler) ]) ]
+  in
+  let traces =
+    user_execution_traces result.compiler_manifests result.traces
+  in
   `Assoc
     [
       ("ok", `Bool result.ok);
       ("status", `String result.status);
       ("evaluationId", `String result.evaluation_id);
+      ("codeRevisionId", `String result.code_revision_id);
       ("documentVersion", `String result.document_version);
       ( "projectVersion",
         Option.fold ~none:`Null
           ~some:(fun version -> `String version)
           result.project_version );
+      ("projectDigest", `String result.project_digest);
       ("startedAt", `String result.started_at);
       ("compiler", `String result.compiler);
       ("signature", `String result.signature);
@@ -2853,7 +4365,16 @@ let to_json result =
       ( "inlineResults",
         `List (List.map inline_result_to_json result.inline_results) );
       ("views", `List (List.map view_to_json result.views));
-      ("traces", `List (List.map trace_event_to_json result.traces));
+      ("traces", `List (List.map trace_event_to_json traces));
+      ( "compilerManifests",
+        `List (List.map compiler_manifest_to_json result.compiler_manifests) );
+      ( "staticProgram",
+        compiler_static_program_to_json
+          ~mapped_selector_ids:(mapped_selector_ids result.source_map_entries)
+          ~code_revision_id:result.code_revision_id
+          ~compiler_inputs_digest
+          result.compiler_manifests );
+      ("executionArtifact", execution_artifact_to_json result);
       ("traceTruncated", `Bool result.trace_truncated);
       ("tailHandoffs", `Int result.tail_handoffs);
       ("tailLinkedEnters", `Int result.tail_linked_enters);
@@ -2888,8 +4409,8 @@ let build_artifact_documents ~documents ~entry ~output =
               ()
           with
           | Error diagnostic -> Error diagnostic.message
-          | Ok (_, executable, warnings) -> (
-              match Util.read_file executable with
+          | Ok compiled -> (
+              match Util.read_file compiled.compiled_executable with
               | Error message -> Error message
               | Ok bytes -> (
                   match Util.write_file output bytes with
@@ -2912,7 +4433,7 @@ let build_artifact_documents ~documents ~entry ~output =
                           entry
                       in
                       Result.map
-                        (fun () -> (source_path, warnings))
+                        (fun () -> (source_path, compiled.compiled_warnings))
                         (Util.write_file source_path generated))))
 
 let build_artifact ~document ~entry ~output =

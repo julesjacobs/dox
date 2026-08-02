@@ -36,8 +36,10 @@ uses it to render values when their event occurs; it never retains a live
 reference and prints it later. Primitive values, strings, tuples, lists,
 options, arrays, records, and boxed variants have bounded OCaml-shaped
 previews. Recursive variants keep constructor names. Closures and unsupported
-abstract representations are explicitly opaque. Dox does not guess an
-abstract type's runtime representation from its module name.
+non-scannable runtime blocks are explicitly opaque. Scannable values whose
+abstract type hides field names use bounded raw block notation such as
+`#0(...)`. Dox does not guess an abstract type's runtime representation from
+its module name.
 
 Destructuring a value records each identifier after the pattern has matched,
 so `let left, right = pair` produces separate `left` and `right` bindings
@@ -50,20 +52,19 @@ reconstruct alias graphs, or expose writes performed inside library and C code.
 
 ## Projections
 
-The CLI and IDE consume the same event list.
+The CLI and IDE consume the same normalized execution artifact.
 
 - `dox check` includes the completed execution events in `traces`.
 - `dox check` also reports raw tail-handoff, linked-enter, and unexpected
   handoff-outcome counts before tail events are projected away.
-- `dox inspect` groups occurrences at one static expression.
-- `dox inspect-call` projects one function invocation, its values, caller, and
-  child calls.
+- `scripts/audit-execution.mjs --at LINE:COLUMN` runs the same selector,
+  occurrence, activation, coverage, and view-model queries as the IDE.
 - The always-present execution view focuses an invocation, softly highlights
   its executed path, annotates binders and returns, and links exact callsites.
 
-Moving the source cursor focuses an execution through the selected construct
-and highlights all matching events. Moving the timeline or clicking a call
-changes the same focus; none of these interactions rerun or replay the program.
+Moving the source cursor focuses an execution through the selected construct.
+Choosing an occurrence or Shift-clicking a call changes that same focus; none
+of these interactions rerun or replay the program.
 
 ## Current semantic boundary
 

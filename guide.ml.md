@@ -11,8 +11,8 @@ shown in the left pane.
 - Press `Shift–Tab` to return a code line to prose.
 - Definitions remain live across every code block on the page.
 - Use an inline expression ending in `=` to show its value, as in `1 + 2 =`.
-- Use `Source` in the upper-right to edit the raw Markdown without changing
-  cursor, selection, undo history, or scroll position.
+- The upper-right control cycles through the normal `Document`, raw Markdown
+  `Source`, and the visual execution auditor in `Debug`.
 
 At the end of a code block, `Down` creates prose below it when no following line
 exists. `Shift–Enter` exits a code block anywhere.
@@ -64,24 +64,22 @@ debugger run.
 
 ## Observed execution
 
-The execution record is always present. Evaluation, the timeline, inline
-values, and the execution list all show the same immutable record; inspecting
-it never runs the program again.
+The execution record is always present. Inline values, source highlighting,
+and the execution list all show the same immutable record; inspecting it never
+runs the program again.
 
-- Parameters, pattern variables, and local bindings reveal their runtime values
-  directly after their names.
-- Program highlights the top-level OCaml that ran.
-- A selected invocation softly highlights the exact expressions it executed.
-  Code that no execution reached is subdued; code reached by another invocation
-  keeps its normal contrast.
-- Calls made by the invocation show their arguments and result. Click one to
-  move down the call tree.
-- The function name shows the caller's result when a caller exists.
-  Click it to move back up the call tree.
-- Move the timeline to another event, or click a linked caller or callee to
-  focus that invocation.
-- Moving the text cursor focuses an execution that reached that construct and
-  marks every matching occurrence on the timeline.
+- Move the text cursor to an OCaml construct to select an execution that reached
+  that exact construct.
+- The selected activation softly highlights the expressions it executed.
+  Code reached only by another activation keeps its normal contrast. Code that
+  no execution reached is subdued.
+- Parameters, pattern variables, local bindings, and function returns appear as
+  compact inline annotations for the selected activation.
+- The right pane lists every execution of the selected construct. Choose its
+  activation line to switch activation, or its value line to choose that exact
+  occurrence.
+- Shift-click a highlighted call to open its callee activation. Shift-click the
+  function name to return to its caller. A plain click only moves the cursor.
 
 The trace is tied to the exact evaluated program. Editing executable OCaml
 marks it as stale until the replacement evaluation arrives. Prose-only edits do

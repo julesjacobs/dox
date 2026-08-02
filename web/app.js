@@ -10,60 +10,14 @@ import {
   replaceEditorStateDocument,
 } from "./editor.bundle.js?v=20260801b";
 import {
-  executionCallLinkAt,
-  executionActivationInactiveRanges,
-  executionActiveRanges,
-  executionCursorCoverageIsConsistent,
-  executionFocusRangeAtPosition,
-  executionFunctionSourceRange,
-  executionNeverRunRanges,
-  executionRangesWithFocus,
-  executionIdentifierRange,
-  executionTraceIdentifierRange,
-  executionSnapshotKey,
-} from "./execution-lens.js";
-import {
-  executionSessionCall,
-  executionSessionCallForEvent,
-  executionSessionChooseFocusedExecution,
-  executionSessionFocusExecutions,
-  executionSessionFocusValue,
-  executionSessionFocusedEvents,
-  executionSessionFocusRange,
-  executionSessionEvent,
-  executionSessionMatches,
-  executionSessionReconcileFocus,
-  executionSessionSelectEvent,
-  executionSessionSelectCall,
-  executionSessionSelectSite,
-  pendingExecutionSession,
-  readyExecutionSession,
-} from "./execution-session.js";
-import {
-  createExecutionRecency,
-  noteExecutionChoice,
-  preferredExecutionChoice,
-} from "./execution-preference.js";
-import {
-  createExecutionDraftMapping,
-  mapExecutionDraftEvent,
-  mapExecutionDraftSites,
-  projectExecutionDraftEvents,
-} from "./execution-draft.js";
-import {
-  executionTimelineEvents,
-  executionTimelinePosition,
-  executionTimelineSpan,
-} from "./execution-timeline.js";
-import {
-  buildExecutionRecord,
-  executionCallBindings,
-} from "./execution-record.js";
-import {
-  executionCursorProbe,
-  executionSiteAt,
-  executionSourceTextForSite,
-} from "./execution-cursor.js";
+  buildExecutionAuditLine,
+  createExecutionAuditBaseline,
+  dispatchExecutionIntent,
+  executionPendingToken,
+  installExecutionArtifact,
+  presentExecution,
+} from "./execution-adapter.js";
+import { pointerColumn } from "./debug-explorer.js";
 
 const app = document.querySelector("#app");
 
@@ -113,9 +67,11 @@ const state = {
   evaluationController: null,
   sourceEditorView: null,
   sourceMode:
-    localStorage.getItem("dox:v2:editor-mode") === "source"
-      ? "source"
+    ["source", "debug"].includes(localStorage.getItem("dox:v2:editor-mode"))
+      ? localStorage.getItem("dox:v2:editor-mode")
       : "literate",
+  debugCursor: null,
+  debugAuditBaseline: null,
   paneWidths: { sidebar: 160, inspector: 340 },
   typeInfo: null,
   cursorPosition: null,
@@ -125,20 +81,14 @@ const state = {
   definitionTimer: null,
   completion: null,
   completionCache: new Map(),
+  executionArtifactCache: new Map(),
   completionGeneration: 0,
   completionController: null,
   completionRequestKey: null,
   completionPositionFrame: null,
   suppressNextCompletionLookup: false,
-  debugger: null,
-  debuggerPreview: null,
-  executionRecency: createExecutionRecency(),
-  executionRevealGeneration: 0,
-  executionTimelineScrubbing: false,
-  executionTimelineCleanup: null,
-  traceFocusGeneration: 0,
-  preserveTraceFocusForSelection: false,
-  executionSitesCache: new Map(),
+  executionCore: null,
+  executionProblem: null,
   typeGeneration: 0,
   typeTimer: null,
   typeController: null,
@@ -172,6 +122,8 @@ const state = {
   dependencyGeneration: 0,
   dependencyController: null,
 };
+
+const debugMatrixCache = new WeakMap();
 
 const escapeHtml = (value = "") =>
   value
@@ -351,55 +303,17 @@ function currentSession() {
   return state.module ? state.sessions.get(state.module) : null;
 }
 
-function debuggerSnapshot({
-  path = state.path,
-  source = state.document?.source,
-  projectVersion = state.projectVersion,
-} = {}) {
-  if (!path || typeof source !== "string" || !projectVersion) return null;
-  return { path, source, projectVersion };
-}
-
-function debuggerMatchesSnapshot(debuggerState, snapshot) {
-  return Boolean(
-    executionSessionMatches(debuggerState, snapshot) &&
-      !debuggerState.stale &&
-      !debuggerState.provisional,
-  );
-}
-
-function debuggerOwnsSnapshot(debuggerState, snapshot) {
-  return Boolean(
-    debuggerState &&
-      snapshot &&
-      debuggerState.projectVersion === snapshot.projectVersion &&
-      debuggerState.sources?.[snapshot.path] === snapshot.source,
-  );
-}
-
-function debuggerUsableForSnapshot(debuggerState, snapshot) {
-  return Boolean(
-    executionSessionMatches(debuggerState, snapshot) &&
-      !debuggerState.stale &&
-      debuggerState.status === "ready" &&
-      debuggerState.sources?.[snapshot.path] === snapshot.source,
-  );
-}
-
-function currentExecutionSiteIndex() {
-  return state.debugger?.siteIndexes?.[state.path] || null;
-}
-
-function currentExecutionSites() {
-  return currentExecutionSiteIndex()?.sites || [];
-}
-
-function clearExecutionDocumentState() {
-  state.executionTimelineScrubbing = false;
-}
-
-function resetExecutionNavigation() {
-  clearExecutionDocumentState();
+function setExecutionCore(executionCore) {
+  state.executionCore = executionCore;
+  if (
+    state.sourceMode === "debug" &&
+    state.debugAuditBaseline?.view !== executionCore?.view
+  ) {
+    state.debugAuditBaseline = createExecutionAuditBaseline(executionCore);
+  }
+  const session = currentSession();
+  if (session) session.executionCore = executionCore;
+  return executionCore;
 }
 
 function captureCurrentSession() {
@@ -417,12 +331,9 @@ function captureCurrentSession() {
   session.evaluation = state.evaluation;
   session.evaluationPlan = state.evaluationPlan;
   session.evaluationInvalidation = state.evaluationInvalidation;
-  session.debugger = debuggerUsableForSnapshot(
-    state.debugger,
-    debuggerSnapshot(),
-  )
-    ? state.debugger
-    : null;
+  session.executionCore = state.executionCore;
+  session.executionProblem = state.executionProblem;
+  session.debugCursor = state.debugCursor;
   session.selected = state.selected;
   session.editorState = editor?.state || session.editorState;
   session.scrollTop =
@@ -435,7 +346,7 @@ function captureCurrentSession() {
   state.sessions.set(state.module, session);
 }
 
-function restoreSession(session, { preserveDebugger = false } = {}) {
+function restoreSession(session) {
   state.module = session.module;
   state.path = session.path;
   state.document = session.document;
@@ -444,19 +355,15 @@ function restoreSession(session, { preserveDebugger = false } = {}) {
   state.evaluation = session.evaluation || null;
   state.evaluationPlan = session.evaluationPlan || null;
   state.evaluationInvalidation = session.evaluationInvalidation || null;
-  if (!preserveDebugger) {
-    const snapshot = debuggerSnapshot({
-      path: session.path,
-      source: session.document.source,
-    });
-    state.debugger = debuggerUsableForSnapshot(session.debugger, snapshot)
-      ? session.debugger
+  state.executionCore = session.executionCore || null;
+  state.executionProblem = session.executionProblem || null;
+  state.debugCursor = session.debugCursor || null;
+  state.debugAuditBaseline =
+    state.sourceMode === "debug"
+      ? createExecutionAuditBaseline(state.executionCore)
       : null;
-  }
   state.selected = session.selected || session.document.blocks[0]?.id || null;
   state.dirty = session.document.source !== session.savedSource;
-  if (preserveDebugger) clearExecutionDocumentState();
-  else resetExecutionNavigation(session);
 }
 
 function updateRoute(modulePath, mode = "push") {
@@ -600,7 +507,6 @@ async function loadDocument(
   modulePath,
   {
     force = false,
-    preserveDebugger = false,
     history = "push",
     focus = "main",
     projectRetry = 0,
@@ -618,8 +524,11 @@ async function loadDocument(
   }
   if (!force && modulePath === state.module) return true;
   captureCurrentSession();
-  if (!preserveDebugger && modulePath !== state.module) {
-    state.debugger = null;
+  if (modulePath !== state.module) {
+    state.executionCore = null;
+    state.debugCursor = null;
+    state.debugAuditBaseline = null;
+    state.executionProblem = null;
   }
   const inheritedProvisional = state.provisionalNavigation;
   const previousModule =
@@ -638,7 +547,7 @@ async function loadDocument(
   state.navigationController = controller;
   beginPendingNavigation(modulePath);
   if (cached?.document) {
-    restoreSession(cached, { preserveDebugger });
+    restoreSession(cached);
     state.view = "document";
     updateRoute(modulePath, history);
     state.provisionalNavigation = {
@@ -654,8 +563,6 @@ async function loadDocument(
     void loadDependencyContext(modulePath);
     if (!cached.evaluation) {
       scheduleEvaluation(cached.document.source, { immediate: true });
-    } else if (!preserveDebugger) {
-      queueMicrotask(() => void startDebugger({ background: true }));
     }
     void revalidateCachedSession(cached, state.provisionalNavigation);
     if (focus === "main") {
@@ -707,7 +614,6 @@ async function loadDocument(
       if (refreshed.version !== diskVersion && projectRetry < 1) {
         return loadDocument(modulePath, {
           force: true,
-          preserveDebugger,
           history,
           focus,
           projectRetry: projectRetry + 1,
@@ -742,8 +648,7 @@ async function loadDocument(
     state.evaluation = null;
     state.evaluationPlan = null;
     state.evaluationInvalidation = null;
-    if (preserveDebugger) clearExecutionDocumentState();
-    else resetExecutionNavigation();
+    state.executionCore = null;
     state.evaluating = true;
     state.selected = payload.document.blocks[0]?.id || null;
     state.selectedDefinitionName = null;
@@ -759,7 +664,8 @@ async function loadDocument(
       evaluation: null,
       evaluationPlan: null,
       evaluationInvalidation: null,
-      debugger: null,
+      executionCore: null,
+      debugCursor: null,
       selected: payload.document.blocks[0]?.id || null,
       editorState: null,
       scrollTop: 0,
@@ -1033,6 +939,9 @@ async function revalidateCachedSession(
     session.evaluation = null;
     session.evaluationPlan = null;
     session.evaluationInvalidation = null;
+    session.executionCore = null;
+    session.executionProblem = null;
+    session.debugCursor = null;
     if (session === currentSession()) {
       restoreSession(session);
       state.workspaceError = state.outlineConflict || null;
@@ -1090,6 +999,9 @@ function evaluationStatus() {
   if (state.evaluationInvalidation) {
     return { label: "Results out of date", className: "" };
   }
+  if (state.executionProblem) {
+    return { label: "Needs attention", className: "status-error" };
+  }
   if (state.evaluation?.ok) return { label: "Ready", className: "status-ok" };
   if (state.evaluation) {
     return { label: "Needs attention", className: "status-error" };
@@ -1097,485 +1009,7 @@ function evaluationStatus() {
   return { label: "Not evaluated", className: "" };
 }
 
-function currentExecutionTimelineEvents() {
-  return state.debugger?.events || [];
-}
-
-function executionCallForEvent(event) {
-  return executionSessionCallForEvent(state.debugger, event);
-}
-
-function currentExecutionTimelineEvent() {
-  return executionSessionEvent(state.debugger);
-}
-
-function currentDebugCall() {
-  return executionSessionCall(state.debugger);
-}
-
-function displayedDebuggerState() {
-  return state.debuggerPreview || state.debugger;
-}
-
-function executionRecencyNamespace(debuggerState) {
-  return debuggerState?.evaluationId || executionSnapshotKey(debuggerState);
-}
-
-function preferredChoiceForSession(debuggerState, choices) {
-  return preferredExecutionChoice(choices, state.executionRecency, {
-    currentEventIndex: debuggerState?.focus?.eventIndex,
-    namespace: executionRecencyNamespace(debuggerState),
-  });
-}
-
-function preferFocusedExecution(debuggerState) {
-  const choice = preferredChoiceForSession(
-    debuggerState,
-    executionSessionFocusExecutions(debuggerState),
-  );
-  return choice
-    ? executionSessionChooseFocusedExecution(debuggerState, choice.eventIndex, {
-        preserveAuthoritativeSelection: true,
-      })
-    : debuggerState;
-}
-
-function noteFocusedExecution(debuggerState = state.debugger) {
-  const choice = executionSessionFocusExecutions(debuggerState).find(
-    (candidate) => candidate.eventIndex === debuggerState?.focus?.eventIndex,
-  );
-  if (choice) {
-    noteExecutionChoice(state.executionRecency, choice, {
-      namespace: executionRecencyNamespace(debuggerState),
-    });
-  }
-}
-
-function setDebuggerPreview(preview) {
-  const next = preview?.status === "ready" ? preview : null;
-  if (state.debuggerPreview === next) return;
-  state.debuggerPreview = next;
-  applyDebuggerProjection();
-}
-
-function executionEventDescription(event) {
-  if (!event) return "";
-  if (event.phase === "return") {
-    return `${event.label} returned ${displayDebugValue(event.detail, event.type)}`;
-  }
-  if (event.phase === "raise") {
-    return `${event.label} raised ${displayDebugValue(event.detail, event.type)}`;
-  }
-  return event.kind === "function"
-    ? `${event.label}${event.detail ? ` ${event.detail}` : ""}`
-    : event.label;
-}
-
-function executionTimelineCallDepth(call) {
-  let depth = 0;
-  for (let current = call?.parent; current?.kind === "function"; current = current.parent) {
-    depth += 1;
-  }
-  return depth;
-}
-
-function renderExecutionTimelineMatches(events) {
-  const matches = executionSessionFocusExecutions(state.debugger).map(
-    ({ eventIndex }) => eventIndex,
-  );
-  const selectedIndex = state.debugger?.focus?.eventIndex ?? -1;
-  return matches
-    .filter((index) => index >= 0 && index < events.length)
-    .map((index) => {
-      const position = executionTimelinePosition(index, events.length);
-      return `<span
-        class="execution-timeline-match${index === selectedIndex ? " selected" : ""}"
-        data-execution-match="${index}"
-        style="left:${position.toFixed(3)}%"
-      ></span>`;
-    })
-    .join("");
-}
-
-function renderExecutionTimeline() {
-  if (state.view !== "document") return "";
-  const debuggerState = state.debugger;
-  const events = currentExecutionTimelineEvents();
-  if (!debuggerState || !events.length) {
-    const label =
-      debuggerState?.status === "loading" || state.evaluating
-        ? "Preparing execution…"
-        : state.evaluation?.ok
-          ? "Execution unavailable"
-          : state.evaluation?.diagnostics?.length
-            ? "Fix errors to inspect execution"
-            : "Execution appears after the document compiles";
-    return `<section class="execution-timeline unavailable" aria-label="Execution timeline">
-      <div class="execution-timeline-meta">
-        <strong data-execution-mode-label>Execution</strong>
-        <span>${escapeHtml(label)}</span>
-      </div>
-      <div class="execution-timeline-empty" aria-hidden="true"><span></span></div>
-    </section>`;
-  }
-
-  const hasOccurrence = Number.isFinite(debuggerState.focus?.eventIndex);
-  const index = Math.min(
-    Math.max(debuggerState.focus?.eventIndex ?? 0, 0),
-    events.length - 1,
-  );
-  const cursorExecutionCount =
-    executionSessionFocusExecutions(debuggerState).length;
-  const event = hasOccurrence ? events[index] : null;
-  const call = executionCallForEvent(event);
-  const selectedCallId = call?.id || null;
-  const activePath = new Set(
-    call ? debugCallBreadcrumb(call).map((ancestor) => ancestor.id) : [],
-  );
-  const allCalls = [...debuggerState.model.calls.values()].sort(
-    (left, right) => left.enterSequence - right.enterSequence,
-  );
-  const stride = Math.max(1, Math.ceil(allCalls.length / 480));
-  const spans = allCalls
-    .filter(
-      (candidate, candidateIndex) =>
-        candidateIndex % stride === 0 ||
-        candidate.id === selectedCallId ||
-        activePath.has(candidate.id),
-    )
-    .map((candidate) => {
-      const span = executionTimelineSpan(candidate, events);
-      if (!span) return "";
-      const left = executionTimelinePosition(span.start, events.length);
-      const right = executionTimelinePosition(span.end, events.length);
-      const width = Math.max(0.28, right - left);
-      const depth = Math.min(executionTimelineCallDepth(candidate), 3);
-      const classes = [
-        "execution-timeline-span",
-        candidate.id === selectedCallId ? "selected" : "",
-        activePath.has(candidate.id) ? "on-path" : "",
-      ]
-        .filter(Boolean)
-        .join(" ");
-      return `<span
-        class="${classes}"
-        data-timeline-call="${escapeHtml(candidate.id)}"
-        style="--timeline-left:${left.toFixed(3)}%;--timeline-width:${width.toFixed(3)}%;--timeline-depth:${depth}"
-        title="${escapeHtml(candidate.label)}"
-      ></span>`;
-    })
-    .join("");
-  const playhead = executionTimelinePosition(index, events.length);
-  const moduleName =
-    event &&
-    (state.project?.documents.find((document) => document.path === event.path)
-      ?.module || event.path);
-  const breadcrumb = call
-    ? debugCallBreadcrumb(call)
-        .map((ancestor) =>
-          ancestor.kind === "root" ? "Program" : ancestor.label,
-        )
-        .join(" › ")
-    : hasOccurrence
-      ? "Program"
-      : "Selected code";
-  return `<section class="execution-timeline${debuggerState.stale || debuggerState.provisional ? " stale" : ""}" data-execution-timeline aria-label="Execution timeline">
-    <div class="execution-timeline-meta">
-      <strong data-execution-mode-label>Execution</strong>
-      <span><b data-execution-index>${hasOccurrence ? index + 1 : "–"}</b> of ${events.length}<i data-execution-here>${cursorExecutionCount ? ` · ${cursorExecutionCount} here` : ""}</i></span>
-    </div>
-    <div class="execution-timeline-content">
-      <div class="execution-timeline-head">
-        <span class="execution-timeline-stack" data-execution-stack>${escapeHtml(breadcrumb)}</span>
-        <span class="execution-timeline-location" data-execution-location>${event ? `${escapeHtml(executionEventDescription(event))} · ${escapeHtml(moduleName)}:${event.line}` : "No execution reached the selected code"}</span>
-      </div>
-      <div class="execution-timeline-track">
-        <div class="execution-timeline-spans" aria-hidden="true">${spans}</div>
-        <div class="execution-timeline-rail" aria-hidden="true"></div>
-        <div class="execution-timeline-matches" data-execution-matches aria-hidden="true">${renderExecutionTimelineMatches(events)}</div>
-        <div class="execution-timeline-playhead" data-execution-playhead style="left:${playhead.toFixed(3)}%;${hasOccurrence ? "" : "opacity:0"}" aria-hidden="true"></div>
-        <input
-          type="range"
-          min="0"
-          max="${events.length - 1}"
-          step="1"
-        value="${index}"
-        data-execution-scrubber
-        ${debuggerState.stale ? "disabled" : ""}
-        aria-label="Execution event"
-          aria-valuetext="${escapeHtml(event ? `${index + 1} of ${events.length}: ${executionEventDescription(event)}` : "No execution selected")}"
-        />
-      </div>
-    </div>
-  </section>`;
-}
-
-function refreshExecutionTimeline() {
-  const current = document.querySelector(".execution-timeline");
-  if (!current || state.view !== "document") return;
-  clearExecutionTimelineInteraction();
-  const template = document.createElement("template");
-  template.innerHTML = renderExecutionTimeline().trim();
-  const next = template.content.firstElementChild;
-  if (!next) return;
-  current.replaceWith(next);
-  bindExecutionTimelineEvents();
-}
-
-function updateExecutionTimelineDom(events = currentExecutionTimelineEvents()) {
-  if (!events.length) return;
-  const hasOccurrence = Number.isFinite(state.debugger?.focus?.eventIndex);
-  const index = Math.min(
-    Math.max(state.debugger?.focus?.eventIndex ?? 0, 0),
-    events.length - 1,
-  );
-  const event = hasOccurrence ? events[index] : null;
-  const call = executionCallForEvent(event);
-  const playhead = executionTimelinePosition(index, events.length);
-  const moduleName =
-    event &&
-    (state.project?.documents.find((document) => document.path === event.path)
-      ?.module || event.path);
-  const breadcrumb = call
-    ? debugCallBreadcrumb(call)
-        .map((ancestor) =>
-          ancestor.kind === "root" ? "Program" : ancestor.label,
-        )
-        .join(" › ")
-    : hasOccurrence
-      ? "Program"
-      : "Selected code";
-  const indexNode = document.querySelector("[data-execution-index]");
-  const stackNode = document.querySelector("[data-execution-stack]");
-  const locationNode = document.querySelector("[data-execution-location]");
-  const playheadNode = document.querySelector("[data-execution-playhead]");
-  const hereNode = document.querySelector("[data-execution-here]");
-  const scrubber = document.querySelector("[data-execution-scrubber]");
-  if (indexNode) indexNode.textContent = hasOccurrence ? String(index + 1) : "–";
-  if (hereNode) {
-    const count = executionSessionFocusExecutions(state.debugger).length;
-    hereNode.textContent = count
-      ? ` · ${count} here`
-      : "";
-  }
-  if (stackNode) stackNode.textContent = breadcrumb;
-  if (locationNode) {
-    locationNode.textContent = event
-      ? `${executionEventDescription(event)} · ${moduleName}:${event.line}`
-      : "No execution reached the selected code";
-  }
-  if (playheadNode) {
-    playheadNode.style.left = `${playhead.toFixed(3)}%`;
-    playheadNode.style.opacity = hasOccurrence ? "" : "0";
-  }
-  if (scrubber) {
-    scrubber.value = String(index);
-    scrubber.setAttribute(
-      "aria-valuetext",
-      event
-        ? `${index + 1} of ${events.length}: ${executionEventDescription(event)}`
-        : "No execution selected",
-    );
-  }
-  const activePath = new Set(
-    call ? debugCallBreadcrumb(call).map((ancestor) => ancestor.id) : [],
-  );
-  document.querySelectorAll("[data-timeline-call]").forEach((span) => {
-    span.classList.toggle(
-      "selected",
-      span.dataset.timelineCall === call?.id,
-    );
-    span.classList.toggle(
-      "on-path",
-      activePath.has(span.dataset.timelineCall),
-    );
-  });
-  document.querySelectorAll("[data-execution-match]").forEach((marker) => {
-    marker.classList.toggle(
-      "selected",
-      Number(marker.dataset.executionMatch) === index,
-    );
-  });
-}
-
-function updateExecutionTimelineMatchesDom(
-  events = currentExecutionTimelineEvents(),
-) {
-  const container = document.querySelector("[data-execution-matches]");
-  if (container) {
-    container.innerHTML = renderExecutionTimelineMatches(events);
-  }
-  const hereNode = document.querySelector("[data-execution-here]");
-  if (hereNode) {
-    const count = executionSessionFocusExecutions(state.debugger).length;
-    hereNode.textContent = count
-      ? ` · ${count} here`
-      : "";
-  }
-}
-
-function installTraceFocus(next, { refresh = true } = {}) {
-  if (!next) return false;
-  state.debuggerPreview = null;
-  if (next === state.debugger) {
-    noteFocusedExecution(next);
-    return false;
-  }
-  state.debugger = next;
-  noteFocusedExecution(next);
-  state.traceFocusGeneration += 1;
-  const session = currentSession();
-  if (session) session.debugger = state.debugger;
-  updateExecutionTimelineDom();
-  applyDebuggerProjection();
-  if (refresh) refreshInspector();
-  return true;
-}
-
-function selectTraceSite(cursor, site) {
-  if (!state.debugger) return false;
-  const position = cursor
-    ? { path: state.path, line: cursor.line, column: cursor.column }
-    : null;
-  const next = preferFocusedExecution(
-    executionSessionSelectSite(state.debugger, position, site),
-  );
-  if (
-    state.debugger.provisional &&
-    !executionSessionFocusExecutions(next).length
-  ) {
-    applyDebuggerProjection();
-    return false;
-  }
-  installTraceFocus(next);
-  return executionSessionFocusExecutions(state.debugger).length > 0;
-}
-
-async function revealExecutionEvent(
-  event,
-  {
-    allowDocumentChange = false,
-    history = "replace",
-    animate = false,
-    moveCursor = false,
-    focusGeneration = state.traceFocusGeneration,
-  } = {},
-) {
-  if (!event) return;
-  const generation = ++state.executionRevealGeneration;
-  if (event.path !== state.path) {
-    if (!allowDocumentChange) return;
-    const modulePath = state.project?.documents.find(
-      (document) => document.path === event.path,
-    )?.module;
-    if (
-      !modulePath ||
-      !(await loadDocument(modulePath, {
-        preserveDebugger: true,
-        history,
-        focus: "none",
-      })) ||
-      generation !== state.executionRevealGeneration ||
-      focusGeneration !== state.traceFocusGeneration ||
-      !state.debugger
-    ) {
-      return;
-    }
-    const sources = {
-      ...state.debugger.sources,
-      [state.path]: state.document.source,
-    };
-    state.debugger = {
-      ...state.debugger,
-      sources,
-      model: buildDebugCallModel(state.debugger, sources),
-    };
-    const session = currentSession();
-    if (session) session.debugger = state.debugger;
-    void loadExecutionSites(debuggerSnapshot());
-  }
-  if (
-    generation !== state.executionRevealGeneration ||
-    focusGeneration !== state.traceFocusGeneration ||
-    event.path !== state.path ||
-    !state.sourceEditorView
-  ) {
-    return;
-  }
-  const view = state.sourceEditorView;
-  if (moveCursor) {
-    const line = view.state.doc.line(
-      Math.min(Math.max(event.line, 1), view.state.doc.lines),
-    );
-    state.preserveTraceFocusForSelection = true;
-    view.dispatch({
-      selection: {
-        anchor: line.from + Math.min(event.column || 0, line.length),
-      },
-    });
-    queueMicrotask(() => {
-      state.preserveTraceFocusForSelection = false;
-    });
-  }
-  scrollMarkdownEditorTo(
-    view,
-    { line: event.line, column: event.column || 0 },
-    { animate },
-  );
-  applyDebuggerProjection();
-  refreshInspector();
-}
-
-function selectTraceEvent(
-  index,
-  { revealSource = true, allowDocumentChange = false } = {},
-) {
-  const events = currentExecutionTimelineEvents();
-  if (!events.length) return;
-  if (state.debugger?.stale) return;
-  const previousCallId = currentDebugCall()?.id || null;
-  installTraceFocus(executionSessionSelectEvent(state.debugger, index), {
-    refresh: !state.executionTimelineScrubbing,
-  });
-  const event = currentExecutionTimelineEvent();
-  const call = currentDebugCall();
-  if (
-    state.sourceEditorView &&
-    event.path === state.path
-  ) {
-    if (previousCallId !== call?.id) {
-      setMarkdownEditorDebugProjection(
-        state.sourceEditorView,
-        focusedProjectionForDebugCall(call),
-      );
-    }
-  }
-  if (revealSource) {
-    void revealExecutionEvent(event, {
-      allowDocumentChange,
-      moveCursor: !state.executionTimelineScrubbing,
-      focusGeneration: state.traceFocusGeneration,
-    });
-  }
-}
-
-function clearExecutionTimelineInteraction() {
-  state.executionTimelineCleanup?.();
-  state.executionTimelineCleanup = null;
-  state.executionTimelineScrubbing = false;
-  document
-    .querySelector(".main")
-    ?.classList.remove("timeline-following");
-  document
-    .querySelector("[data-execution-timeline]")
-    ?.classList.remove("scrubbing");
-  state.sourceEditorView?.dom.classList.remove(
-    "cm-timeline-scrubbing",
-  );
-}
-
 function disposeMountedEditors() {
-  clearExecutionTimelineInteraction();
   if (state.completionPositionFrame !== null) {
     cancelAnimationFrame(state.completionPositionFrame);
     state.completionPositionFrame = null;
@@ -1594,12 +1028,24 @@ function disposeMountedEditors() {
   }
 }
 
+const sourceModeOrder = ["literate", "source", "debug"];
+const sourceModeName = {
+  literate: "Document",
+  source: "Source",
+  debug: "Debug",
+};
+
+function nextSourceMode(mode = state.sourceMode) {
+  const index = sourceModeOrder.indexOf(mode);
+  return sourceModeOrder[(Math.max(0, index) + 1) % sourceModeOrder.length];
+}
+
 function renderShell() {
   disposeMountedEditors();
   const existingSidebar = app.querySelector(".sidebar");
   app.innerHTML = `
     <div
-      class="workspace ${state.view === "document" ? "document-context" : ""} ${state.sourceMode === "source" ? "source-context" : ""}"
+      class="workspace ${state.view === "document" ? "document-context" : ""} ${state.sourceMode === "source" ? "source-context" : ""} ${state.sourceMode === "debug" ? "debug-context" : ""}"
       style="--sidebar-width: ${state.paneWidths.sidebar}px; --inspector-width: ${state.paneWidths.inspector}px"
     >
       <div class="body-grid">
@@ -1608,14 +1054,13 @@ function renderShell() {
         <main class="main" id="main-pane">
           <div class="main-actions">
             <button class="button pane-toggle files-toggle" id="files-toggle" aria-label="Show project files">Files</button>
-            <button class="button secondary-action ${state.sourceMode === "source" ? "active" : ""}" id="source-mode-button" aria-pressed="${state.sourceMode === "source"}">${state.sourceMode === "source" ? "Document" : "Source"}</button>
+            <button class="button secondary-action ${state.sourceMode !== "literate" ? "active" : ""}" id="source-mode-button" aria-label="Switch to ${sourceModeName[nextSourceMode()]} view">${sourceModeName[nextSourceMode()]}</button>
           </div>
           ${renderMain()}
         </main>
         <div class="pane-resizer pane-resizer-right" data-pane-resizer="inspector" role="separator" aria-label="Resize context pane" aria-orientation="vertical" tabindex="0"></div>
         <aside class="inspector">${renderInspector()}</aside>
       </div>
-      ${renderExecutionTimeline()}
       ${
         state.workspaceError
           ? `<footer class="statusbar status-error" aria-live="assertive">${escapeHtml(state.workspaceError)}</footer>`
@@ -2134,6 +1579,9 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
     session.evaluation = null;
     session.evaluationPlan = null;
     session.evaluationInvalidation = null;
+    session.executionCore = null;
+    session.executionProblem = null;
+    session.debugCursor = null;
     session.conflict = null;
     session.autosaveQueued = changedDuringRefactor;
     if (changedDuringRefactor) {
@@ -2536,6 +1984,12 @@ async function performOutlineCommit({
       if (position !== null) state.outlineSelection = position;
     }
     render();
+    if (state.document && !state.executionCore) {
+      scheduleEvaluation(state.document.source, {
+        immediate: true,
+        plan: buildExecutionPlan(state.document.source, state.document.blocks),
+      });
+    }
     syncOutlineEditor({
       moveSelection: cursorPosition !== null || Boolean(openedModule),
     });
@@ -2806,10 +2260,206 @@ function renderView(view) {
 }
 
 function renderDocument() {
+  if (state.sourceMode === "debug") return renderExecutionDebugView();
   return `
     <article class="document-shell ${state.sourceMode === "source" ? "source-mode" : ""}">
       <div class="literate-document-editor" data-document-editor aria-label="${state.sourceMode === "source" ? "Raw Markdown source editor" : "Editable Markdown and OCaml document"}"></div>
     </article>`;
+}
+
+function executionDebugSource() {
+  return String(state.document?.source || "").replace(/\r\n?/g, "\n");
+}
+
+function normalizedDebugCursor() {
+  const lines = executionDebugSource().split("\n");
+  const fallbackLine =
+    state.cursorPosition?.line ||
+    state.document.blocks.find((block) => block.kind === "ocaml")?.sourceLine ||
+    1;
+  const line = Math.min(
+    Math.max(state.debugCursor?.line || fallbackLine, 1),
+    lines.length,
+  );
+  const source = lines[line - 1] || "";
+  const fallbackColumn = Math.max(0, source.search(/\S|$/));
+  const column = Math.min(
+    Math.max(state.debugCursor?.column ?? state.cursorPosition?.column ?? fallbackColumn, 0),
+    source.length,
+  );
+  state.debugCursor = { line, column };
+  return state.debugCursor;
+}
+
+function executionDebugMatrix() {
+  const baseline = state.debugAuditBaseline || state.executionCore;
+  if (!baseline || !state.path || !state.document) return null;
+  const cursor = normalizedDebugCursor();
+  const source = executionDebugSource();
+  let byDocument = debugMatrixCache.get(baseline);
+  if (!byDocument) {
+    byDocument = new Map();
+    debugMatrixCache.set(baseline, byDocument);
+  }
+  const key = `${state.path}\u001f${cursor.line}\u001f${source}`;
+  if (!byDocument.has(key)) {
+    byDocument.set(
+      key,
+      buildExecutionAuditLine(baseline, {
+        path: state.path,
+        source,
+        line: cursor.line,
+      }),
+    );
+  }
+  return byDocument.get(key);
+}
+
+function debugHighlightedSource(source, band, cursorColumn, selectedLine) {
+  let html = "";
+  for (let start = 0; start < source.length; ) {
+    const width =
+      source.charCodeAt(start) >= 0xd800 &&
+      source.charCodeAt(start) <= 0xdbff &&
+      source.charCodeAt(start + 1) >= 0xdc00 &&
+      source.charCodeAt(start + 1) <= 0xdfff
+        ? 2
+        : 1;
+    const end = start + width;
+    const stateName = band[start] || ".";
+    const className =
+      stateName === "E"
+        ? " debug-band-expression"
+        : stateName === "S"
+          ? " debug-band-activation"
+          : stateName === "G"
+            ? " debug-band-greyed"
+            : "";
+    if (selectedLine && cursorColumn === start) {
+      html += '<i class="debug-source-caret" aria-hidden="true"></i>';
+    }
+    const internalCaret =
+      selectedLine && cursorColumn > start && cursorColumn < end
+        ? '<i class="debug-source-caret internal" aria-hidden="true"></i>'
+        : "";
+    html += `<span class="debug-source-run${className}${internalCaret ? " has-internal-caret" : ""}" data-debug-from="${start}">${escapeHtml(source.slice(start, end))}${internalCaret}</span>`;
+    start = end;
+  }
+  if (selectedLine && cursorColumn === source.length) {
+    html += '<i class="debug-source-caret" aria-hidden="true"></i>';
+  }
+  return html || (selectedLine ? '<i class="debug-source-caret" aria-hidden="true"></i>' : " ");
+}
+
+function renderDebugRail(kind, boundaries, selectedColumn) {
+  const property =
+    kind === "C" ? "columnId" : kind === "H" ? "highlightId" : "rightPaneId";
+  return `<div class="debug-mapping-rail" aria-label="${kind} state at each cursor boundary">
+    <span class="debug-rail-name">${kind}</span>
+    <div class="debug-rail-boundaries">${boundaries
+      .map(
+        (boundary) =>
+          `<button type="button" data-debug-boundary="${boundary.column}" class="debug-boundary${boundary.column === selectedColumn ? " selected" : ""}" aria-label="${kind} column ${boundary.column}: state ${escapeHtml(boundary[property])}" title="column ${boundary.column}">${escapeHtml(boundary[property])}</button>`,
+      )
+      .join("")}</div>
+  </div>`;
+}
+
+function renderExecutionDebugView() {
+  const matrix = executionDebugMatrix();
+  if (!matrix) {
+    return `<article class="document-shell execution-debug-view"><p class="execution-debug-empty">Execution data is not available for this document yet.</p></article>`;
+  }
+  const cursor = normalizedDebugCursor();
+  const selected = matrix.states[cursor.column];
+  const bands = new Map(selected.highlights.map((item) => [item.line, item.band]));
+  const annotations = new Map(selected.column.map((item) => [item.line, item]));
+  const model = presentExecution(matrix.reducerStates[cursor.column]);
+  const stale = model?.authority !== "exact";
+  const boundaries = matrix.lines[0].boundaries;
+  const lines = executionDebugSource().split("\n");
+  return `<article class="document-shell execution-debug-view${stale ? " stale" : ""}" data-execution-debug tabindex="0" aria-label="Execution audit explorer">
+    <header class="execution-debug-header">
+      <span>Cursor ${cursor.line}:${cursor.column}${stale ? ' <em class="execution-debug-status">previous execution</em>' : ""}</span>
+      <span><b>E</b> expression <b>S</b> activation <b>G</b> greyed</span>
+    </header>
+    <div class="execution-debug-source">${lines
+      .map((source, index) => {
+        const line = index + 1;
+        const isSelected = line === cursor.line;
+        const annotation = annotations.get(line);
+        return `<div class="debug-source-row${isSelected ? " selected" : ""}" data-debug-line="${line}">
+          <span class="debug-line-number">${line}</span>
+          <code data-debug-code>${debugHighlightedSource(source, bands.get(line) || ".".repeat(source.length), cursor.column, isSelected)}</code>
+          <span class="debug-line-value">${annotation ? escapeHtml(annotation.value) : ""}</span>
+        </div>${
+          isSelected
+            ? `<div class="debug-line-mapping">${renderDebugRail("C", boundaries, cursor.column)}${renderDebugRail("H", boundaries, cursor.column)}${renderDebugRail("R", boundaries, cursor.column)}</div>`
+            : ""
+        }`;
+      })
+      .join("")}</div>
+  </article>`;
+}
+
+function debugTableEntry(entries, id) {
+  return entries.find((entry) => entry.id === id)?.state || null;
+}
+
+function renderExecutionDebugInspector() {
+  const matrix = executionDebugMatrix();
+  if (!matrix) return '<p class="context-empty">Execution audit unavailable.</p>';
+  const cursor = normalizedDebugCursor();
+  const boundary = matrix.lines[0].boundaries[cursor.column];
+  const column = debugTableEntry(matrix.tables.columns, boundary.columnId) || [];
+  const highlights = debugTableEntry(
+    matrix.tables.highlights,
+    boundary.highlightId,
+  ) || [];
+  const rightPane = debugTableEntry(
+    matrix.tables.rightPanes,
+    boundary.rightPaneId,
+  );
+  const navigationRows = presentExecution(
+    matrix.reducerStates[cursor.column],
+  )?.occurrenceList.rows || [];
+  const stale =
+    presentExecution(matrix.reducerStates[cursor.column])?.authority !== "exact";
+  const activeLineCount = highlights.filter((item) => /[ES]/.test(item.band)).length;
+  const greyedLineCount = highlights.filter(
+    (item) => /G/.test(item.band) && !/[ES]/.test(item.band),
+  ).length;
+  const markedHighlights = highlights.filter((item) => /[ESG]/.test(item.band));
+  const unchangedHighlights = highlights.filter((item) => !/[ESG]/.test(item.band));
+  const renderBandFacts = (items) => items
+    .map((item) => `<div class="debug-band-fact${item.line === cursor.line ? " selected" : ""}"><span>${item.line}</span><code>${escapeHtml(item.band)}</code></div>`)
+    .join("");
+  const hasFocusedOccurrence = rightPane?.rows.some(
+    (candidate) => candidate.selectedExpressionValue,
+  );
+  return `<section class="execution-debug-inspector">
+    <header><span>${cursor.line}:${cursor.column}${stale ? ' · previous execution' : ""}</span><span class="debug-state-ids">C${escapeHtml(boundary.columnId)} H${escapeHtml(boundary.highlightId)} R${escapeHtml(boundary.rightPaneId)}</span></header>
+    <section><h3>Value column</h3>${
+      column.length
+        ? column.map((item) => `<div class="debug-fact"><span>${item.line}</span><code><small>${escapeHtml(item.kind)}</small> ${escapeHtml(item.value)}</code></div>`).join("")
+        : '<p class="execution-note">No displayed values.</p>'
+    }</section>
+    <section><h3>Source display</h3>${
+      highlights.length
+        ? `${renderBandFacts(markedHighlights)}${unchangedHighlights.length ? `<details class="debug-unchanged-bands"><summary>${unchangedHighlights.length} unchanged line${unchangedHighlights.length === 1 ? "" : "s"}</summary>${renderBandFacts(unchangedHighlights)}</details>` : ""}<p class="debug-band-summary">${activeLineCount} activation line${activeLineCount === 1 ? "" : "s"} · ${greyedLineCount} greyed line${greyedLineCount === 1 ? "" : "s"}</p>`
+        : '<p class="execution-note">No execution highlighting.</p>'
+    }</section>
+    <section><h3>Right pane</h3>${
+      rightPane?.rows.length
+        ? `<div class="debug-right-expression"><code>${escapeHtml(rightPane.expression)}</code><span>${rightPane.count}</span></div>${rightPane.rows.map((row, index) => {
+            const navigation = navigationRows[index];
+            const selected = row.selectedExpressionValue ||
+              (!hasFocusedOccurrence && row.selectedActivation);
+            return `<div class="debug-right-row${selected ? " selected" : ""}"><button type="button" class="debug-right-call" data-debug-audit-activation="${escapeHtml(navigation?.activationId || "")}" title="Open this activation in Document" ${selected ? 'aria-current="true"' : ""}><code>${escapeHtml(row.name)}(${row.inputs.map(escapeHtml).join(", ")}) ${row.arrow} ${escapeHtml(row.outcome)}</code>${row.repeat ? `<small class="debug-right-repeat">${escapeHtml(row.repeat)}</small>` : ""}</button>${row.expressionValue ? `<button type="button" class="debug-right-value" data-debug-audit-occurrence="${escapeHtml(navigation?.occurrenceId || "")}" title="Open this expression occurrence in Document"><small>value ${escapeHtml(row.expressionValue)}</small></button>` : row.valueStatus ? `<small>${escapeHtml(row.valueStatus)}</small>` : ""}</div>`;
+          }).join("")}`
+        : `<p class="execution-note">${escapeHtml(rightPane?.emptyReason || "No executions.")}</p>`
+    }</section>
+  </section>`;
 }
 
 function renderProject() {
@@ -3007,726 +2657,332 @@ function renderDefinitionPeek() {
   </section>`;
 }
 
-const sourceFunctionRange = executionFunctionSourceRange;
-
-function buildDebugCallModel(debuggerPayload, sources) {
-  return buildExecutionRecord(debuggerPayload.callEvents || [], {
-    rootLabel: (path) =>
-      state.project?.documents.find((document) => document.path === path)
-        ?.module || path,
-    rangeFor: (occurrence) =>
-      sources[occurrence.path]
-        ? sourceFunctionRange(sources[occurrence.path], occurrence)
-        : { start: occurrence.line, end: occurrence.line + 120 },
-  });
-}
-
-function findIdentifierSpan(source, lineNumber, name, preferredColumn = 0) {
-  const line = source.split("\n")[lineNumber - 1] || "";
-  const range = executionIdentifierRange(
-    line,
-    name,
-    preferredColumn,
-  );
-  if (!range) return null;
-  return {
-    line: lineNumber,
-    ...range,
-  };
-}
-
-function findTracedIdentifierSpan(source, binding, fallbackLine) {
-  const lineNumber = binding.line || fallbackLine;
-  const line = source.split("\n")[lineNumber - 1] || "";
-  const range = executionTraceIdentifierRange(
-    line,
-    binding.name,
-    binding.column,
-    binding.endColumn,
-  );
-  return range ? { line: lineNumber, ...range } : null;
-}
-
-function debugResultType(type = "") {
-  const pieces = type.split(/\s*->\s*/);
-  return pieces[pieces.length - 1]?.trim() || type;
-}
-
-function displayDebugValue(value, type = "") {
-  if (!/^<value(?:\s|>)/.test(value || "")) return value ?? "";
-  const resultType = debugResultType(type);
-  return resultType ? `${resultType} value` : "value";
-}
-
-function singleLineDebugValue(value) {
-  return String(value ?? "").replace(/\s+/g, " ").trim();
-}
-
-function abbreviatedDebugValue(value, limit) {
-  const text = singleLineDebugValue(value);
-  const characters = Array.from(text);
-  if (characters.length <= limit) return text;
-  if (limit < 7) return `${characters.slice(0, Math.max(1, limit - 1)).join("")}…`;
-  const tail = Math.min(6, Math.floor((limit - 1) / 3));
-  const head = limit - tail - 1;
-  return `${characters.slice(0, head).join("")}…${characters.slice(-tail).join("")}`;
-}
-
-function debugExecutionChoice(choice) {
-  const { call, event, outcomeEvent } = choice;
-  const expression =
-    call.kind === "root" &&
-    event?.kind !== "binding" &&
-    Boolean(state.debugger?.focus?.site);
-  const fullLabel = expression
-    ? executionSourceTextForSite(
-        state.document?.source || "",
-        state.debugger.focus.site,
-      ) || event.label || "expression"
-    : call.kind === "root"
-      ? "Program"
-      : call.label || "function";
-  const fullArguments = (call.parameters || []).map((parameter) =>
-    singleLineDebugValue(displayDebugValue(parameter.value, parameter.type)),
-  );
-  const fullResult = expression
-    ? singleLineDebugValue(
-        displayDebugValue(
-          outcomeEvent?.detail,
-          outcomeEvent?.type || event?.type,
-        ),
-      )
-    : call.kind === "root" || call.value === undefined
-      ? ""
-      : singleLineDebugValue(
-          displayDebugValue(call.value, call.returnType || call.type),
-        );
-  const label = abbreviatedDebugValue(fullLabel, expression ? 180 : 120);
-  const result = abbreviatedDebugValue(fullResult, 360);
-  const visibleArguments =
-    fullArguments.length > 8
-      ? [...fullArguments.slice(0, 7), `…+${fullArguments.length - 7}`]
-      : fullArguments;
-  const arguments_ = visibleArguments.map((argument) =>
-    abbreviatedDebugValue(argument, 360),
-  );
-  return {
-    label,
-    expression,
-    arguments_,
-    result,
-    raised: expression
-      ? outcomeEvent?.phase === "raise"
-      : call.outcome === "raise",
-    title:
-      call.kind === "root"
-        ? expression
-          ? `${fullLabel} ${outcomeEvent?.phase === "raise" ? "!" : "→"} ${fullResult || "…"}`
-          : fullLabel
-        : `${fullLabel}(${fullArguments.join(", ")}) ${call.outcome === "raise" ? "!" : "→"} ${fullResult || "…"}`,
-  };
-}
-
-function debugFocusedExpression(debuggerState = state.debugger) {
-  const focused = executionSessionFocusValue(debuggerState);
-  if (!focused) return null;
-  const source = debuggerState?.sources?.[state.path] || state.document?.source || "";
-  const expression =
-    focused.kind === "parameter" || focused.kind === "binding"
-      ? focused.label
-      : executionSourceTextForSite(source, debuggerState?.focus?.site) ||
-        focused.label ||
-        "expression";
-  const fullValue = singleLineDebugValue(
-    displayDebugValue(focused.value, focused.type),
-  );
-  const value = abbreviatedDebugValue(fullValue, 720);
-  return {
-    expression,
-    value,
-    fullValue,
-    type: singleLineDebugValue(focused.type),
-    raised: focused.outcome === "raise",
-    title: `${expression} ${focused.outcome === "raise" ? "!" : "→"} ${fullValue}${focused.type ? ` : ${focused.type}` : ""}`,
-  };
-}
-
-function debugValueAtEditorPosition(offset) {
-  const editor = state.sourceEditorView;
-  const debuggerState = state.debugger;
-  if (
-    !editor ||
-    debuggerState?.status !== "ready" ||
-    debuggerState.stale ||
-    !Number.isFinite(offset)
-  ) {
-    return null;
+function installInitialExecutionCore(evaluation) {
+  const envelope = evaluation?.executionArtifact;
+  if (!envelope || !state.path || !state.document) {
+    state.executionProblem = "Execution artifact is missing.";
+    return false;
   }
-  const line = editor.state.doc.lineAt(
-    Math.min(Math.max(offset, 0), editor.state.doc.length),
-  );
-  const position = {
-    path: state.path,
-    line: line.number,
-    column: offset - line.from,
-  };
-  const site = executionSiteAt(currentExecutionSites(), position, {
-    ...executionCursorProbe(line.text, position.column),
-    line: line.text,
+  const installed = installExecutionArtifact({
+    envelope,
+    sources: { [state.path]: state.document.source },
+    cursor: state.cursorPosition
+      ? { path: state.path, ...state.cursorPosition }
+      : null,
   });
-  if (!site || site.kind === "syntax") return null;
-  const hovered = executionSessionSelectSite(debuggerState, position, site);
-  const related = executionSessionFocusExecutions(hovered);
-  const choice = preferredChoiceForSession(
-    hovered,
-    related,
-  );
-  if (!choice) return null;
-  const focused = {
-    ...hovered,
-    focus: {
-      ...hovered.focus,
-      eventIndex: choice.eventIndex,
-    },
-  };
-  const summary = debugFocusedExpression(focused);
-  const range = hovered.focus?.range;
-  return summary && range?.path === state.path
-    ? {
-        ...summary,
-        line: range.line,
-        column: range.column,
-        endColumn: range.endColumn,
-        previewSession: focused,
-      }
+  if (!installed.state) {
+    console.error(
+      "Execution artifact could not be installed",
+      installed.decision,
+      installed.problems,
+    );
+    state.executionProblem = installed.problems
+      .map((problem) => problem.detail || problem.code)
+      .join("\n");
+    return false;
+  }
+  setExecutionCore(installed.state);
+  state.executionProblem = null;
+  cacheExecutionArtifact(installed.artifact);
+  return true;
+}
+
+function executionTokenKey(token) {
+  return token
+    ? [
+        token.requestCodeDigest,
+        token.documentRevisionId || token.sourceMaps?.documentRevisionId,
+        token.projectDigest,
+        token.compilerInputsDigest,
+      ].join("\u001f")
     : null;
 }
 
-function sourceIndent(lines, line) {
-  const spaces = (lines[line - 1] || "").match(/^ */)?.[0].length || 0;
-  return Math.max(0, spaces - 4) + 2;
+function cacheExecutionArtifact(envelope, token = envelope) {
+  const key = executionTokenKey(token);
+  if (!key) return;
+  state.executionArtifactCache.delete(key);
+  state.executionArtifactCache.set(key, envelope);
+  while (state.executionArtifactCache.size > 8) {
+    state.executionArtifactCache.delete(
+      state.executionArtifactCache.keys().next().value,
+    );
+  }
 }
 
-function projectionForDebugCall(call, debuggerState = state.debugger) {
-  if (!call || call.path !== state.path) return null;
-  const source = state.document?.source || "";
-  const lines = source.split("\n");
-  if (call.kind === "root") {
-    const focusedEvents = debuggerState?.focus?.site
-      ? executionSessionFocusedEvents(debuggerState)
-      : [];
-    const projectedCall = focusedEvents.length
-      ? { ...call, ownOccurrences: focusedEvents }
-      : call;
-    const links = [];
-    const annotations = [];
-    const occupied = new Set();
-    const callsiteGroups = new Map();
-    for (const child of call.children || []) {
-      if (!child.callsiteKey || child.callsiteLine < 1) continue;
-      if (!callsiteGroups.has(child.callsiteKey)) {
-        callsiteGroups.set(child.callsiteKey, []);
+function installExecutionTransition(transition) {
+  state.executionCore = transition.state;
+  if (transition.problems?.length) {
+    state.executionProblem = transition.problems
+      .map((problem) => problem.detail || problem.code)
+      .join("\n");
+  } else if (transition.decision?.startsWith("artifact-installed")) {
+    state.executionProblem = null;
+  }
+  const effects = [...transition.effects];
+  let evaluate = false;
+  while (effects.length) {
+    const effect = effects.shift();
+    if (effect.kind === "lookup-artifact") {
+      const artifact =
+        state.executionArtifactCache.get(executionTokenKey(effect.token)) || null;
+      const resolved = dispatchExecutionIntent(state.executionCore, {
+        kind: "artifact-available",
+        token: effect.token,
+        artifact,
+      });
+      state.executionCore = resolved.state;
+      effects.push(...resolved.effects);
+    } else if (effect.kind === "cancel-evaluation") {
+      const pendingToken = state.pendingEvaluation?.executionToken;
+      if (executionTokenKey(pendingToken) === executionTokenKey(effect.token)) {
+        state.evaluationController?.abort();
+        state.evaluationController = null;
+        state.pendingEvaluation = null;
+        state.evaluating = false;
       }
-      callsiteGroups.get(child.callsiteKey).push(child);
+    } else if (effect.kind === "evaluate") {
+      evaluate = true;
     }
-    for (const children of callsiteGroups.values()) {
-      const child = children[0];
-      const callsiteLine = child.callsiteLine;
-      if (!callsiteLine || child.callsitePath !== call.path) continue;
-      const inlineResult = state.evaluation?.inlineResults?.some(
-        (result) =>
-          result.path === call.path &&
-          result.line === callsiteLine &&
-          (child.callsiteColumn || 0) >= result.columnStart &&
-          (child.callsiteColumn || 0) <= result.columnEnd,
-      );
-      if (
-        !inlineResult &&
-        children.length === 1 &&
-        child.value !== undefined
-      ) {
-        const returnedValue = displayDebugValue(
-          child.value,
-          child.returnType || child.type,
-        );
-        const annotationValue =
-          child.outcome === "raise"
-            ? `! ${returnedValue}`
-            : `→ ${returnedValue}`;
-        annotations.push({
-          line: callsiteLine,
-          indent: sourceIndent(lines, callsiteLine),
+  }
+  setExecutionCore(state.executionCore);
+  return evaluate;
+}
+
+function executionRangeForEditor(range) {
+  const editor = state.sourceEditorView;
+  if (!editor || range?.path !== state.path) return null;
+  const from = Math.min(Math.max(range.start, 0), editor.state.doc.length);
+  const to = Math.min(Math.max(range.end, from), editor.state.doc.length);
+  const start = editor.state.doc.lineAt(from);
+  const end = editor.state.doc.lineAt(to);
+  return {
+    path: state.path,
+    startLine: start.number,
+    startColumn: from - start.from,
+    endLine: end.number,
+    endColumn: to - end.from,
+    line: start.number,
+    column: from - start.from,
+  };
+}
+
+function executionCoreProjection() {
+  if (!state.executionCore) return null;
+  const model = presentExecution(state.executionCore);
+  if (model.authority !== "exact") return null;
+  const ranges = { active: [], inactive: [], "globally-unreached": [] };
+  for (const coverage of model.coverage || []) {
+    const range = executionRangeForEditor(coverage.range);
+    if (range) ranges[coverage.state].push(range);
+  }
+  const annotationLines = (model.projection?.annotationPlan || []).flatMap(
+    (slot) => {
+      const annotation = slot.effective;
+      if (!annotation) return [];
+      const range = executionRangeForEditor(annotation.range);
+      if (!range) return [];
+      return [
+        {
+          line: slot.line,
           items: [
             {
-              kind: child.outcome === "raise" ? "raise" : "return",
-              value: annotationValue,
-              fullValue: annotationValue,
-              type: debugResultType(child.returnType || child.type),
+              kind: annotation.kind,
+              value: annotation.value.text,
+              fullValue: annotation.value.fullText,
+              type: annotation.value.type || "",
+              truncated: annotation.value.truncated,
+              segments: annotation.value.segments,
+              occurrenceId: annotation.occurrenceId,
             },
           ],
-        });
-      }
-      const span = findIdentifierSpan(
-        source,
-        callsiteLine,
-        child.label,
-        child.callsiteColumn || 0,
-      );
-      const key = span && `${span.line}:${span.column}:${span.endColumn}`;
-      if (!span || occupied.has(key)) continue;
-      occupied.add(key);
-      links.push({
-        ...span,
-        callId: child.id,
-        label: child.label,
-        kind: "child",
-      });
-    }
-    return {
-      activationRange: null,
-      activationInactiveRanges: [],
-      activeRanges: executionActiveRanges({
-        source,
-        call: projectedCall,
-        sites: currentExecutionSites(),
-      }),
-      inactiveRanges: executionNeverRunRanges({
-        source,
-        path: state.path,
-        events: debuggerState?.events || [],
-        sites: currentExecutionSites(),
-      }),
-      activity: [],
-      annotations,
-      links,
-    };
-  }
-  const range = sourceFunctionRange(source, call);
-  call.range = range;
-  const executed = call.executedLines || new Set([call.line]);
-
-  const annotations = new Map();
-  const addAnnotation = (line, item) => {
-    if (!annotations.has(line)) annotations.set(line, []);
-    if (
-      !annotations
-        .get(line)
-        .some(
-          (existing) =>
-            existing.kind === item.kind &&
-            existing.name === item.name &&
-            existing.callId === item.callId &&
-            existing.column === item.column &&
-            existing.endColumn === item.endColumn,
-        )
-    ) {
-      annotations.get(line).push(item);
-    }
-  };
-  for (const binding of executionCallBindings(call)) {
-    if (binding.value === "<function>") continue;
-    const fullValue = displayDebugValue(binding.value, binding.type);
-    const span = findTracedIdentifierSpan(source, binding, call.line);
-    addAnnotation(binding.line || call.line, {
-      ...binding,
-      line: binding.line || call.line,
-      kind: "value",
-      value: fullValue,
-      fullValue,
-      column: span?.column,
-      endColumn: span?.endColumn,
-    });
-  }
-
-  const links = [];
-  const parentSpan = findIdentifierSpan(
-    source,
-    call.line,
-    call.label,
-    call.column,
+        },
+      ];
+    },
   );
-  if (parentSpan && call.parent) {
-    links.push({
-      ...parentSpan,
-      callId: call.parent.id,
-      label: call.parent.label,
-      kind: "parent",
-    });
-  }
-  const occupiedChildLinks = new Set();
-  const childGroups = new Map();
-  for (const child of call.children || []) {
-    const key = child.callsiteKey || `${child.id}`;
-    if (!childGroups.has(key)) childGroups.set(key, []);
-    childGroups.get(key).push(child);
-  }
-  for (const children of childGroups.values()) {
-    const child = children[0];
-    const line = child.callsiteLine;
-    if (!line || child.callsitePath !== call.path) continue;
-    const span = findIdentifierSpan(
-      source,
-      line,
-      child.label,
-      child.callsiteColumn || 0,
-    );
-    if (span) {
-      const key = `${span.line}:${span.column}:${span.endColumn}`;
-      if (occupiedChildLinks.has(key)) continue;
-      occupiedChildLinks.add(key);
-      links.push({
-        ...span,
-        callId: child.id,
-        label: child.label,
-        kind: "child",
-      });
-    }
-  }
-  const lastExecuted = Math.max(call.line, ...executed);
-  const returnLine = Math.min(
-    Math.max(lastExecuted, range.start),
-    range.end,
-  );
-  const returnedValue = displayDebugValue(
-    call.value,
-    call.returnType || call.type,
-  );
-  if (call.value !== undefined) {
-    const annotationValue =
-      call.outcome === "raise"
-        ? `! ${returnedValue}`
-        : `→ ${returnedValue}`;
-    addAnnotation(returnLine, {
-      kind: call.outcome === "raise" ? "raise" : "return",
-      value: annotationValue,
-      fullValue: annotationValue,
-      type: debugResultType(call.returnType || call.type),
-    });
-  }
-  const additionalRanges = [...annotations.entries()].flatMap(
-    ([line, items]) =>
-      items
-        .filter(
-          (item) =>
-            item.kind === "value" &&
-            Number.isFinite(item.column) &&
-            Number.isFinite(item.endColumn),
-        )
-        .map((item) => ({
-          startLine: line,
-          startColumn: item.column,
-          endLine: line,
-          endColumn: item.endColumn,
-        })),
-  );
-  const sites = currentExecutionSites();
-  const inactiveRanges = executionNeverRunRanges({
-    source,
-    path: state.path,
-    events: debuggerState?.events || [],
-    sites,
+  const cursorRange = executionRangeForEditor(model.cursorInspection?.range);
+  const links = (model.projection?.links || []).flatMap((link) => {
+    const range = executionRangeForEditor(link.range);
+    if (!range || range.startLine !== range.endLine) return [];
+    return [
+      {
+        kind: link.kind,
+        callId:
+          link.kind === "parent" && link.occurrenceId
+            ? `occurrence:${link.occurrenceId}`
+            : `activation:${link.activationId}`,
+        label: link.label,
+        line: range.startLine,
+        column: range.startColumn,
+        endColumn: range.endColumn,
+      },
+    ];
   });
   return {
-    activationRange: {
-      startLine: range.start,
-      endLine: range.end,
-      startColumn: range.startColumn,
-      endColumn: range.endColumn,
-    },
-    activationInactiveRanges: executionActivationInactiveRanges({
-      source,
-      call,
-      sites,
-      excludeRanges: inactiveRanges,
-    }),
-    activeRanges: executionActiveRanges({
-      source,
-      call,
-      sites,
-      additionalRanges,
-    }),
-    inactiveRanges,
-    activity: [],
-    annotations: [...annotations.entries()]
-      .sort(([left], [right]) => left - right)
-      .map(([line, items]) => ({
-        line,
-        indent: sourceIndent(lines, line),
-        items,
-      })),
+    activeRanges: ranges.active,
+    activationInactiveRanges: ranges.inactive,
+    inactiveRanges: ranges["globally-unreached"],
+    annotations: annotationLines,
     links,
+    cursorFocus: cursorRange,
   };
-}
-
-function focusedProjectionForDebugCall(
-  call,
-  debuggerState = state.debugger,
-) {
-  const projection = projectionForDebugCall(call, debuggerState);
-  if (!projection) return null;
-  const position = state.cursorPosition
-    ? { path: state.path, ...state.cursorPosition }
-    : null;
-  const executionCount = executionSessionFocusExecutions(
-    debuggerState,
-  ).length;
-  const cursorFocus = executionFocusRangeAtPosition(
-    executionSessionFocusRange(debuggerState),
-    position,
-    executionCount,
-  );
-  const activeRanges = executionRangesWithFocus(
-    projection.activeRanges,
-    cursorFocus,
-    position,
-    executionCount,
-  );
-  const focused = {
-    ...projection,
-    activeRanges,
-    cursorFocus:
-      cursorFocus?.path === state.path ? cursorFocus : null,
-    cursorAnchor:
-      position?.path === state.path ? position : null,
-    cursorValue:
-      cursorFocus?.path === state.path
-        ? debugFocusedExpression(debuggerState)
-        : null,
-  };
-  if (position) {
-    console.assert(
-      executionCursorCoverageIsConsistent({
-        activeRanges,
-        inactiveRanges: projection.inactiveRanges,
-        activationInactiveRanges: projection.activationInactiveRanges,
-        position,
-        executionCount,
-      }),
-      "Execution coverage is inconsistent at the source cursor",
-      { position, executionCount, callId: call.id },
-    );
-  }
-  return focused;
 }
 
 function applyDebuggerProjection() {
   const editor = state.sourceEditorView;
   if (!editor) return;
-  const active = Boolean(state.debugger);
-  const debuggerReady = Boolean(
-    state.debugger?.status === "ready" &&
-      !state.debugger.stale &&
-      state.debugger.sources?.[state.path] === state.document?.source,
-  );
-  editor.dom.classList.toggle(
-    "cm-execution-lens",
-    active,
-  );
-  editor.dom.classList.toggle(
-    "cm-execution-lens-loading",
-    active && !debuggerReady,
-  );
-  editor.dom.classList.toggle(
-    "cm-execution-lens-provisional",
-    Boolean(state.debugger?.provisional),
-  );
-  if (!active) {
-    delete editor.dom.dataset.executionLensCall;
+  if (!state.executionCore) {
+    editor.dom.classList.remove("cm-execution-lens");
+    editor.dom.classList.remove("cm-execution-lens-stale");
     setMarkdownEditorDebugProjection(editor, null);
     return;
   }
-  if (!debuggerReady) {
-    delete editor.dom.dataset.executionLensCall;
-    setMarkdownEditorDebugProjection(editor, null);
-    return;
+  const model = presentExecution(state.executionCore);
+  editor.dom.classList.add("cm-execution-lens");
+  editor.dom.classList.toggle(
+    "cm-execution-lens-stale",
+    model.authority !== "exact",
+  );
+  editor.dom.classList.remove("cm-execution-lens-loading");
+  setMarkdownEditorDebugProjection(editor, executionCoreProjection());
+}
+
+function installExecutionNavigation(result, { animate = true } = {}) {
+  if (
+    !result?.state ||
+    (result.state === state.executionCore && !result.effects.length)
+  ) {
+    return false;
   }
-  const debuggerState = displayedDebuggerState();
-  const call = executionSessionCall(debuggerState);
-  if (!call) {
-    delete editor.dom.dataset.executionLensCall;
-    const inactiveRanges = executionNeverRunRanges({
-      source: state.document?.source || "",
-      path: state.path,
-      events: debuggerState?.events || [],
-      sites: currentExecutionSites(),
-    });
-    const position = state.cursorPosition
-      ? { path: state.path, ...state.cursorPosition }
-      : null;
-    if (position && state.debugger?.focus?.site) {
-      console.assert(
-        executionCursorCoverageIsConsistent({
-          activeRanges: [],
-          inactiveRanges,
-          position,
-          executionCount: 0,
-        }),
-        "Unreached source cursor is not globally faded",
-        { position, site: state.debugger.focus.site },
-      );
+  setExecutionCore(result.state);
+  for (const effect of result.effects) {
+    if (effect.kind !== "move-editor-cursor" || effect.range.path !== state.path) {
+      continue;
     }
-    setMarkdownEditorDebugProjection(editor, {
-      activeRanges: [],
-      inactiveRanges,
-      annotations: [],
-      links: [],
-      activity: [],
-      cursorFocus: null,
+    const editor = state.sourceEditorView;
+    if (!editor) continue;
+    const anchor = Number.isInteger(effect.position?.line)
+      ? Math.min(
+          Math.max(
+            editor.state.doc.line(effect.position.line).from +
+              effect.position.column,
+            effect.range.start,
+          ),
+          effect.range.end,
+        )
+      : effect.range.start;
+    editor.dispatch({
+      selection: { anchor },
+      userEvent: "select.execution",
     });
-    return;
+    const line = editor.state.doc.lineAt(anchor);
+    scrollMarkdownEditorTo(
+      editor,
+      { line: line.number, column: anchor - line.from },
+      { animate },
+    );
   }
-  editor.dom.dataset.executionLensCall = call.id;
-  setMarkdownEditorDebugProjection(
-    editor,
-    focusedProjectionForDebugCall(call, debuggerState),
-  );
-}
-
-function debugCallLinkAtPosition(position) {
-  const editor = state.sourceEditorView;
-  const call = currentDebugCall();
-  if (!editor || !call || !Number.isFinite(position)) return null;
-  const sourceLine = editor.state.doc.lineAt(
-    Math.min(Math.max(position, 0), editor.state.doc.length),
-  );
-  const column = position - sourceLine.from;
-  return executionCallLinkAt(
-    projectionForDebugCall(call)?.links,
-    sourceLine.number,
-    column,
-  );
-}
-
-function navigateDebugCall(callId, position) {
-  const resolved = callId || debugCallLinkAtPosition(position);
-  if (!resolved) return false;
-  void showDebugCall(resolved, { scroll: true });
+  applyDebuggerProjection();
+  refreshInspector({ revealExecutionChoice: true });
   return true;
 }
 
-function debugCallBreadcrumb(call) {
-  const calls = [];
-  for (let current = call; current; current = current.parent) {
-    calls.push(current);
+function navigateDebugCall(callId) {
+  if (state.executionCore && callId) {
+    const separator = callId.indexOf(":");
+    const targetKind = separator < 0 ? "activation" : callId.slice(0, separator);
+    const targetId = separator < 0 ? callId : callId.slice(separator + 1);
+    return installExecutionNavigation(
+      dispatchExecutionIntent(state.executionCore, {
+        kind:
+          targetKind === "occurrence"
+            ? "occurrence-chosen"
+            : "activation-navigated",
+        ...(targetKind === "occurrence"
+          ? { occurrenceId: targetId }
+          : { activationId: targetId }),
+      }),
+    );
   }
-  return calls.reverse();
+  return false;
 }
 
-function renderDebugger() {
-  if (!state.debugger) {
-    if (!state.evaluating) return "";
-    return `<section class="debugger-panel debugger-loading" aria-live="polite">
-      <span class="debugger-pulse"></span>
-      <span>Preparing execution…</span>
-    </section>`;
-  }
-  if (state.debugger.status === "loading") {
-    return `<section class="debugger-panel debugger-loading" aria-live="polite">
-      <span class="debugger-pulse"></span>
-      <span>Reconstructing calls…</span>
-    </section>`;
-  }
-  const debuggerState = state.debugger;
-  if (debuggerState.status === "error") {
-    return `<button type="button" class="debugger-stale" data-debug-start title="${escapeHtml(debuggerState.error || "")}">Execution unavailable · retry</button>`;
-  }
-  const siteIndex = currentExecutionSiteIndex();
-  if (siteIndex?.status === "loading" && !debuggerState.focus?.site) {
-    return `<section class="debugger-panel debugger-loading" aria-live="polite">
-      <span class="debugger-pulse"></span>
-      <span>Reading code…</span>
-    </section>`;
-  }
-  if (siteIndex?.status === "error" && !debuggerState.focus?.site) {
-    return `<section class="debugger-panel">
-      <button type="button" class="debugger-stale" data-debug-sites-retry title="${escapeHtml(siteIndex.error || "")}">Could not read code · retry</button>
-    </section>`;
-  }
-  const executions = executionSessionFocusExecutions(debuggerState);
-  const site = debuggerState.focus?.site || null;
-  const countLabel = `${executions.length} execution${executions.length === 1 ? "" : "s"}`;
-  const choices = executions
-    .map((choice) => {
-      const summary = debugExecutionChoice(choice);
-      const selected = choice.eventIndex === debuggerState.focus?.eventIndex;
-      if (choice.call.kind === "root") {
-        if (summary.expression) {
-          return `<button
-            type="button"
-            class="execution-choice${selected ? " selected" : ""}"
-            data-execution-choice="${choice.eventIndex}"
-            ${selected ? 'aria-current="true"' : ""}
-            title="${escapeHtml(summary.title)}"
-          >
-            <code class="execution-choice-expression">${highlightedOcaml(summary.label, "expression")}</code>
-            <span class="execution-choice-arrow ${summary.raised ? "raised" : ""}">${summary.raised ? "!" : "→"}</span>
-            <code class="execution-choice-result ${summary.raised ? "raised" : ""}">${highlightedOcaml(summary.result || "…")}</code>
-          </button>`;
-        }
-        return `<button
-          type="button"
-          class="execution-choice${selected ? " selected" : ""}"
-          data-execution-choice="${choice.eventIndex}"
-          ${selected ? 'aria-current="true"' : ""}
-          title="${escapeHtml(summary.title)}"
-        ><strong>${escapeHtml(summary.label)}</strong></button>`;
-      }
-      return `<button
-        type="button"
-        class="execution-choice${selected ? " selected" : ""}"
-        data-execution-choice="${choice.eventIndex}"
-        ${selected ? 'aria-current="true"' : ""}
-        title="${escapeHtml(summary.title)}"
-      >
-        <span class="execution-choice-call">
-          <strong>${escapeHtml(summary.label)}</strong><span>(</span><code>${highlightedOcaml(summary.arguments_.join(", "))}</code><span>)</span>
-        </span>
-        <span class="execution-choice-arrow ${summary.raised ? "raised" : ""}">${summary.raised ? "!" : "→"}</span>
-        <code class="execution-choice-result ${summary.raised ? "raised" : ""}">${highlightedOcaml(summary.result || "…")}</code>
-      </button>`;
+function executionValueHtml(value) {
+  if (!value) return "…";
+  const source = String(value.text ?? "…");
+  const segments = Array.isArray(value.segments) ? value.segments : [];
+  if (!segments.length) return escapeHtml(source);
+  return segments
+    .map((segment) => {
+      const from = Math.min(Math.max(segment.from || 0, 0), source.length);
+      const to = Math.min(Math.max(segment.to || from, from), source.length);
+      const role = ["shape", "literal", "constructor", "variable"].includes(segment.role)
+        ? segment.role
+        : "neutral";
+      return `<span class="execution-runtime-${role}">${escapeHtml(source.slice(from, to))}</span>`;
     })
     .join("");
-  return `<section class="debugger-panel ${debuggerState.stale || debuggerState.provisional ? "stale" : ""}">
-    <div class="debugger-head">
-      <div class="execution-choice-heading">
-        <strong>${site ? countLabel : "Executions"}</strong>
-        ${site ? `<span>line ${site.startLine}</span>` : ""}
-      </div>
-    </div>
+}
+
+function renderExecutionCoreInspector() {
+  const model = presentExecution(state.executionCore);
+  const rows = model.occurrenceList.rows
+    .map((row) => {
+      const selectedActivation =
+        row.activationId === model.occurrenceList.selectedActivationId;
+      const selectedOccurrence =
+        row.occurrenceId === model.occurrenceList.selectedOccurrenceId;
+      const inputs = row.inputs
+        .map((input) => executionValueHtml(input))
+        .join(" ");
+      const renderedInputs = inputs ? `<code>${inputs}</code>` : "";
+      const repeat = row.totalInActivation > 1
+        ? `<span class="execution-occurrence-index">${row.ordinal}/${row.totalInActivation}</span>`
+        : "";
+      const valueButton = row.value
+        ? `<button type="button" class="execution-occurrence-value" data-execution-core-occurrence="${escapeHtml(row.occurrenceId)}" ${selectedOccurrence ? 'aria-current="true"' : ""}>
+          <code>${executionValueHtml(row.value)}</code>
+        </button>`
+        : row.valueStatus === "trace-incomplete"
+          ? '<span class="execution-occurrence-status">trace ended before the value returned</span>'
+        : "";
+      return `<div class="execution-occurrence${selectedOccurrence ? " selected" : ""}" role="listitem">
+        <button type="button" class="execution-occurrence-activation" data-execution-core-activation="${escapeHtml(row.activationId)}" ${selectedActivation ? 'aria-current="true"' : ""}>
+          <span class="execution-choice-call"><strong>${escapeHtml(row.name)}</strong>${renderedInputs}</span>
+          <span class="execution-choice-arrow ${row.outcome.kind === "raise" ? "raised" : ""}">${row.outcome.kind === "raise" ? "⇑" : "→"}</span>
+          <code>${executionValueHtml(row.outcome)}</code>${repeat}
+        </button>
+        ${valueButton}
+      </div>`;
+    })
+    .join("");
+  const stale = model.authority !== "exact";
+  return `<section class="execution-panel${stale ? " stale" : ""}">
     ${
-      debuggerState.truncated
-        ? '<p class="debugger-note">Trace capture reached its limit; later executions are not shown.</p>'
-        : ""
-    }
-    ${
-      choices
-        ? `<div class="execution-choices" role="list" aria-label="Executions through the cursor">${choices}</div>`
-        : `<p class="debugger-note">${site ? "No execution reached this position." : "Place the cursor in executed OCaml code."}</p>`
+      rows
+        ? `<header class="execution-occurrence-heading"><code>${escapeHtml(model.occurrenceList.expression)}</code><span>${model.occurrenceList.count} occurrence${model.occurrenceList.count === 1 ? "" : "s"}</span></header><div class="execution-occurrences" role="list" aria-label="Executions of the selected expression">${rows}</div>`
+        : `<p class="execution-note">${
+            stale
+              ? "Execution is updating for the edited program."
+              : model.occurrenceList.emptyReason === "trace-incomplete"
+                ? "The trace ended before this expression was recorded."
+                : model.occurrenceList.emptyReason === "defined-not-called"
+                  ? "This function was defined but not called."
+                  : model.selection.constructId
+                    ? "This expression was not reached."
+                    : "Place the cursor in OCaml code to inspect its executions."
+          }</p>`
     }
   </section>`;
 }
 
-function highlightedOcaml(value, context = "value") {
-  const source = String(value ?? "");
-  const matcher =
-    /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|-?\b\d+(?:\.\d+)?\b|\b[A-Z][A-Za-z0-9_']*\b|[\[\]{}(),;:=|*+\-/<>@^]+|\b(?:true|false)\b)/g;
-  let result = "";
-  let offset = 0;
-  for (const match of source.matchAll(matcher)) {
-    result += escapeHtml(source.slice(offset, match.index));
-    const token = match[0];
-    let kind = "punctuation";
-    if (token.startsWith('"') || token.startsWith("'")) kind = "string";
-    else if (/^-?\d/.test(token)) kind = "number";
-    else if (/^(?:true|false|[A-Z])/.test(token)) kind = "constructor";
-    result += `<span class="ocaml-${context}-${kind}">${escapeHtml(token)}</span>`;
-    offset = match.index + token.length;
-  }
-  return result + escapeHtml(source.slice(offset));
-}
-
 function renderInspector() {
   if (!state.document || state.view !== "document") return "";
+  if (state.sourceMode === "debug") return renderExecutionDebugInspector();
+  if (state.executionCore) return renderExecutionCoreInspector();
+  if (state.executionProblem && state.evaluation?.ok) {
+    return `<p class="context-empty" title="${escapeHtml(state.executionProblem)}">Execution data is unavailable.</p>`;
+  }
   const diagnostics = (state.evaluation?.diagnostics || []).filter(
     (diagnostic) =>
       !diagnostic.line ||
@@ -3736,8 +2992,14 @@ function renderInspector() {
   const diagnosticsHtml = diagnostics.length
       ? `<section class="inspect-section"><h3>Diagnostics</h3>${diagnostics.map((diagnostic) => `<button class="diagnostic" data-diagnostic-line="${diagnostic.line || ""}">${diagnostic.line ? `Line ${diagnostic.line} · ` : ""}${escapeHtml(diagnostic.message)}</button>`).join("")}</section>`
       : "";
-  if (state.debugger || state.evaluating || state.evaluation?.ok) {
-    return renderDebugger();
+  if (state.evaluating) {
+    return `<section class="execution-panel execution-loading" aria-live="polite">
+      <span class="execution-pulse"></span>
+      <span>Preparing execution…</span>
+    </section>`;
+  }
+  if (state.evaluation?.ok) {
+    return '<p class="context-empty">Execution data is unavailable.</p>';
   }
   const typeInfo = state.typeInfo;
   return `
@@ -4004,49 +3266,6 @@ function executionInvalidation(previous, next) {
   return inlineFrom === null ? null : { blockFrom: null, inlineFrom };
 }
 
-function executionLayoutChanged(previous, next) {
-  if (!previous || !next) return false;
-  const samePosition = (left, right) =>
-    left.lineStart === right.lineStart &&
-    left.lineEnd === right.lineEnd &&
-    left.line === right.line &&
-    left.columnStart === right.columnStart &&
-    left.columnEnd === right.columnEnd;
-  return (
-    previous.blocks.some((block, index) =>
-      next.blocks[index] ? !samePosition(block, next.blocks[index]) : true,
-    ) ||
-    previous.inline.some((item, index) =>
-      next.inline[index] ? !samePosition(item, next.inline[index]) : true,
-    )
-  );
-}
-
-function remapExecutionLine(line, previous, next) {
-  if (!Number.isFinite(line)) return line;
-  const blockIndex = previous.blocks.findIndex(
-    (block) => line >= block.lineStart && line <= block.lineEnd,
-  );
-  if (blockIndex >= 0 && next.blocks[blockIndex]) {
-    return line + next.blocks[blockIndex].lineStart - previous.blocks[blockIndex].lineStart;
-  }
-  const inlineIndex = previous.inline.findIndex((item) => item.line === line);
-  return inlineIndex >= 0 && next.inline[inlineIndex]
-    ? next.inline[inlineIndex].line
-    : line;
-}
-
-function remapExecutionEvents(events, path, previous, next) {
-  return (events || []).map((event) => {
-    if (event.path !== path) return event;
-    return {
-      ...event,
-      line: remapExecutionLine(event.line, previous, next),
-      endLine: remapExecutionLine(event.endLine, previous, next),
-    };
-  });
-}
-
 function preserveUnchangedBlockIdentity(draftBlocks, previousBlocks) {
   const used = new Set();
   const preservedIds = new Set();
@@ -4076,6 +3295,34 @@ function preserveUnchangedBlockIdentity(draftBlocks, previousBlocks) {
   return { blocks, preservedIds };
 }
 
+function contiguousTextChange(previousSource, source) {
+  let from = 0;
+  const shared = Math.min(previousSource.length, source.length);
+  while (from < shared && previousSource[from] === source[from]) from += 1;
+  let previousEnd = previousSource.length;
+  let sourceEnd = source.length;
+  while (
+    previousEnd > from &&
+    sourceEnd > from &&
+    previousSource[previousEnd - 1] === source[sourceEnd - 1]
+  ) {
+    previousEnd -= 1;
+    sourceEnd -= 1;
+  }
+  return { from, to: previousEnd, insert: source.slice(from, sourceEnd) };
+}
+
+function textChanges(previousSource, source, changes) {
+  if (!changes?.iterChanges) {
+    return [contiguousTextChange(previousSource, source)];
+  }
+  const result = [];
+  changes.iterChanges((from, to, _fromNew, _toNew, inserted) => {
+    result.push({ from, to, insert: inserted.toString() });
+  });
+  return result.length ? result : [contiguousTextChange(previousSource, source)];
+}
+
 function cancelPendingEvaluation() {
   if (state.evalFrame !== null) cancelAnimationFrame(state.evalFrame);
   state.evalFrame = null;
@@ -4086,95 +3333,22 @@ function cancelPendingEvaluation() {
   state.evaluating = false;
 }
 
-function projectDebuggerThroughEdit({
-  previousSource,
-  source,
-  changes,
-  provisional,
-  invalidation,
-  previousPlan,
-  nextPlan,
-}) {
-  const debuggerState = state.debugger;
-  state.debuggerPreview = null;
-  if (
-    !debuggerState ||
-    debuggerState.status !== "ready" ||
-    debuggerState.sources?.[state.path] !== previousSource ||
-    !changes?.mapPos
-  ) {
-    return false;
-  }
-  const draft = {
-    path: state.path,
-    previousSource,
-    source,
-    changes,
-  };
-  const draftMapping = createExecutionDraftMapping(draft);
-  const projectionPlan = debuggerState.draftPlan || previousPlan;
-  const callEvents = projectExecutionDraftEvents(
-    debuggerState.callEvents || [],
-    draft,
-    { invalidation, plan: projectionPlan, mapping: draftMapping },
-  );
-  const sources = {
-    ...debuggerState.sources,
-    [state.path]: source,
-  };
-  const siteIndex = debuggerState.siteIndexes?.[state.path];
-  const siteIndexes = {
-    ...debuggerState.siteIndexes,
-    [state.path]: siteIndex
-      ? {
-          ...siteIndex,
-          source,
-          sites: mapExecutionDraftSites(siteIndex.sites || [], draft, {
-            mapping: draftMapping,
-          }),
-        }
-      : siteIndex,
-  };
-  const events = executionTimelineEvents(
-    callEvents,
-    state.project?.documents.map((document) => document.path) || [],
-  );
-  let next = {
-    ...debuggerState,
-    source,
-    sources,
-    callEvents,
-    events,
-    model: buildDebugCallModel({ callEvents }, sources),
-    siteIndexes,
-    status: "ready",
-    stale: false,
-    provisional,
-    draftPlan: nextPlan,
-  };
-  next = preferFocusedExecution(
-    executionSessionReconcileFocus(next, debuggerState, {
-      mapAuthoritativeSelection: (anchor) =>
-        mapExecutionDraftEvent(anchor, draft, { mapping: draftMapping }),
-    }),
-  );
-  state.debugger = next;
-  const session = currentSession();
-  if (session) session.debugger = next;
-  state.sourceEditorView?.dom.classList.toggle(
-    "cm-execution-lens-provisional",
-    next.provisional,
-  );
-  applyDebuggerProjection();
-  refreshExecutionTimeline();
-  return true;
-}
-
 function updateSource(
   source,
   { evaluate = true, changes = null, previousSource = null } = {},
 ) {
   invalidateTypeLookup();
+  const executionPreviousSource = previousSource ?? state.document.source;
+  let executionNeedsEvaluation = false;
+  if (state.executionCore && executionPreviousSource !== source) {
+    const executionTransition = dispatchExecutionIntent(state.executionCore, {
+      kind: "document-edited",
+      path: state.path,
+      source,
+      changes: textChanges(executionPreviousSource, source, changes),
+    });
+    executionNeedsEvaluation = installExecutionTransition(executionTransition);
+  }
   const draft = preserveUnchangedBlockIdentity(
     parseDraftBlocks(source),
     state.document.blocks,
@@ -4187,12 +3361,9 @@ function updateSource(
       : { blockFrom: 0, inlineFrom: 0 };
   const effectiveInvalidation =
     invalidation ||
-    ((state.evaluation && !state.evaluation.ok) || state.debugger?.provisional
+    (state.evaluation && !state.evaluation.ok
       ? { blockFrom: 0, inlineFrom: 0 }
       : null);
-  const layoutChanged =
-    !invalidation && executionLayoutChanged(previousPlan, nextPlan);
-  const debuggerPreviousSource = previousSource ?? state.document.source;
   state.document = {
     ...state.document,
     source,
@@ -4202,15 +3373,6 @@ function updateSource(
     ),
     issues: [],
   };
-  projectDebuggerThroughEdit({
-    previousSource: debuggerPreviousSource,
-    source,
-    changes,
-    provisional: Boolean(effectiveInvalidation),
-    invalidation: effectiveInvalidation,
-    previousPlan,
-    nextPlan,
-  });
   state.dirty = source !== state.savedSource;
   invalidateDependencyContext({ stale: state.dirty });
   if (!state.dirty && !state.dependency && state.module) {
@@ -4229,17 +3391,6 @@ function updateSource(
     applyDebuggerProjection();
   } else {
     cancelPendingEvaluation();
-    if (layoutChanged && state.evaluation?.traces) {
-      state.evaluation = {
-        ...state.evaluation,
-        traces: remapExecutionEvents(
-          state.evaluation.traces,
-          state.path,
-          previousPlan,
-          nextPlan,
-        ),
-      };
-    }
     state.evaluationPlan = nextPlan;
   }
   if (state.sourceEditorView && state.evaluation) {
@@ -4250,7 +3401,13 @@ function updateSource(
   }
   updateStatusOnly();
   refreshInspector();
-  if (evaluate && effectiveInvalidation) {
+  if (
+    evaluate &&
+    (Boolean(effectiveInvalidation) ||
+      (state.executionCore &&
+        executionNeedsEvaluation &&
+        Boolean(executionPendingToken(state.executionCore))))
+  ) {
     scheduleEvaluation(source, { plan: nextPlan });
   }
 }
@@ -4333,11 +3490,7 @@ async function startTypeLookup() {
   }
 }
 
-function scheduleTypeLookup(
-  editor,
-  position,
-  { preserveTraceFocus = false } = {},
-) {
+function scheduleTypeLookup(editor, position) {
   clearTimeout(state.typeTimer);
   state.typePending = null;
   const generation = ++state.typeGeneration;
@@ -4351,40 +3504,14 @@ function scheduleTypeLookup(
   );
   state.cursorPosition = block ? cursor : null;
   state.typeInfo = null;
-  if (state.debugger && preserveTraceFocus) {
-    refreshInspector();
-    return;
-  }
-  if (state.debugger?.stale) {
-    refreshInspector();
-    return;
-  }
   if (!block) {
     state.typePending = null;
-    if (state.debugger) selectTraceSite(null, null);
-    else refreshInspector();
+    refreshInspector();
     return;
   }
-
-  if (state.debugger) {
-    const siteIndex = currentExecutionSiteIndex();
-    if (siteIndex?.status !== "ready") {
-      applyDebuggerProjection();
-      refreshInspector();
-      return;
-    }
-    const probe = executionCursorProbe(line.text, cursor.column);
-    const staticRange = executionSiteAt(
-      currentExecutionSites(),
-      { path: state.path, line: cursor.line, column: probe.column },
-      {
-        purpose: probe.purpose,
-        events: state.debugger.events,
-        line: line.text,
-      },
-    );
-    selectTraceSite(state.cursorPosition, staticRange);
+  if (state.executionCore) {
     state.typePending = null;
+    refreshInspector();
     return;
   }
   refreshInspector();
@@ -4907,6 +4034,7 @@ function scheduleEvaluation(
     plan,
     retryCount,
     started: false,
+    executionToken: executionPendingToken(state.executionCore),
   };
   state.pendingEvaluation = request;
   state.evaluating = true;
@@ -4916,6 +4044,7 @@ function scheduleEvaluation(
     request.started = true;
     const controller = new AbortController();
     state.evaluationController = controller;
+    let retryWithoutExecutionCore = false;
     try {
       const payload = await api("/api/evaluate", {
         method: "POST",
@@ -4924,15 +4053,28 @@ function scheduleEvaluation(
           path: request.path,
           source: request.source,
           baseProjectVersion: request.baseProjectVersion,
+          requestCodeDigest: request.executionToken?.requestCodeDigest,
         }),
       });
       if (
         state.pendingEvaluation !== request ||
         request.generation !== state.evalGeneration ||
         request.path !== state.path ||
-        request.source !== state.document.source ||
-        request.baseProjectVersion !== state.projectVersion
+        request.source !== state.document.source
       ) {
+        return;
+      }
+      if (request.baseProjectVersion !== state.projectVersion) {
+        state.pendingEvaluation = null;
+        state.evaluating = false;
+        setExecutionCore(null);
+        state.executionProblem = null;
+        state.evaluationInvalidation ||= { blockFrom: 0, inlineFrom: 0 };
+        scheduleEvaluation(state.document.source, {
+          immediate: true,
+          plan: buildExecutionPlan(state.document.source, state.document.blocks),
+          retryCount: request.retryCount + 1,
+        });
         return;
       }
       if (
@@ -4947,9 +4089,12 @@ function scheduleEvaluation(
           request.path === state.path &&
           request.source === state.document.source
         ) {
+          setExecutionCore(null);
+          state.executionProblem = null;
+          state.evaluationInvalidation ||= { blockFrom: 0, inlineFrom: 0 };
           scheduleEvaluation(state.document.source, {
             immediate: true,
-            plan: request.plan,
+            plan: buildExecutionPlan(state.document.source, state.document.blocks),
             retryCount: request.retryCount + 1,
           });
         }
@@ -4960,9 +4105,44 @@ function scheduleEvaluation(
       state.document = payload.document;
       state.evaluation = payload.evaluation;
       if (evaluationSucceeded) {
-        state.evaluationPlan = request.plan;
-        state.evaluationInvalidation = null;
+        cacheExecutionArtifact(
+          payload.evaluation.executionArtifact,
+          request.executionToken || payload.evaluation.executionArtifact,
+        );
+        if (request.executionToken && state.executionCore) {
+          const installed = dispatchExecutionIntent(state.executionCore, {
+            kind: "evaluation-succeeded",
+            token: request.executionToken,
+            artifact: payload.evaluation.executionArtifact,
+          });
+          retryWithoutExecutionCore = installExecutionTransition(installed);
+          if (!installed.decision.startsWith("artifact-installed:")) {
+            console.error("Execution artifact was not installed", installed);
+          }
+        } else {
+          installInitialExecutionCore(payload.evaluation);
+        }
+        setExecutionCore(state.executionCore);
+        if (retryWithoutExecutionCore) {
+          setExecutionCore(null);
+          state.evaluationInvalidation = previousInvalidation || {
+            blockFrom: 0,
+            inlineFrom: 0,
+          };
+        } else {
+          state.evaluationPlan = request.plan;
+          state.evaluationInvalidation = null;
+        }
       } else {
+        if (request.executionToken && state.executionCore) {
+          setExecutionCore(dispatchExecutionIntent(state.executionCore, {
+            kind: "evaluation-failed",
+            token: request.executionToken,
+            diagnostics: (payload.evaluation?.diagnostics || []).map(
+              (diagnostic) => diagnostic.message,
+            ),
+          }).state);
+        }
         state.evaluationInvalidation = previousInvalidation || {
           blockFrom: 0,
           inlineFrom: 0,
@@ -4970,6 +4150,13 @@ function scheduleEvaluation(
       }
       state.pendingEvaluation = null;
       state.evaluating = false;
+      if (retryWithoutExecutionCore && request.retryCount < 1) {
+        scheduleEvaluation(state.document.source, {
+          immediate: true,
+          plan: buildExecutionPlan(state.document.source, state.document.blocks),
+          retryCount: request.retryCount + 1,
+        });
+      }
       if (document.activeElement?.closest(".cm-editor")) {
         setMarkdownEditorEvaluation(state.sourceEditorView, {
           evaluation: state.evaluation,
@@ -4987,14 +4174,7 @@ function scheduleEvaluation(
           state.sourceEditorView.state.selection.main.head,
         );
       }
-      if (
-        evaluationSucceeded &&
-        (!state.debugger ||
-          state.debugger.provisional ||
-          state.debugger.sources?.[state.path] !== state.document.source)
-      ) {
-        void startDebugger({ background: true });
-      }
+      if (evaluationSucceeded) applyDebuggerProjection();
     } catch (error) {
       if (
         state.pendingEvaluation !== request ||
@@ -5012,9 +4192,12 @@ function scheduleEvaluation(
             request.path === state.path &&
             request.source === state.document.source
           ) {
+            setExecutionCore(null);
+            state.executionProblem = null;
+            state.evaluationInvalidation ||= { blockFrom: 0, inlineFrom: 0 };
             scheduleEvaluation(state.document.source, {
               immediate: true,
-              plan: request.plan,
+              plan: buildExecutionPlan(state.document.source, state.document.blocks),
               retryCount: request.retryCount + 1,
             });
           }
@@ -5195,13 +4378,6 @@ function mountEmbeddedEditors() {
       onDebugNavigate: (...args) => {
         return isCurrentDocument() ? navigateDebugCall(...args) : false;
       },
-      onDebugValueRequest: (position) =>
-        isCurrentDocument()
-          ? debugValueAtEditorPosition(position)
-          : null,
-      onDebugPreviewChange: (previewSession) => {
-        if (isCurrentDocument()) setDebuggerPreview(previewSession);
-      },
       onStateChange: (editorState) => {
         const mountedSession = state.sessions.get(mountedModule);
         if (mountedSession) mountedSession.editorState = editorState;
@@ -5224,6 +4400,19 @@ function mountEmbeddedEditors() {
           state.selected = block.id;
           state.selectedDefinitionName = null;
         }
+        if (state.executionCore && line) {
+          const sourceLine = state.sourceEditorView.state.doc.line(line);
+          setExecutionCore(dispatchExecutionIntent(state.executionCore, {
+            kind: "cursor-moved",
+            position: {
+              path: state.path,
+              line,
+              column: position - sourceLine.from,
+            },
+          }).state);
+          applyDebuggerProjection();
+          refreshInspector();
+        }
         if (state.suppressNextCompletionLookup) {
           state.suppressNextCompletionLookup = false;
         } else if (input || (docChanged && state.completion)) {
@@ -5232,11 +4421,7 @@ function mountEmbeddedEditors() {
           invalidateCompletion();
           refreshInspector();
         }
-        const preserveTraceFocus = state.preserveTraceFocusForSelection;
-        state.preserveTraceFocusForSelection = false;
-        scheduleTypeLookup(state.sourceEditorView, position, {
-          preserveTraceFocus,
-        });
+        scheduleTypeLookup(state.sourceEditorView, position);
         scheduleDefinitionLookup(state.sourceEditorView, position);
       },
       onBlur: () => {
@@ -5275,25 +4460,7 @@ function mountEmbeddedEditors() {
       path: state.path,
     });
     renderCompletionPopup();
-    const selectedCall = currentDebugCall();
-    setMarkdownEditorDebugProjection(
-      state.sourceEditorView,
-      state.debugger
-        ? focusedProjectionForDebugCall(selectedCall)
-        : null,
-    );
-    state.sourceEditorView.dom.classList.toggle(
-      "cm-execution-lens",
-      Boolean(state.debugger),
-    );
-    state.sourceEditorView.dom.classList.toggle(
-      "cm-execution-lens-stale",
-      Boolean(state.debugger?.stale),
-    );
-    state.sourceEditorView.dom.classList.toggle(
-      "cm-execution-lens-provisional",
-      Boolean(state.debugger?.provisional),
-    );
+    applyDebuggerProjection();
     const restoredEditor = state.sourceEditorView;
     const restoredPosition = restoredEditor.state.selection.main.head;
     queueMicrotask(() => {
@@ -5350,279 +4517,36 @@ function openSourceLine(line) {
   editor.focus();
 }
 
-async function showDebugCall(
-  callId,
-  { scroll = false } = {},
-) {
-  const debuggerState = state.debugger;
-  if (debuggerState?.status !== "ready" || debuggerState.stale) return;
-  const call =
-    debuggerState.model.calls.get(callId) ||
-    debuggerState.model.roots.get(callId);
-  if (!call) return;
-  const next = executionSessionSelectCall(debuggerState, callId);
-  installTraceFocus(next);
-  state.sourceEditorView?.dom.classList.add("cm-execution-lens");
-  const inspector = document.querySelector(".inspector");
-  if (inspector) inspector.scrollTop = 0;
-  if (scroll && call.kind !== "root") {
-    await revealExecutionEvent(executionSessionEvent(state.debugger), {
-      allowDocumentChange: true,
-      history: "push",
-      animate: true,
-      moveCursor: true,
-      focusGeneration: state.traceFocusGeneration,
-    });
-  }
-}
-
-function installDebuggerPayload(payload, snapshot) {
-  if (
-    executionSnapshotKey(snapshot) !==
-    executionSnapshotKey(debuggerSnapshot())
-  ) {
-    return false;
-  }
-  const pending = executionSessionMatches(state.debugger, snapshot)
-    ? state.debugger
-    : pendingExecutionSession(snapshot);
-  const sources = { [snapshot.path]: snapshot.source };
-  const model = buildDebugCallModel(payload.debugger, sources);
-  const events = executionTimelineEvents(
-    payload.debugger.callEvents || [],
-    state.project?.documents.map((document) => document.path) || [],
-  );
-  state.debugger = preferFocusedExecution(
-    readyExecutionSession(pending, {
-      payload: payload.debugger,
-      model,
-      events,
-    }),
-  );
-  state.debuggerPreview = null;
-  const cachedSites = state.executionSitesCache.get(
-    executionSnapshotKey(snapshot),
-  )?.sites;
-  state.debugger.siteIndexes = {
-    ...state.debugger.siteIndexes,
-    [snapshot.path]: cachedSites
-      ? { status: "ready", source: snapshot.source, sites: cachedSites }
-      : { status: "loading", source: snapshot.source, sites: [] },
-  };
-  state.sourceEditorView?.dom.classList.remove(
-    "cm-execution-lens-stale",
-  );
-  state.sourceEditorView?.dom.classList.remove(
-    "cm-execution-lens-provisional",
-  );
-  applyDebuggerProjection();
-  const session = currentSession();
-  if (session) session.debugger = state.debugger;
-  refreshExecutionTimeline();
-  if (state.sourceEditorView) {
-    scheduleTypeLookup(
-      state.sourceEditorView,
-      state.sourceEditorView.state.selection.main.head,
-    );
-  } else {
-    applyDebuggerProjection();
-  }
-  return true;
-}
-
-async function loadExecutionSites(
-  snapshot = debuggerSnapshot(),
-  { attempt = 0 } = {},
-) {
-  if (!snapshot) return [];
-  const key = executionSnapshotKey(snapshot);
-  const cached = state.executionSitesCache.get(key);
-  if (cached?.sites) {
-    if (debuggerOwnsSnapshot(state.debugger, snapshot)) {
-      state.debugger = {
-        ...state.debugger,
-        siteIndexes: {
-          ...state.debugger.siteIndexes,
-          [snapshot.path]: {
-            status: "ready",
-            source: snapshot.source,
-            sites: cached.sites,
-          },
-        },
-      };
-    }
-    return cached.sites;
-  }
-  if (cached?.promise) return cached.promise;
-
-  if (debuggerOwnsSnapshot(state.debugger, snapshot)) {
-    state.debugger = {
-      ...state.debugger,
-      siteIndexes: {
-        ...state.debugger.siteIndexes,
-        [snapshot.path]: {
-          status: "loading",
-          source: snapshot.source,
-          sites: [],
-        },
-      },
-    };
-    if (snapshot.path === state.path) {
-      refreshInspector();
-    }
-  }
-  const promise = api("/api/execution-sites", {
-    method: "POST",
-    body: JSON.stringify({
-      path: snapshot.path,
-      source: snapshot.source,
-      baseProjectVersion: snapshot.projectVersion,
-    }),
-  })
-    .then((payload) => {
-      const sites = payload.sites || [];
-      state.executionSitesCache.set(key, { sites });
-      while (state.executionSitesCache.size > 8) {
-        state.executionSitesCache.delete(
-          state.executionSitesCache.keys().next().value,
-        );
-      }
-      if (debuggerOwnsSnapshot(state.debugger, snapshot)) {
-        state.debugger = {
-          ...state.debugger,
-          siteIndexes: {
-            ...state.debugger.siteIndexes,
-            [snapshot.path]: {
-              status: "ready",
-              source: snapshot.source,
-              sites,
-            },
-          },
-        };
-        const session = currentSession();
-        if (session) session.debugger = state.debugger;
-        if (
-          snapshot.path === state.path &&
-          state.sourceEditorView
-        ) {
-          scheduleTypeLookup(
-            state.sourceEditorView,
-            state.sourceEditorView.state.selection.main.head,
-          );
-        }
-      }
-      return sites;
-    })
-    .catch((error) => {
-      state.executionSitesCache.delete(key);
-      if (attempt < 2 && debuggerOwnsSnapshot(state.debugger, snapshot)) {
-        state.debugger = {
-          ...state.debugger,
-          siteIndexes: {
-            ...state.debugger.siteIndexes,
-            [snapshot.path]: {
-              status: "loading",
-              source: snapshot.source,
-              sites: [],
-            },
-          },
-        };
-        window.setTimeout(() => {
-          if (debuggerOwnsSnapshot(state.debugger, snapshot)) {
-            void loadExecutionSites(snapshot, { attempt: attempt + 1 });
-          }
-        }, 40 * (attempt + 1));
-        return [];
-      }
-      if (debuggerOwnsSnapshot(state.debugger, snapshot)) {
-        state.debugger = {
-          ...state.debugger,
-          siteIndexes: {
-            ...state.debugger.siteIndexes,
-            [snapshot.path]: {
-              status: "error",
-              source: snapshot.source,
-              sites: [],
-              error: error.message,
-            },
-          },
-        };
-        if (snapshot.path === state.path) {
-          refreshInspector();
-        }
-      }
-      return [];
-    });
-  state.executionSitesCache.set(key, { promise });
-  return promise;
-}
-
-async function startDebugger({
-  background = false,
-  snapshot = debuggerSnapshot(),
-} = {}) {
-  if (!state.document || !snapshot) return;
-  if (
-    debuggerMatchesSnapshot(state.debugger, snapshot) &&
-    state.debugger.status === "ready"
-  ) {
-    applyDebuggerProjection();
-    const siteIndex = state.debugger.siteIndexes?.[snapshot.path];
-    if (!siteIndex || siteIndex.status === "error") {
-      void loadExecutionSites(snapshot);
-    }
-    return;
-  }
-  if (!state.evaluation?.ok || state.evaluationInvalidation) {
-    if (!background && state.evaluationInvalidation) {
-      toast("Execution is updating for the current OCaml source.");
-    }
-    return;
-  }
-  state.debugger = pendingExecutionSession(snapshot, {
-    previous: state.debugger,
-  });
-  if (!background) refreshInspector();
-  installDebuggerPayload(
-    {
-      debugger: {
-        callEvents: state.evaluation.traces || [],
-        truncated: Boolean(state.evaluation.traceTruncated),
-        durationMs: state.evaluation.durationMs,
-        evaluationId: state.evaluation.evaluationId,
-      },
-    },
-    snapshot,
-  );
-  void loadExecutionSites(snapshot);
-  refreshInspector({ revealExecutionChoice: true });
-}
-
 function bindInspectorEvents() {
   const inspector = document.querySelector(".inspector");
-  inspector?.querySelectorAll("[data-debug-start]").forEach((button) => {
-    button.addEventListener("click", () => void startDebugger());
-  });
   inspector
-    ?.querySelector("[data-debug-sites-retry]")
-    ?.addEventListener("click", () =>
-      void loadExecutionSites(debuggerSnapshot()),
-    );
-  inspector?.querySelectorAll("[data-debug-call]").forEach((button) => {
-    button.addEventListener("click", () =>
-      void showDebugCall(button.dataset.debugCall, { scroll: true }),
-    );
-  });
-  inspector?.querySelectorAll("[data-execution-choice]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const eventIndex = Number(button.dataset.executionChoice);
-      if (!Number.isFinite(eventIndex)) return;
-      selectTraceEvent(eventIndex, { revealSource: false });
-      document
-        .querySelector(`[data-execution-choice="${eventIndex}"]`)
-        ?.focus({ preventScroll: true });
+    ?.querySelectorAll("[data-execution-core-activation]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        if (!state.executionCore) return;
+        const result = dispatchExecutionIntent(state.executionCore, {
+          kind: "activation-chosen",
+          activationId: button.dataset.executionCoreActivation,
+        });
+        setExecutionCore(result.state);
+        applyDebuggerProjection();
+        refreshInspector({ revealExecutionChoice: true });
+      });
     });
-  });
+  inspector
+    ?.querySelectorAll("[data-execution-core-occurrence]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        if (!state.executionCore) return;
+        installExecutionNavigation(
+          dispatchExecutionIntent(state.executionCore, {
+            kind: "occurrence-chosen",
+            occurrenceId: button.dataset.executionCoreOccurrence,
+          }),
+          { animate: false },
+        );
+      });
+    });
   document
     .querySelector("[data-definition-peek]")
     ?.addEventListener("click", () => openDefinition(state.definitionInfo));
@@ -5725,115 +4649,101 @@ function clampPaneWidths() {
   setPaneWidth("sidebar", state.paneWidths.sidebar);
 }
 
-function bindExecutionTimelineEvents() {
-  const scrubber = document.querySelector("[data-execution-scrubber]");
-  if (
-    !scrubber ||
-    scrubber.disabled ||
-    scrubber.dataset.bound === "true"
-  ) return;
-  clearExecutionTimelineInteraction();
-  scrubber.dataset.bound = "true";
-  const main = document.querySelector(".main");
-  const timeline = scrubber.closest("[data-execution-timeline]");
-  let pointerId = null;
+function storeCursorInSession(position = normalizedDebugCursor()) {
+  const session = currentSession();
+  const editorState = session?.editorState;
+  if (!editorState || !position) return;
+  const lineNumber = Math.min(
+    Math.max(position.line, 1),
+    editorState.doc.lines,
+  );
+  const line = editorState.doc.line(lineNumber);
+  const anchor = Math.min(
+    Math.max(line.from + position.column, line.from),
+    line.to,
+  );
+  session.editorState = editorState.update({
+    selection: { anchor },
+  }).state;
+}
 
-  const follow = (allowDocumentChange = false) => {
-    selectTraceEvent(scrubber.value, {
-      revealSource: true,
-      allowDocumentChange,
-    });
-  };
-  const seekToPointer = (event) => {
-    if (pointerId !== null && event.pointerId !== pointerId) return;
-    const bounds = scrubber.getBoundingClientRect();
-    const ratio = Math.min(
-      Math.max((event.clientX - bounds.left) / bounds.width, 0),
-      1,
-    );
-    scrubber.value = String(
-      Math.round(ratio * Number(scrubber.max || 0)),
-    );
-    follow(false);
-  };
-  const move = (event) => {
-    if (pointerId === null) return;
-    seekToPointer(event);
-  };
-  const cleanup = () => {
-    pointerId = null;
-    window.removeEventListener("pointermove", move);
-    window.removeEventListener("pointerup", finish);
-    state.executionTimelineScrubbing = false;
-    main?.classList.remove("timeline-following");
-    timeline?.classList.remove("scrubbing");
-    state.sourceEditorView?.dom.classList.remove(
-      "cm-timeline-scrubbing",
-    );
-  };
-  const finish = (event) => {
-    if (
-      pointerId !== null &&
-      Number.isFinite(event?.pointerId) &&
-      event.pointerId !== pointerId
-    ) {
-      return;
-    }
-    cleanup();
-    if (state.executionTimelineCleanup === cleanup) {
-      state.executionTimelineCleanup = null;
-    }
-    follow(true);
-  };
-  state.executionTimelineCleanup = cleanup;
+function moveEditorToDebugCursor({ animate = false, focus = false } = {}) {
+  const editor = state.sourceEditorView;
+  const position = normalizedDebugCursor();
+  if (!editor || !position) return false;
+  const lineNumber = Math.min(
+    Math.max(position.line, 1),
+    editor.state.doc.lines,
+  );
+  const line = editor.state.doc.line(lineNumber);
+  const anchor = Math.min(
+    Math.max(line.from + position.column, line.from),
+    line.to,
+  );
+  editor.dispatch({
+    selection: { anchor },
+    userEvent: "select.execution-audit",
+  });
+  scrollMarkdownEditorTo(
+    editor,
+    { line: lineNumber, column: anchor - line.from },
+    { animate },
+  );
+  if (focus) editor.focus();
+  return true;
+}
 
-  scrubber.addEventListener("pointerdown", (event) => {
-    if (pointerId !== null) return;
-    pointerId = event.pointerId;
-    state.executionTimelineScrubbing = true;
-    main?.classList.add("timeline-following");
-    timeline?.classList.add("scrubbing");
-    state.sourceEditorView?.dom.classList.add("cm-timeline-scrubbing");
-    scrubber.focus({ preventScroll: true });
-    seekToPointer(event);
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", finish);
-    event.preventDefault();
-  });
-  scrubber.addEventListener("pointercancel", finish);
-  scrubber.addEventListener("input", () => follow(false));
-  scrubber.addEventListener("change", () => {
-    if (!state.executionTimelineScrubbing) follow(true);
-  });
-  scrubber.addEventListener("keydown", (event) => {
-    const current = Number(scrubber.value);
-    const maximum = Number(scrubber.max);
-    const next =
-      event.key === "Home"
-        ? 0
-        : event.key === "End"
-          ? maximum
-          : event.key === "PageUp"
-            ? current - 10
-            : event.key === "PageDown"
-              ? current + 10
-              : event.key === "ArrowLeft" || event.key === "ArrowDown"
-                ? current - 1
-                : event.key === "ArrowRight" || event.key === "ArrowUp"
-                  ? current + 1
-                  : null;
-    if (next === null) return;
-    event.preventDefault();
-    selectTraceEvent(next, {
-      revealSource: true,
-      allowDocumentChange: true,
-    });
+function debugCodeBlockAtLine(lineNumber) {
+  return state.document?.blocks.find((block) => {
+    if (block.kind !== "ocaml") return false;
+    const firstLine = block.sourceLine || block.lineStart;
+    const lastLine =
+      firstLine + Math.max(String(block.source || "").split("\n").length - 1, 0);
+    return lineNumber >= firstLine && lineNumber <= lastLine;
   });
 }
 
 function setSourceMode(mode) {
+  const previousMode = state.sourceMode;
+  if (mode === "debug") {
+    const editor = state.sourceEditorView;
+    if (editor) {
+      const position = editor.state.selection.main.head;
+      const line = editor.state.doc.lineAt(position);
+      const block = debugCodeBlockAtLine(line.number);
+      if (block) {
+        state.debugCursor = {
+          line: line.number,
+          column: position - line.from,
+        };
+      } else {
+        const firstCodeLine = state.document?.blocks.find(
+          (item) => item.kind === "ocaml",
+        )?.sourceLine;
+        if (firstCodeLine) {
+          const source = editor.state.doc.line(firstCodeLine).text;
+          state.debugCursor = {
+            line: firstCodeLine,
+            column: Math.max(0, source.search(/\S|$/)),
+          };
+        }
+      }
+    }
+    state.debugAuditBaseline = createExecutionAuditBaseline(state.executionCore);
+  }
+  if (previousMode === "debug" && mode !== "debug") {
+    storeCursorInSession();
+    state.debugAuditBaseline = null;
+  }
   state.sourceMode = mode;
   localStorage.setItem("dox:v2:editor-mode", mode);
+  if (previousMode === "debug" || mode === "debug") {
+    render();
+    if (previousMode === "debug" && mode !== "debug") {
+      moveEditorToDebugCursor();
+    }
+    return;
+  }
   setMarkdownEditorMode(state.sourceEditorView, mode);
   document
     .querySelector(".workspace")
@@ -5850,16 +4760,150 @@ function setSourceMode(mode) {
   );
   const button = document.querySelector("#source-mode-button");
   if (button) {
-    button.textContent = mode === "source" ? "Document" : "Source";
-    button.classList.toggle("active", mode === "source");
-    button.setAttribute("aria-pressed", String(mode === "source"));
+    const next = nextSourceMode(mode);
+    button.textContent = sourceModeName[next];
+    button.setAttribute("aria-label", `Switch to ${sourceModeName[next]} view`);
+    button.classList.toggle("active", mode !== "literate");
   }
+}
+
+function debugColumnFromPointer(event, code) {
+  const source = executionDebugSource().split("\n")[
+    Number(code.closest("[data-debug-line]")?.dataset.debugLine || 1) - 1
+  ] || "";
+  return pointerColumn({
+    document_: document,
+    code,
+    source,
+    clientX: event.clientX,
+    clientY: event.clientY,
+  });
+}
+
+function refreshExecutionDebug({ focus = false } = {}) {
+  const shell = document.querySelector(".execution-debug-view");
+  if (shell) shell.outerHTML = renderDocument();
+  const inspector = document.querySelector(".inspector");
+  if (inspector) {
+    inspector.innerHTML = renderInspector();
+    inspector.dataset.rendered = "true";
+    state.inspectorHtml = inspector.innerHTML;
+  }
+  bindDebugEvents();
+  if (focus) {
+    requestAnimationFrame(() =>
+      document
+        .querySelector("[data-execution-debug]")
+        ?.focus({ preventScroll: true }),
+    );
+  }
+}
+
+function setDebugPosition(line, column, { focus = false } = {}) {
+  const lines = executionDebugSource().split("\n");
+  const nextLine = Math.min(Math.max(line, 1), lines.length);
+  const nextColumn = Math.min(
+    Math.max(column, 0),
+    (lines[nextLine - 1] || "").length,
+  );
+  state.debugCursor = { line: nextLine, column: nextColumn };
+  const matrix = executionDebugMatrix();
+  const reducerState = matrix?.reducerStates[nextColumn];
+  if (reducerState) setExecutionCore(reducerState);
+  refreshExecutionDebug({ focus });
+}
+
+function openDebugAuditTarget(kind, id) {
+  const matrix = executionDebugMatrix();
+  const cursor = normalizedDebugCursor();
+  const baselineState = matrix?.reducerStates[cursor.column];
+  if (!baselineState || !id) return;
+  const result = dispatchExecutionIntent(baselineState, {
+    kind: kind === "occurrence" ? "occurrence-chosen" : "activation-chosen",
+    ...(kind === "occurrence" ? { occurrenceId: id } : { activationId: id }),
+  });
+  if (!result.state) return;
+  const moved = result.effects.find(
+    (effect) =>
+      effect.kind === "move-editor-cursor" && effect.range.path === state.path,
+  );
+  const position = moved?.position || cursor;
+  state.debugCursor = { line: position.line, column: position.column };
+  setExecutionCore(result.state);
+  storeCursorInSession(state.debugCursor);
+  state.sourceMode = "literate";
+  state.debugAuditBaseline = null;
+  localStorage.setItem("dox:v2:editor-mode", "literate");
+  render();
+  requestAnimationFrame(() => {
+    moveEditorToDebugCursor({ animate: true, focus: true });
+  });
+}
+
+function bindDebugEvents() {
+  const explorer = document.querySelector("[data-execution-debug]");
+  if (!explorer) return;
+  explorer.querySelectorAll("[data-debug-code]").forEach((code) => {
+    code.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || !event.isPrimary) return;
+      const line = Number(code.closest("[data-debug-line]").dataset.debugLine);
+      setDebugPosition(line, debugColumnFromPointer(event, code), {
+        focus: true,
+      });
+      event.preventDefault();
+    });
+  });
+  explorer.querySelectorAll("[data-debug-boundary]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setDebugPosition(
+        normalizedDebugCursor().line,
+        Number(button.dataset.debugBoundary),
+        { focus: true },
+      );
+    });
+  });
+  explorer.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      return;
+    }
+    const lines = executionDebugSource().split("\n");
+    const cursor = normalizedDebugCursor();
+    let { line, column } = cursor;
+    if (event.key === "ArrowLeft") {
+      if (column > 0) column -= 1;
+      else if (line > 1) {
+        line -= 1;
+        column = lines[line - 1].length;
+      }
+    } else if (event.key === "ArrowRight") {
+      if (column < lines[line - 1].length) column += 1;
+      else if (line < lines.length) {
+        line += 1;
+        column = 0;
+      }
+    } else {
+      line += event.key === "ArrowUp" ? -1 : 1;
+      line = Math.min(Math.max(line, 1), lines.length);
+      column = Math.min(column, lines[line - 1].length);
+    }
+    setDebugPosition(line, column, { focus: true });
+    event.preventDefault();
+  });
+  document.querySelectorAll("[data-debug-audit-activation]").forEach((button) => {
+    button.addEventListener("click", () =>
+      openDebugAuditTarget("activation", button.dataset.debugAuditActivation),
+    );
+  });
+  document.querySelectorAll("[data-debug-audit-occurrence]").forEach((button) => {
+    button.addEventListener("click", () =>
+      openDebugAuditTarget("occurrence", button.dataset.debugAuditOccurrence),
+    );
+  });
 }
 
 function bindEvents() {
   mountOutlineEditor();
   bindPaneResizers();
-  bindExecutionTimelineEvents();
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => {
       state.view = button.dataset.view;
@@ -5895,7 +4939,7 @@ function bindEvents() {
   document
     .querySelector("#source-mode-button")
     ?.addEventListener("click", () =>
-      setSourceMode(state.sourceMode === "source" ? "literate" : "source"),
+      setSourceMode(nextSourceMode()),
     );
   document.querySelector("#new-document")?.addEventListener("click", createDocument);
   document.querySelector("#files-toggle")?.addEventListener("click", () => {
@@ -5924,6 +4968,7 @@ function bindEvents() {
     });
   });
   bindInspectorEvents();
+  bindDebugEvents();
   mountEmbeddedEditors();
 }
 
@@ -5938,7 +4983,7 @@ function refreshInspector({ revealExecutionChoice = false } = {}) {
       renderCompletionPopup();
       if (revealExecutionChoice) {
         inspector
-          .querySelector('[data-execution-choice][aria-current="true"]')
+          .querySelector('[data-execution-core-activation][aria-current="true"]')
           ?.scrollIntoView({ block: "nearest", inline: "nearest" });
       }
       return;
@@ -5950,7 +4995,7 @@ function refreshInspector({ revealExecutionChoice = false } = {}) {
     inspector.scrollTop = scrollTop;
     if (revealExecutionChoice) {
       inspector
-        .querySelector('[data-execution-choice][aria-current="true"]')
+        .querySelector('[data-execution-core-activation][aria-current="true"]')
         ?.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
   }

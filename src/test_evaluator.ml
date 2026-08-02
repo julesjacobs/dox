@@ -29,6 +29,28 @@ let () =
   let document = Document.parse ~path:"runtime.ml.md" source in
   let evaluation = Evaluator.evaluate document in
   expect evaluation.ok "valid document did not evaluate";
+  let compiler_construct_ids =
+    evaluation.compiler_manifests
+    |> List.concat_map (fun manifest ->
+        List.map
+          (fun construct -> construct.Evaluator.construct_id)
+          manifest.Evaluator.manifest_constructs)
+  in
+  let unique_compiler_construct_ids =
+    compiler_construct_ids |> List.sort_uniq String.compare
+  in
+  expect (compiler_construct_ids <> [])
+    "the compiler did not emit a construct manifest";
+  expect
+    (List.length unique_compiler_construct_ids
+    = List.length compiler_construct_ids)
+    "compiler construct IDs were not unique";
+  expect
+    (List.for_all
+       (fun (event : Evaluator.trace_event) ->
+         List.mem event.site_id unique_compiler_construct_ids)
+       evaluation.traces)
+    "a runtime observation did not carry its compiler construct ID";
   expect
     (evaluation.stdout = "first\n\nsecond\n")
     "ordinary stdout was not preserved byte-for-byte";
@@ -311,7 +333,9 @@ let () =
       \    let @add left right = left + right\n\
       \    let @sum = add 2 3\n\
       \    let @length values = List.length values\n\
-      \    let @count = length [1; 2; 3]\n"
+      \    let @count = length [1; 2; 3]\n\
+      \    let @head_or_zero = function [] -> 0 | value :: _ -> value\n\
+      \    let @head = head_or_zero [7; 8]\n"
   in
   let erased_observations =
     Observation.erase ~path:"observed.ml.md" ~start_line:1
@@ -418,6 +442,17 @@ let () =
     | Some call -> has_parameter call "values" "[1; 2; 3]"
     | None -> false)
     "function observations did not render list parameters";
+  let head_call =
+    find_trace (fun event ->
+        String.equal event.phase "enter"
+        && String.equal event.kind "function"
+        && String.equal event.label "head_or_zero")
+  in
+  expect
+    (match head_call with
+    | Some call -> has_parameter call "argument" "[7; 8]"
+    | None -> false)
+    "function-case observations did not capture their implicit argument";
   let expression =
     find_trace (fun event ->
         String.equal event.phase "enter" && String.equal event.kind "expression")
@@ -467,9 +502,15 @@ let () =
       \    let point = { x = 3; y = 4 }\n\
       \    let numbers = Int_set.of_list [3; 1; 2]\n\
       \    let environment = String_map.singleton \"id\" (Next (1, []))\n\
+      \    let literal_ellipsis = \"...\"\n\
+      \    let long_string = String.make 5000 'x'\n\
       \    let first, second = sample, point\n\
       \    let unpack (left, right) = left + right\n\
       \    let sum = unpack (2, 3)\n\
+      \    let selected =\n\
+      \      match Some sample with\n\
+      \      | None -> Stop\n\
+      \      | Some replacement -> replacement\n\
       \    let result =\n\
       \      match sample with\n\
       \      | Stop -> 0\n\
@@ -491,14 +532,41 @@ let () =
   expect
     (structured_returned "point" "{x = 3; y = 4}")
     "record values did not retain field names";
+  let structured_detail label =
+    List.find_map
+      (fun (event : Evaluator.trace_event) ->
+        if String.equal event.phase "return" && String.equal event.label label
+        then Some event.detail
+        else None)
+      structured.traces
+  in
+  let raw_abstract = function
+    | Some detail -> Util.starts_with ~prefix:"#" detail
+    | None -> false
+  in
   expect
-    (structured_returned "numbers" "<opaque>")
-    "abstract set values should not be decoded by guessing their runtime \
-     representation";
+    (raw_abstract (structured_detail "numbers"))
+    "abstract set values did not retain an honest bounded runtime shape";
   expect
-    (structured_returned "environment" "<opaque>")
-    "abstract map values should not be decoded by guessing their runtime \
-     representation";
+    (raw_abstract (structured_detail "environment"))
+    "abstract map values did not retain an honest bounded runtime shape";
+  expect
+    (List.exists
+       (fun (event : Evaluator.trace_event) ->
+         String.equal event.phase "return"
+         && String.equal event.label "literal_ellipsis"
+         && String.equal event.detail "\"...\""
+         && event.value_complete)
+       structured.traces)
+    "a literal ellipsis was mistaken for an incomplete preview";
+  expect
+    (List.exists
+       (fun (event : Evaluator.trace_event) ->
+         String.equal event.phase "return"
+         && String.equal event.label "long_string"
+         && not event.value_complete)
+       structured.traces)
+    "a bounded value preview did not report renderer truncation";
   expect
     (structured_returned "first" "Next (1, [Stop; Next (2, [])])"
      && structured_returned "second" "{x = 3; y = 4}")
@@ -506,8 +574,42 @@ let () =
   expect
     (structured_returned "left" "2" && structured_returned "right" "3"
      && structured_returned "head" "1"
-     && structured_returned "rest" "[Stop; Next (2, [])]")
+     && structured_returned "rest" "[Stop; Next (2, [])]"
+     && structured_returned "replacement"
+          "Next (1, [Stop; Next (2, [])])")
     "function and match patterns did not record every bound identifier";
+  let structured_pattern type_ detail =
+    List.exists
+      (fun (event : Evaluator.trace_event) ->
+        String.equal event.phase "return"
+        && String.equal event.kind "pattern"
+        && String.equal event.type_ type_
+        && String.equal event.detail detail)
+      structured.traces
+  in
+  expect
+    (structured_pattern "sample * point"
+       "(Next (1, [Stop; Next (2, [])]), {x = 3; y = 4})")
+    "a destructuring let pattern did not retain its matched value";
+  expect
+    (structured_pattern "int * int" "(2, 3)")
+    "a function parameter pattern did not retain its matched value";
+  expect
+    (List.exists
+       (fun (event : Evaluator.trace_event) ->
+         String.equal event.phase "parameter"
+         && String.equal event.label "argument1"
+         && String.equal event.type_ "int * int"
+         && String.equal event.detail "(2, 3)")
+       structured.traces)
+    "a destructured anonymous-function argument was omitted from its activation";
+  expect
+    (structured_pattern "sample option"
+       "Some (Next (1, [Stop; Next (2, [])]))")
+    "a constructor pattern displayed unit instead of its matched value";
+  expect
+    (structured_pattern "sample" "Next (1, [Stop; Next (2, [])])")
+    "a match pattern did not retain its matched value";
   let exception_document =
     Document.parse ~path:"exception.ml.md"
       "# Exceptions\n\n\
@@ -532,63 +634,6 @@ let () =
          && String.equal event.detail "7")
        exception_evaluation.traces)
     "the parent observation did not continue after a caught exception";
-  let debug_document =
-    Document.parse ~path:"debug.ml.md"
-      ("# Debug\n\n\
-      \    let add x y =\n\
-      \      let total =\n\
-      \        x + y in\n\
-      \      total\n\
-      \    let answer = add 2 3\n"
-      ^ "\n`add 4 5 =`\n")
-  in
-  let debug_result =
-    Debugger.start ~documents:[ debug_document ] ~target:debug_document ()
-  in
-  expect
-    (match debug_result with
-    | Error _ -> false
-    | Ok json ->
-        let open Yojson.Safe.Util in
-        let timeline = json |> member "timeline" |> to_list in
-        let calls = json |> member "callEvents" |> to_list in
-        timeline = []
-        && List.exists
-             (fun event ->
-               event |> member "phase" |> to_string = "enter"
-               && event |> member "kind" |> to_string = "function"
-               && event |> member "label" |> to_string = "add")
-             calls
-        && List.exists
-             (fun event ->
-               event |> member "phase" |> to_string = "return"
-               && event |> member "kind" |> to_string = "function"
-               && event |> member "label" |> to_string = "add"
-               && event |> member "detail" |> to_string = "5")
-             calls
-        && List.exists
-             (fun event ->
-               event |> member "phase" |> to_string = "return"
-               && event |> member "kind" |> to_string = "binding"
-               && event |> member "label" |> to_string = "total"
-               && event |> member "detail" |> to_string = "5"
-               && event |> member "endLine" |> to_int = 5)
-             calls
-        && List.exists
-             (fun event ->
-               event |> member "phase" |> to_string = "enter"
-               && event |> member "kind" |> to_string = "call"
-               && event |> member "path" |> to_string = "debug.ml.md"
-               && event |> member "line" |> to_int = 9)
-             calls
-        && List.exists
-             (fun event ->
-               event |> member "phase" |> to_string = "return"
-               && event |> member "kind" |> to_string = "function"
-               && event |> member "label" |> to_string = "add"
-               && event |> member "detail" |> to_string = "9")
-             calls)
-    "ordinary evaluation did not expose its authoritative execution record";
   let trace_document =
     Document.parse ~path:"trace.ml.md"
       "    let rec fib n =\n\
@@ -602,7 +647,11 @@ let () =
       \    let before = !cell\n\
       \    let () = cell := 2\n\
       \    let after = !cell\n\
-      \    let values = [| 1; 2; 3 |]\n"
+      \    let values = [| 1; 2; 3 |]\n\
+      \    let () = values.(1) <- 9\n\
+      \    type box = { mutable item : int }\n\
+      \    let box = { item = 1 }\n\
+      \    let () = box.item <- 7\n"
   in
   let traced = Evaluator.evaluate trace_document in
   expect traced.ok "the execution-record fixture did not evaluate";
@@ -621,6 +670,52 @@ let () =
     "values around a mutation were not recorded at their execution time";
   expect (returned "values" "[|1; 2; 3|]")
     "an array snapshot was not recorded";
+  let normalized_writes =
+    Evaluator.execution_artifact_to_json traced
+    |> Yojson.Safe.Util.member "execution"
+    |> Yojson.Safe.Util.member "writes"
+    |> Yojson.Safe.Util.to_list
+  in
+  expect
+    (List.exists
+       (fun write ->
+         String.equal
+           (write |> Yojson.Safe.Util.member "operation"
+           |> Yojson.Safe.Util.to_string)
+           "ref"
+         && String.equal
+              (write |> Yojson.Safe.Util.member "newValue"
+              |> Yojson.Safe.Util.member "display"
+              |> Yojson.Safe.Util.to_string)
+              "2")
+       normalized_writes)
+    "a successful ref mutation did not emit a separate normalized write";
+  expect
+    (List.exists
+       (fun write ->
+         String.equal
+           (write |> Yojson.Safe.Util.member "operation"
+           |> Yojson.Safe.Util.to_string)
+           "array"
+         && String.equal
+              (write |> Yojson.Safe.Util.member "newValue"
+              |> Yojson.Safe.Util.member "display"
+              |> Yojson.Safe.Util.to_string)
+              "9")
+       normalized_writes
+    && List.exists
+         (fun write ->
+           String.equal
+             (write |> Yojson.Safe.Util.member "operation"
+             |> Yojson.Safe.Util.to_string)
+             "field"
+           && String.equal
+                (write |> Yojson.Safe.Util.member "newValue"
+                |> Yojson.Safe.Util.member "display"
+                |> Yojson.Safe.Util.to_string)
+                "7")
+         normalized_writes)
+    "array and mutable-record writes were not normalized with their new values";
   let callback_parameters =
     traced.traces
     |> List.filter (fun (event : Evaluator.trace_event) ->
@@ -633,7 +728,11 @@ let () =
   expect
     (List.for_all
        (fun (event : Evaluator.trace_event) ->
-         String.equal event.path "trace.ml.md")
+         if
+           List.mem event.phase
+             [ "enter"; "return"; "raise"; "parameter" ]
+         then String.equal event.path "trace.ml.md"
+         else true)
        traced.traces)
     "library implementation details leaked into the user execution record";
   let alternative_document =
@@ -730,6 +829,73 @@ let () =
              sites)
     "compiler sites did not retain tree identity or map a guarded pattern to \
      its branch body";
+  let lambda_pattern_document =
+    Document.parse ~path:"lambda-pattern.ml.md"
+      "    let project = fun (value, _) -> value\n"
+  in
+  expect
+    (match
+       Evaluator.execution_sites_with_cancel
+         ~cancelled:(fun () -> false)
+         ~documents:[ lambda_pattern_document ] ~target:lambda_pattern_document
+     with
+    | Error _ -> false
+    | Ok sites ->
+        let lambda_patterns =
+          List.filter
+            (fun (site : Evaluator.execution_site) ->
+              site.site_kind = "pattern"
+              && site.site_role = Some "lambda-parameter")
+            sites
+        in
+        List.length lambda_patterns >= 3
+        && List.for_all
+             (fun (site : Evaluator.execution_site) ->
+               Option.is_some site.site_target)
+             lambda_patterns)
+    "nested lambda argument patterns did not inherit their lambda invocation";
+  let local_binding_document =
+    Document.parse ~path:"local-binding.ml.md"
+      "    let outer input =\n\
+      \      let local = input + 1 in\n\
+      \      List.map (fun value -> value + local) [ input ]\n"
+  in
+  expect
+    (match
+       Evaluator.execution_sites_with_cancel
+         ~cancelled:(fun () -> false)
+         ~documents:[ local_binding_document ] ~target:local_binding_document
+     with
+    | Error _ -> false
+    | Ok sites ->
+        let local_binding =
+          List.find_opt
+            (fun (site : Evaluator.execution_site) ->
+              site.site_kind = "pattern" && site.site_start_line = 2
+              && site.site_start_column = 10)
+            sites
+        in
+        let nested_lambda =
+          List.find_opt
+            (fun (site : Evaluator.execution_site) ->
+              site.site_kind = "syntax" && site.site_role = Some "function"
+              && site.site_start_line = 3)
+            sites
+        in
+        Option.fold ~none:false
+          ~some:(fun (site : Evaluator.execution_site) ->
+            Option.is_some site.site_selection
+            && Option.is_none site.site_role)
+          local_binding
+        && Option.fold ~none:false
+             ~some:(fun (site : Evaluator.execution_site) ->
+               Option.fold ~none:false
+                 ~some:(fun (target : Evaluator.execution_site_range) ->
+                   target.range_start_line = 3)
+                 site.site_target)
+             nested_lambda)
+    "local let binders were classified as parameters or a nested lambda was \
+     mapped to its enclosing named function";
   let syntax_document =
     Document.parse ~path:"syntax.ml.md"
       "    let typed (f : int -> int) = f 0\n\
@@ -788,7 +954,7 @@ let () =
             "alternative";
             "arrow";
           ]
-        && List.length (role_sites "arrow") = 5
+        && List.length (role_sites "arrow") = 6
         && List.for_all
              (fun (site : Evaluator.execution_site) ->
                Option.is_some site.site_target)
@@ -865,6 +1031,40 @@ let () =
          && String.equal event.detail "[|1.5; 2.25|]")
        runtime_edges.traces)
     "a float array was not rendered from its unboxed runtime layout";
+  let small_tail_document =
+    Document.parse ~path:"small-tail.ml.md"
+      "    let rec loop accumulator remaining =\n\
+      \      if remaining = 0 then accumulator\n\
+      \      else loop (accumulator + 1) (remaining - 1)\n\
+      \    let result = loop 0 5\n"
+  in
+  let small_tail = Evaluator.evaluate small_tail_document in
+  expect small_tail.ok "a small tail-recursive execution failed";
+  let small_tail_execution =
+    Evaluator.execution_artifact_to_json small_tail
+    |> Yojson.Safe.Util.member "execution"
+  in
+  let activation_outcomes =
+    small_tail_execution |> Yojson.Safe.Util.member "activations"
+    |> Yojson.Safe.Util.to_list
+    |> List.map (fun activation ->
+        activation |> Yojson.Safe.Util.member "outcome"
+        |> Yojson.Safe.Util.member "kind" |> Yojson.Safe.Util.to_string)
+  in
+  expect
+    (activation_outcomes <> []
+    && List.for_all (fun kind -> not (String.equal kind "incomplete"))
+         activation_outcomes)
+    "an explicit tail relation did not carry the final outcome back through every activation";
+  let has_tail_attempt =
+    small_tail_execution |> Yojson.Safe.Util.member "callAttempts"
+    |> Yojson.Safe.Util.to_list
+    |> List.exists (fun attempt ->
+        attempt |> Yojson.Safe.Util.member "tail"
+        |> Yojson.Safe.Util.to_bool)
+  in
+  expect has_tail_attempt
+    "a compiler-recorded tail call was not marked as a tail call attempt";
   let tail_document =
     Document.parse ~path:"tail.ml.md"
       "    let rec loop accumulator remaining =\n\
@@ -1051,4 +1251,20 @@ let () =
   let truncated = Evaluator.evaluate truncated_document in
   expect truncated.ok "trace truncation stopped an otherwise successful program";
   expect truncated.trace_truncated "a bounded trace did not report truncation";
+  let open Yojson.Safe.Util in
+  let truncated_root =
+    Evaluator.to_json truncated |> member "executionArtifact"
+    |> member "execution" |> member "activations" |> to_list
+    |> List.find (fun activation ->
+           match activation |> member "functionConstructId" with
+           | `Null -> true
+           | _ -> false)
+  in
+  expect
+    (truncated_root |> member "outcomeAt" = `Null)
+    "a truncated root activation claimed a completion time";
+  expect
+    (truncated_root |> member "outcome" |> member "kind" |> to_string
+    = "incomplete")
+    "a truncated root activation claimed a completed value";
   print_endline "evaluator tests passed"

@@ -50,5 +50,6 @@ selected invocation. The exact expressions reached by that invocation receive
 a soft highlight. Code absent from the complete execution is subdued; code
 reached by a different invocation keeps its normal contrast.
 
-Move the text cursor to focus an execution that reached that construct and to
-highlight all matching occurrences on the timeline.
+Move the text cursor to focus an execution that reached that exact construct.
+The right pane lists its other executions; selecting one changes the activation
+and its inline values without rerunning the program.

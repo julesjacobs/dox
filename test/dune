@@ -1,12 +1,28 @@
 (cram
+ (locks ../dox-evaluator)
  (deps
   %{bin:dox}
-  block-boundaries.fixture
-  late-call.fixture
-  query.fixture
   tail-bytecode-exact.fixture
   tail-bytecode-over.fixture
   tail-bytecode-partial.fixture
   tail-bytecode-tupled.fixture
-  tail-events.fixture
-  tail-stack.fixture))
+  tail-stack.fixture
+  trace.fixture.ml.md
+  execution-reducer.fixture.json
+  execution-reducer-jsonl.fixture.jsonl
+  ../demos.ml.md
+  ../demos/inference.ml.md
+  ../demos/tracing.ml.md
+  ../demos/visualization.ml.md
+  ../fib.ml.md
+  ../guide.ml.md
+  ../learn.ml.md
+  ../learn/ocaml.ml.md
+  ../project.ml.md
+  ../project/analysis.ml.md
+  ../project/dataset.ml.md
+  ../welcome.ml.md
+  ../scripts/audit-execution.mjs
+  ../scripts/check-execution-corpus.mjs
+  ../scripts/audit-execution-reducer.mjs
+  (glob_files ../web/*.js)))

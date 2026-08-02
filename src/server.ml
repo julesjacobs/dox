@@ -527,6 +527,11 @@ let evaluate_response context ~cancelled body =
     let* path = string_member "path" request in
     let* source = string_member "source" request in
     let* base_project_version = string_member "baseProjectVersion" request in
+    let request_code_digest =
+      match Yojson.Safe.Util.member "requestCodeDigest" request with
+      | `String value when not (String.equal value "") -> Some value
+      | _ -> None
+    in
     match Project.snapshot context.project with
     | Error project_error_ -> Error (Project.error_message project_error_)
     | Ok snapshot -> (
@@ -535,19 +540,29 @@ let evaluate_response context ~cancelled body =
           Error "The project changed; reload before evaluating this draft."
         else
           let document = Document.parse ~path source in
-          let resolve_started = Unix.gettimeofday () in
-          match
-            Project.resolve_documents ~cancelled context.project snapshot
-              document
-          with
-          | Error project_error_ -> Error (Project.error_message project_error_)
-          | Ok documents ->
-              profile "resolveDocuments" resolve_started;
-              let evaluation_started = Unix.gettimeofday () in
-              let evaluation =
-                Evaluator.evaluate_documents ~project_version:snapshot.version
-                  ~cancelled ~documents ~target:document ()
-              in
+          let expected_request_code_digest =
+            Evaluator.request_code_digest_for_document document
+          in
+          if
+            match request_code_digest with
+            | Some supplied ->
+                not (String.equal supplied expected_request_code_digest)
+            | None -> false
+          then Error "The executable-source digest did not match the draft."
+          else
+            let resolve_started = Unix.gettimeofday () in
+            match
+              Project.resolve_documents ~cancelled context.project snapshot
+                document
+            with
+            | Error project_error_ -> Error (Project.error_message project_error_)
+            | Ok documents ->
+                profile "resolveDocuments" resolve_started;
+                let evaluation_started = Unix.gettimeofday () in
+                let evaluation =
+                  Evaluator.evaluate_documents ~project_version:snapshot.version
+                    ?request_code_digest ~cancelled ~documents ~target:document ()
+                in
               profile "evaluateDocuments" evaluation_started;
               Ok (document, evaluation, snapshot.version))
   with

@@ -3,9 +3,10 @@ import test from "node:test";
 
 import { createDebugNavigationGate } from "./debug-navigation.js";
 
-const pointerdown = (button = 0, isPrimary = true) => ({
+const pointerdown = (button = 0, isPrimary = true, shiftKey = false) => ({
   button,
   isPrimary,
+  shiftKey,
 });
 
 const click = (button = 0, detail = 1, shiftKey = false) => ({
@@ -27,6 +28,18 @@ test("one pointer click navigates once after its link is replaced", () => {
   if (gate.shouldNavigateClick(click())) navigate("replacement-child-call");
   assert.equal(navigations, 1);
   assert.equal(gate.shouldNavigateClick(click()), true);
+});
+
+test("code call links require shift while buttons remain ordinary controls", () => {
+  const gate = createDebugNavigationGate();
+  assert.equal(gate.canNavigatePointerdown(pointerdown(), true), false);
+  assert.equal(
+    gate.canNavigatePointerdown(pointerdown(0, true, true), true),
+    true,
+  );
+  assert.equal(gate.shouldNavigateClick(click(), true), false);
+  assert.equal(gate.shouldNavigateClick(click(0, 1, true), true), true);
+  assert.equal(gate.canNavigatePointerdown(pointerdown()), true);
 });
 
 test("replacement suppression is global across parent and child links", () => {

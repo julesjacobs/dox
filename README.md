@@ -101,12 +101,19 @@ Library implementations remain opaque. A callback from a library into Dox code
 re-enters the record beneath the user call that triggered it.
 
 The record is always present; there is no separate debugger mode and inspecting
-it never runs the program again. The timeline and call links focus the
-already-complete record. The selected invocation shows parameter and local
-values, its return value, its executed path, and exact links to its caller and
-child calls. Its exact executed expressions receive a soft highlight. Code that
-no execution reached is subdued, while code reached by another invocation keeps
-its normal contrast.
+it never runs the program again. The cursor selects one expression occurrence
+inside one coherent function activation. Reached expressions receive a soft
+highlight, the exact selected expression receives a stronger highlight, and
+code no execution reached is subdued.
+
+Each source line has at most one compact value annotation in a fixed lane.
+Structural values such as bindings, function inputs, returns, and writes remain
+visible; the value of the expression under the cursor temporarily replaces the
+annotation on that line. The right pane lists every dynamic occurrence of the
+selected expression. Each occurrence has one activation line and one exact
+value line, so repeated evaluation inside a single activation remains visible.
+Call links enter the actual callee activation and the function definition links
+back to its dynamic caller.
 
 Values are rendered immediately at each event. Mutable refs and arrays therefore
 show the contents they had when observed, but Dox does not reconstruct a complete
@@ -137,27 +144,71 @@ Type-check and evaluate one document:
 dune exec dox -- check welcome.ml.md
 ```
 
-Query the execution data for the expression at a source position. Lines are
-one-based and columns are zero-based:
+Query the canonical normalized execution artifact and run the exhaustive
+interaction self-check:
 
 ```sh
-dune exec dox -- inspect demos/tracing.ml.md 33 35 --summary
+npm run audit:execution -- demos/inference.ml.md --check
 ```
 
-Omit `--summary` to receive structured JSON containing the expression, all
-dynamic occurrences, local environments, call-stack breadcrumbs, trace events,
-and source positions.
+The self-check walks every UTF-16 cursor boundary in isolation and in forward
+and reverse sweeps. It also tries every valid activation choice, occurrence and
+activation navigation target, projection partition, coverage owner, annotation
+lane, and an edit/recovery round trip. Failures are grouped by invariant and
+include a source line and caret. The command exits nonzero on any failure.
 
-Query the invocation containing a source position:
+Render the compact cursor and highlight atlas for a source range:
 
 ```sh
-dune exec dox -- inspect-call demos/tracing.ml.md 33 10 \
-  --occurrence 2 --summary
+npm run audit:execution -- demos/inference.ml.md --atlas --lines 80:105
 ```
 
-The structured form includes the invocation's source range, parameters and
-local binders, result, caller, and direct child calls. This is the same data used
-by the trace view in the editor.
+`Q` assigns one short identity to the complete cursor focus. `H` shows active,
+inactive, never-run, or uncovered source. Add `--at LINE:COLUMN` to hold one
+activation fixed and see its exact highlight stencil over the requested lines.
+
+Audit only what the IDE visibly renders at every cursor boundary:
+
+```sh
+npm run audit:execution -- demos/inference.ml.md --ux-matrix --lines 30:44
+```
+
+`C`, `H`, and `R` assign short IDs to the value column, source highlighting,
+and right pane. Their dictionaries show the exact visible values, `S/G/E`
+source bands, calls, and selected expression values. Every mapping row has
+source-length + 1 IDs, including the final cursor position. The lower-level
+seven-plane diagnostic remains available as `--matrix`.
+
+Write the readable visual audit to a file:
+
+```sh
+npm run audit:execution -- demos/inference.ml.md --visual -o inference.audit.txt
+```
+
+Without `-o`, `foo.ml.md` produces `foo.audit.txt`. The report first places one
+`V` view ID at each of the line's `n+1` cursor boundaries. It then renders each
+view as the actual source with value annotations, followed immediately by its
+aligned selection/greying band and a separate cursor-boundary row. The source
+therefore never shifts. `--lines FROM:TO` limits which cursor lines receive
+overviews and view frames; each frame still includes every source line whose
+visible state changes.
+
+The upper-right view control cycles through Document, Source, and Debug. The raw
+C/H/R matrix remains available for exact machine comparisons while the visual
+report is the readable file representation.
+
+Inspect the exact selection, values, and activation projection at a one-based
+line and zero-based UTF-16 column:
+
+```sh
+npm run audit:execution -- demos/tracing.ml.md --at 15:20
+```
+
+Add `--activation ID` to choose a reaching activation, or `--json` for the
+complete machine-readable artifact, view model, and self-check witnesses.
+Reducer scripts can be
+replayed from a JSON array or JSON Lines file with
+`npm run audit:execution:reducer -- FILE --script INTENTS.jsonl`.
 
 Compile a `unit -> unit` entry value:
 
@@ -165,8 +216,8 @@ Compile a `unit -> unit` entry value:
 dune exec dox -- artifact welcome.ml.md main _artifacts/welcome
 ```
 
-The workspace Build control performs the same operation and records a manifest
-with the source document and exact project version.
+The command records a manifest with the source document and exact project
+version.
 
 Format and test the implementation with:
 
