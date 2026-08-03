@@ -20,6 +20,8 @@ import {
 } from "./execution-adapter.js";
 import {
   deriveOutlineOperation,
+  duplicateOutlineModule,
+  outlineDraftPreviewTitle,
   remapModule,
 } from "./outline-operation.mjs";
 import { executionTraceNavigationTarget } from "./execution-trace.js";
@@ -710,7 +712,11 @@ function updateOutlinePageDraftPreview(view) {
   const position = Math.min(draft.selection, view.state.doc.length);
   const line = view.state.doc.lineAt(position);
   const row = outlineRowAtLine(line.number);
-  const title = row?.proposedPath || line.text.trim();
+  // An invalid row can carry identity metadata from its last valid state so
+  // that editing can recover without losing the page it came from. Never use
+  // that stale metadata for the visible draft: the preview must reflect the
+  // characters that are actually in the outline.
+  const title = outlineDraftPreviewTitle(line.text, row);
   const source = `# ${title}\n\n`;
   draft.modulePath = row?.targetModule || null;
   state.path = draft.modulePath ? moduleSourcePath(draft.modulePath) : null;
@@ -2032,12 +2038,17 @@ function parseOutlineDraft(source, { previousRows = [], update = null } = {}) {
       text: raw[row.sourceLine - 1],
     });
   }
+  const duplicate = duplicateOutlineModule(rows);
+  if (duplicate) {
+    const error = new Error(
+      `Line ${duplicate.lines[1]} duplicates ${duplicate.modulePath} on line ${duplicate.lines[0]}.`,
+    );
+    error.outlineLines = duplicate.lines;
+    throw error;
+  }
   const modules = rows.flatMap((row) =>
     row.targetModule ? [row.targetModule] : [],
   );
-  if (new Set(modules).size !== modules.length) {
-    throw new Error("The outline contains a duplicate page module.");
-  }
   const lineMap = raw.map((_, index) =>
     rows.find((row) => row.sourceLine === index + 1) || null,
   );
@@ -2927,6 +2938,9 @@ function mountOutlineEditor() {
         state.outlineDraftError = error;
         state.outlineDraftRows = carriedRows;
         const line = Number(error.message.match(/^Line (\d+)/)?.[1] || 0);
+        const invalidLines = new Set(
+          error.outlineLines || (line ? [line] : []),
+        );
         const carriedByLine = new Map(
           carriedRows.map((row) => [row.sourceLine, row]),
         );
@@ -2936,7 +2950,7 @@ function mountOutlineEditor() {
             ...(carriedByLine.get(sourceLine) || {}),
             text,
             sourceLine,
-            invalid: !line || line === sourceLine,
+            invalid: invalidLines.size === 0 || invalidLines.has(sourceLine),
             error: error.message,
           };
         });

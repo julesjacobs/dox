@@ -1,7 +1,7 @@
 The canonical CLI validates a real compiler artifact before rendering it.
 Dynamic IDs are hidden here; entity counts and invariant results are stable.
 
-  $ cp -L ../test/trace.fixture.ml.md trace.ml.md
+  $ cp -L ../test/trace.fixture trace.ml.md
   $ DOX_BIN=dox node ../scripts/audit-execution.mjs trace.ml.md --check | sed -E 's/[0-9a-f]{24,}/<id>/g'
   evaluation <id>  code <id>
   constructs 61  selectors 96  occurrences 213  activations 18  closures 2  calls 58  writes 1
@@ -32,7 +32,6 @@ Every shipped document is part of the execution contract.
   project.ml.md: ok
   project/analysis.ml.md: ok
   project/dataset.ml.md: ok
-  test/trace.fixture.ml.md: ok
   welcome.ml.md: ok
 
 Representative semantic anchors are golden-tested in addition to the internal

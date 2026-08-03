@@ -5,6 +5,28 @@ function modules(rows) {
   });
 }
 
+export function duplicateOutlineModule(rows) {
+  const firstLineByModule = new Map();
+  for (const row of rows) {
+    const modulePath = row.targetModule || row.pageModule;
+    if (!modulePath) continue;
+    const firstLine = firstLineByModule.get(modulePath);
+    if (firstLine !== undefined) {
+      return {
+        modulePath,
+        lines: [firstLine, row.sourceLine],
+      };
+    }
+    firstLineByModule.set(modulePath, row.sourceLine);
+  }
+  return null;
+}
+
+export function outlineDraftPreviewTitle(lineText, row) {
+  const visibleText = String(lineText || "").trim();
+  return row?.invalid ? visibleText : row?.proposedPath || visibleText;
+}
+
 export function remapModule(modulePath, mapping = []) {
   if (!modulePath) return modulePath;
   for (const { before, after } of mapping) {

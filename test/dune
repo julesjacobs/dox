@@ -7,7 +7,7 @@
   tail-bytecode-partial.fixture
   tail-bytecode-tupled.fixture
   tail-stack.fixture
-  trace.fixture.ml.md
+  trace.fixture
   execution-reducer.fixture.json
   execution-reducer-jsonl.fixture.jsonl
   ../demos.ml.md

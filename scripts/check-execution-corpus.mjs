@@ -15,7 +15,6 @@ const documents = [
   "project.ml.md",
   "project/analysis.ml.md",
   "project/dataset.ml.md",
-  "test/trace.fixture.ml.md",
   "welcome.ml.md",
 ];
 
