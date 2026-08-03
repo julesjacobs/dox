@@ -558,6 +558,31 @@ let ai_collaboration_response context =
                        "Pages created this way are mirrored into the Git working tree by Dox itself, so no filesystem access is needed.";
                      `String
                        "Content-Length is required; chunked request bodies are not read.";
+                     `String
+                       "Send the whole page source on every write, not a patch.";
+                   ] );
+               ( "concurrentEdits",
+                 `Assoc
+                   [
+                     ( "summary",
+                       `String
+                         "expectedDigest is an optimistic lock. People may be typing in a page while you edit it, so expect to rebase."
+                     );
+                     ( "onConflict",
+                       `List
+                         [
+                           `String
+                             "A stale expectedDigest is refused with 409 and \"The page changed outside this editor.\"; nothing was written.";
+                           `String
+                             "Do not retry the same body, and do not resend your source with the newer digest: that discards their edit.";
+                           `String
+                             "GET /api/page again for the current source and digest.";
+                           `String
+                             "Re-apply your change to that source. If you kept the source you first read, diff it against the new source to see what changed and merge.";
+                           `String "PUT again with the new digest, and repeat on another 409.";
+                           `String
+                             "Keep edits small and localised; a whole-page rewrite collides with any concurrent typing and is hard to rebase.";
+                         ] );
                    ] );
                ( "createPage",
                  `Assoc
@@ -603,6 +628,10 @@ let ai_collaboration_response context =
                    [
                      ("method", `String "GET");
                      ("path", `String "/api/page?module=<module path>");
+                     ( "response",
+                       `String
+                         "text is document.source; pass the top-level digest (same as document.version) back as expectedDigest"
+                     );
                    ] );
                ( "listPages",
                  `Assoc

@@ -1,11 +1,65 @@
 <!doctype html>
 <!--
-  AI AGENT: This is a Dox project. Live collaborative edits are mirrored into
-  ordinary .ml.md files in the Git working tree. Read
-  /.well-known/dox-ai.json for the project root and exact flush/edit/commit
-  workflow before modifying files. Flush both before reading and after editing;
-  only commit after a successful second flush. Do not edit
-  .dox/collaboration directly.
+  AI AGENT: this is a Dox workspace. Everything below can be done with this URL
+  alone; you do not need access to the machine Dox runs on. Send every request to
+  the same origin you loaded this page from, keeping its Host, and read
+  /.well-known/dox-ai.json for the full machine-readable contract.
+
+  Authenticate once:
+    GET /api/session                 -> {"token": ...}
+  Send that token as the X-Dox-Token header on every request that changes
+  anything. Request bodies are JSON and need Content-Length; chunked bodies are
+  not read.
+
+  Which pages exist:
+    GET /api/project                 -> {"version": ..., "documents": [
+                                          {"module": "Welcome",
+                                           "path": "welcome.ml.md",
+                                           "title": ..., "version": ...}, ...]}
+  "version" at the top level is the project version; pass it as
+  baseProjectVersion when creating pages.
+
+  What a page contains:
+    GET /api/page?module=<Module.Path>
+                                     -> {"digest": ...,
+                                         "document": {"source": ..., "title": ...,
+                                                      "version": ...}}
+  The text is document.source. The top-level "digest" (same value as
+  document.version) is what you pass back as expectedDigest.
+  A page is Markdown; four-space-indented blocks are OCaml, and all such blocks
+  in one page form a single compilation unit in document order.
+
+  Create a page:
+    POST /api/page                   {"module": "Notes.Ideas",
+                                      "baseProjectVersion": "<from /api/project>"}
+
+  Edit a page:
+    PUT /api/page/source             {"module": ..., "source": <full new text>,
+                                      "expectedDigest": <digest you just read>,
+                                      "editRevision": <integer, increment yours>}
+  You always send the whole page source, not a patch.
+
+  WHEN SOMEONE ELSE CHANGED THE PAGE (this is the normal case - people may be
+  typing in it while you work):
+    expectedDigest is an optimistic lock. If the page moved on since you read it,
+    the write is refused with 409 and the message "The page changed outside this
+    editor." Nothing was written.
+    Do NOT retry the same body, and do not re-send your source with the newer
+    digest: that would silently discard their edit. Instead rebase:
+      1. GET /api/page again to get the current source and digest.
+      2. Re-apply your intended change to THAT source. If you kept the source you
+         originally read, diff it against the new source to see what they changed
+         and merge; otherwise redo your edit against the new text.
+      3. PUT again with the new digest.
+      4. On another 409, repeat. Expect this to take a couple of attempts on a
+         page being actively edited.
+    Keep edits small and localised - a whole-page rewrite will collide with any
+    concurrent typing and is hard to rebase.
+
+  If you can read the projectRoot reported by /.well-known/dox-ai.json, you are
+  on the Dox host and may instead edit .ml.md files directly; that path needs
+  POST /api/collaboration/flush before reading and after writing, and is
+  described in the descriptor. Never edit .dox/collaboration.
 -->
 <html lang="en">
   <head>
