@@ -9,6 +9,7 @@ import {
   scrollMarkdownEditorTo,
   replaceEditorStateDocument,
   connectPageCollaboration,
+  connectWorkspacePresence,
   encodeCollaborationUpdate,
 } from "./editor.bundle.js?v=20260803a";
 import {
@@ -44,6 +45,8 @@ const state = {
   projectMutationTail: Promise.resolve(),
   sessionToken: null,
   collaborationPort: null,
+  workspacePresence: null,
+  collaboratorsByModule: new Map(),
   module: null,
   path: null,
   document: null,
@@ -296,6 +299,27 @@ async function initialize() {
     if (state.executionEngineLocked) {
       state.evaluationEngine = session.executionEngine || "browser";
     }
+    state.workspacePresence = connectWorkspacePresence({
+      port: state.collaborationPort,
+      token: state.sessionToken,
+      onPresence: (participants) => {
+        const byModule = new Map();
+        const seenByModule = new Map();
+        for (const participant of participants) {
+          if (!participant?.module) continue;
+          const seen = seenByModule.get(participant.module) || new Set();
+          const identity = participant.userId || participant.clientId;
+          if (seen.has(identity)) continue;
+          seen.add(identity);
+          seenByModule.set(participant.module, seen);
+          const peers = byModule.get(participant.module) || [];
+          peers.push(participant);
+          byModule.set(participant.module, peers);
+        }
+        state.collaboratorsByModule = byModule;
+        syncOutlineEditor();
+      },
+    });
     loadPaneWidths();
     const project = await refreshProjectIndex({ forceOutline: true });
     const routeModule = decodeURIComponent(
@@ -415,20 +439,6 @@ function reconcileCollaborativeIdentity(session, meta) {
     });
 }
 
-function renderCollaborationPresence() {
-  const host = document.querySelector("[data-collaboration-presence]");
-  if (!host) return;
-  const peers = currentSession()?.collaborationPeers || [];
-  host.hidden = peers.length === 0;
-  host.innerHTML = peers
-    .slice(0, 5)
-    .map(
-      (peer) =>
-        `<span class="collaboration-peer" style="--peer-color:${escapeHtml(peer.color || "#6c7771")}" title="${escapeHtml(peer.name || "Collaborator")}">${escapeHtml((peer.name || "?").slice(0, 1).toUpperCase())}</span>`,
-    )
-    .join("");
-}
-
 async function attachSessionCollaboration(session) {
   if (session.collaboration || session.provisional || !state.collaborationPort) {
     return session.collaboration || null;
@@ -497,13 +507,10 @@ async function attachSessionCollaboration(session) {
         );
       }
     },
-    onPresence: (peers) => {
-      session.collaborationPeers = peers;
-      if (session === currentSession()) renderCollaborationPresence();
-    },
     onStatus: (status) => {
       session.collaborationStatus = status;
       if (status === "connected") {
+        session.collaborationIntentionalDisconnect = false;
         session.collaborationWasConnected = true;
         if (
           session === currentSession() &&
@@ -512,7 +519,11 @@ async function attachSessionCollaboration(session) {
           state.workspaceError = state.outlineConflict || null;
           updateStatusOnly();
         }
-      } else if (session.collaborationWasConnected && session === currentSession()) {
+      } else if (
+        session.collaborationWasConnected &&
+        !session.collaborationIntentionalDisconnect &&
+        session === currentSession()
+      ) {
         state.workspaceError = "Live collaboration is reconnecting…";
         updateStatusOnly();
       }
@@ -571,6 +582,7 @@ function restoreSession(session) {
   state.executionProblem = session.executionProblem || null;
   state.selected = session.selected || session.document.blocks[0]?.id || null;
   state.dirty = session.document.source !== session.savedSource;
+  state.workspaceError = session.conflict || state.outlineConflict || null;
 }
 
 function moduleSourcePath(modulePath) {
@@ -1089,6 +1101,7 @@ async function loadDocument(
   captureCurrentSession();
   if (modulePath !== state.module) {
     if (previousSession?.collaboration) {
+      previousSession.collaborationIntentionalDisconnect = true;
       previousSession.collaboration.awareness.setLocalStateField("cursor", null);
       previousSession.collaboration.provider.disconnect();
     }
@@ -1112,9 +1125,11 @@ async function loadDocument(
   state.navigationController = controller;
   beginPendingNavigation(modulePath);
   if (cached?.document) {
+    cached.collaborationIntentionalDisconnect = false;
     cached.collaboration?.provider.connect();
     reconcileCollaborativeSession(cached);
     restoreSession(cached);
+    state.workspacePresence?.setModule(modulePath);
     state.view = "document";
     updateRoute(modulePath, history);
     state.provisionalNavigation = {
@@ -1210,6 +1225,7 @@ async function loadDocument(
       state.workspaceError = "Recovered an autosave draft from this browser.";
     }
     state.module = payload.module;
+    state.workspacePresence?.setModule(payload.module);
     state.path = payload.document.path;
     state.document = payload.document;
     state.savedVersion = diskVersion;
@@ -1670,18 +1686,16 @@ function renderShell() {
     app.querySelector(".sidebar")?.replaceWith(existingSidebar);
   }
   syncEvaluationEngineToggle();
-  renderCollaborationPresence();
   bindEvents();
 }
 
 function renderSidebar() {
   if (!state.project?.documents.length) {
-    return `<div class="sidebar-brand">Dox</div><div class="module-outline-host" data-module-outline></div><div class="collaboration-presence" data-collaboration-presence hidden></div>${renderEvaluationEngineToggle()}`;
+    return `<div class="sidebar-brand">Dox</div><div class="module-outline-host" data-module-outline></div>${renderEvaluationEngineToggle()}`;
   }
   return `
     <div class="sidebar-brand">Dox</div>
     <div class="module-outline-host" data-module-outline aria-label="Editable module outline"></div>
-    <div class="collaboration-presence" data-collaboration-presence hidden></div>
     ${renderEvaluationEngineToggle()}
   `;
 }
@@ -2756,6 +2770,7 @@ function syncOutlineEditor({ moveSelection = false } = {}) {
     pendingModule: state.pendingModule,
     pendingVisible: state.pendingVisible,
     lineMap: state.outlineLineMap,
+    collaboratorsByModule: state.collaboratorsByModule,
     moveSelection,
   });
 }
@@ -2861,6 +2876,7 @@ function mountOutlineEditor() {
       pendingModule: state.pendingModule,
       pendingVisible: state.pendingVisible,
       lineMap: state.outlineLineMap,
+      collaboratorsByModule: state.collaboratorsByModule,
     });
     return;
   }
@@ -2871,6 +2887,7 @@ function mountOutlineEditor() {
     pendingModule: state.pendingModule,
     pendingVisible: state.pendingVisible,
     lineMap: state.outlineLineMap,
+    collaboratorsByModule: state.collaboratorsByModule,
     onChange: (source, update, { moveOrigins = null } = {}) => {
       if (state.outlinePageDraft) {
         state.outlinePageDraft.selection = update.changes.mapPos(
@@ -4669,7 +4686,7 @@ async function performEvaluation(request, signal) {
     body: JSON.stringify(body),
   });
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-  const backend = await import("./oxcaml/backend.js?v=20260803g");
+  const backend = await import("./oxcaml/backend.js?v=20260803q");
   const removeStatusListener = backend.addBackendStatusListener(({ state: backendState, text }) => {
     const toggle = document.querySelector("#evaluation-engine-toggle");
     if (!toggle) return;
@@ -4683,6 +4700,24 @@ async function performEvaluation(request, signal) {
   } finally {
     removeStatusListener();
   }
+  globalThis.__doxDiagnostics = {
+    ...(globalThis.__doxDiagnostics || {}),
+    browserEvaluation: {
+      path: request.path,
+      measuredAt: Date.now(),
+      timings: result?.timings || null,
+      cache: result?.cache || null,
+      traceBytes: typeof result?.trace === "string" ? result.trace.length : 0,
+      resultKind: result?.kind || null,
+      error: result?.kind === "ok"
+        ? null
+        : String(result?.message || result?.stderr || result?.stdout || "").slice(0, 800),
+      stderr: result?.kind === "ok" ? null : String(result?.stderr || "").slice(0, 1200),
+    },
+  };
+  document.documentElement.dataset.doxBrowserEvaluation = JSON.stringify(
+    globalThis.__doxDiagnostics.browserEvaluation,
+  );
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
   if (result?.kind !== "ok") {
     const detail = result?.stderr || result?.stdout || result?.message || "Unknown browser compiler failure";

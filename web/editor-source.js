@@ -76,17 +76,30 @@ function collaborationIdentity() {
   const key = "dox:v1:collaboration-user";
   try {
     const existing = JSON.parse(localStorage.getItem(key));
-    if (existing?.name && existing?.color) return existing;
+    if (existing?.name && existing?.color) {
+      if (existing.id) return existing;
+      const migrated = {
+        ...existing,
+        id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+      };
+      localStorage.setItem(key, JSON.stringify(migrated));
+      return migrated;
+    }
     const names = ["Aster", "Birch", "Cedar", "Dahlia", "Elm", "Fern", "Grove", "Hazel"];
     const colors = ["#4f776d", "#6d6683", "#8a674f", "#527187", "#7d5d6b", "#68764d"];
     const identity = {
+      id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`,
       name: names[Math.floor(Math.random() * names.length)],
       color: colors[Math.floor(Math.random() * colors.length)],
     };
     localStorage.setItem(key, JSON.stringify(identity));
     return identity;
   } catch {
-    return { name: "Collaborator", color: "#4f776d" };
+    return {
+      id: `${Date.now()}-${Math.random()}`,
+      name: "Collaborator",
+      color: "#4f776d",
+    };
   }
 }
 
@@ -364,6 +377,68 @@ export async function connectPageCollaboration({
       provider.destroy();
       persistence.destroy();
       doc.destroy();
+    },
+  };
+}
+
+export function connectWorkspacePresence({ port, token, onPresence, onStatus }) {
+  const identity = collaborationIdentity();
+  const clientId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  const protocol = location.protocol === "https:" ? "wss" : "ws";
+  let modulePath = "";
+  let socket = null;
+  let reconnectTimer = null;
+  let destroyed = false;
+  const sendPresence = () => {
+    if (socket?.readyState !== WebSocket.OPEN || !modulePath) return;
+    socket.send(JSON.stringify({
+      type: "presence",
+      clientId,
+      userId: identity.id,
+      module: modulePath,
+      ...identity,
+    }));
+  };
+  const connect = () => {
+    if (destroyed) return;
+    socket = new WebSocket(
+      `${protocol}://${location.hostname}:${port}/presence?token=${encodeURIComponent(token)}`,
+    );
+    socket.addEventListener("open", () => {
+      onStatus?.("connected");
+      sendPresence();
+    });
+    socket.addEventListener("message", (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message?.type === "presence" && Array.isArray(message.participants)) {
+          onPresence?.(
+            message.participants.filter(
+              (participant) => participant.userId !== identity.id,
+            ),
+          );
+        }
+      } catch {
+        // A malformed presence packet is ignored; document collaboration is independent.
+      }
+    });
+    socket.addEventListener("close", () => {
+      if (destroyed) return;
+      onStatus?.("disconnected");
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connect, 500);
+    });
+  };
+  connect();
+  return {
+    setModule(nextModule) {
+      modulePath = nextModule || "";
+      sendPresence();
+    },
+    destroy() {
+      destroyed = true;
+      clearTimeout(reconnectTimer);
+      socket?.close();
     },
   };
 }
@@ -2705,6 +2780,34 @@ const outlineTheme = EditorView.theme({
     textDecoration: "underline wavy #a94436",
     textUnderlineOffset: "3px",
   },
+  ".cm-outline-presence": {
+    position: "absolute",
+    right: "8px",
+    top: "50%",
+    display: "inline-flex",
+    alignItems: "center",
+    transform: "translateY(-50%)",
+    pointerEvents: "none",
+  },
+  ".cm-outline-presence-dot": {
+    display: "block",
+    width: "6px",
+    height: "6px",
+    marginLeft: "-1px",
+    border: "1px solid var(--sidebar)",
+    borderRadius: "50%",
+    backgroundColor: "var(--peer-color)",
+    boxSizing: "content-box",
+  },
+  ".cm-outline-active .cm-outline-presence-dot": {
+    borderColor: "var(--paper)",
+  },
+  ".cm-outline-presence-more": {
+    marginLeft: "2px",
+    color: "#78827d",
+    fontSize: "8px",
+    lineHeight: "1",
+  },
   ".cm-outline-drag-handle": {
     position: "absolute",
     zIndex: "8",
@@ -2771,6 +2874,7 @@ const outlineConfigField = StateField.define({
       pendingModule: null,
       pendingVisible: false,
       lineMap: [],
+      collaboratorsByModule: new Map(),
     };
   },
   update(value, transaction) {
@@ -2787,6 +2891,7 @@ function outlineDecorations(view) {
     pendingModule,
     pendingVisible,
     lineMap,
+    collaboratorsByModule,
   } = view.state.field(outlineConfigField);
   const decorations = [];
   for (let number = 1; number <= view.state.doc.lines; number += 1) {
@@ -2824,8 +2929,52 @@ function outlineDecorations(view) {
         Decoration.line({ attributes }).range(line.from),
       );
     }
+    const peers = modulePath ? collaboratorsByModule.get(modulePath) || [] : [];
+    if (peers.length) {
+      decorations.push(
+        Decoration.widget({
+          side: 1,
+          widget: new OutlinePresenceWidget(peers),
+        }).range(line.to),
+      );
+    }
   }
   return Decoration.set(decorations, true);
+}
+
+class OutlinePresenceWidget extends WidgetType {
+  constructor(peers) {
+    super();
+    this.peers = peers;
+  }
+
+  eq(other) {
+    return JSON.stringify(this.peers) === JSON.stringify(other.peers);
+  }
+
+  toDOM() {
+    const host = document.createElement("span");
+    host.className = "cm-outline-presence";
+    host.setAttribute("aria-label", this.peers.map((peer) => peer.name).join(", "));
+    host.title = this.peers.map((peer) => peer.name).join(", ");
+    for (const peer of this.peers.slice(0, 3)) {
+      const dot = document.createElement("span");
+      dot.className = "cm-outline-presence-dot";
+      dot.style.setProperty("--peer-color", peer.color || "#6c7771");
+      host.append(dot);
+    }
+    if (this.peers.length > 3) {
+      const more = document.createElement("span");
+      more.className = "cm-outline-presence-more";
+      more.textContent = `+${this.peers.length - 3}`;
+      host.append(more);
+    }
+    return host;
+  }
+
+  ignoreEvent() {
+    return true;
+  }
 }
 
 function insertOutlineSibling(view, onCommit) {
@@ -3161,6 +3310,7 @@ export function mountModuleOutlineEditor(
     pendingModule = null,
     pendingVisible = false,
     lineMap = [],
+    collaboratorsByModule = new Map(),
     onChange,
     onSelectionChange,
     onNavigate,
@@ -3309,6 +3459,7 @@ export function mountModuleOutlineEditor(
       pendingModule,
       pendingVisible,
       lineMap,
+      collaboratorsByModule,
     }),
   });
   return view;
@@ -3323,6 +3474,7 @@ export function updateModuleOutlineEditor(
     pendingModule = null,
     pendingVisible = false,
     lineMap,
+    collaboratorsByModule = new Map(),
     moveSelection = false,
   },
 ) {
@@ -3347,6 +3499,7 @@ export function updateModuleOutlineEditor(
         pendingModule,
         pendingVisible,
         lineMap,
+        collaboratorsByModule,
       }),
     });
     if (focused) view.focus();
@@ -3362,6 +3515,7 @@ export function updateModuleOutlineEditor(
       pendingModule,
       pendingVisible,
       lineMap,
+      collaboratorsByModule,
     }),
     userEvent:
       moveSelection && selectionChanged

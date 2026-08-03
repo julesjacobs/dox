@@ -258,6 +258,7 @@ export async function createCollaborationServer({
     if (error?.code !== "ENOENT") throw error;
   }
   const rooms = new Map();
+  const presence = new Map();
   let projectPollingPaused = null;
 
   const releaseProjectPause = (leaseId) => {
@@ -903,6 +904,14 @@ export async function createCollaborationServer({
   });
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 16_000_000, perMessageDeflate: false });
+  const presenceWss = new WebSocketServer({ noServer: true, maxPayload: 16_384, perMessageDeflate: false });
+  const broadcastPresence = () => {
+    const message = JSON.stringify({
+      type: "presence",
+      participants: Array.from(presence.values()),
+    });
+    for (const connection of presenceWss.clients) send(connection, message);
+  };
   httpServer.on("upgrade", async (request, socket, head) => {
     try {
       if (projectPollingPaused?.phase === "paused") {
@@ -911,6 +920,20 @@ export async function createCollaborationServer({
         return;
       }
       const url = new URL(request.url, "ws://localhost");
+      if (url.pathname === "/presence") {
+        if (
+          !constantTimeEqual(url.searchParams.get("token"), token) ||
+          (origins.length && !origins.includes(request.headers.origin))
+        ) {
+          socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+          socket.destroy();
+          return;
+        }
+        presenceWss.handleUpgrade(request, socket, head, (connection) => {
+          presenceWss.emit("connection", connection, request);
+        });
+        return;
+      }
       const id = url.pathname.match(/^\/document\/([0-9a-f-]+)$/)?.[1];
       if (
         !id ||
@@ -929,6 +952,47 @@ export async function createCollaborationServer({
     } catch {
       socket.destroy();
     }
+  });
+
+  presenceWss.on("connection", (connection) => {
+    const id = crypto.randomUUID();
+    connection.isAlive = true;
+    connection.on("pong", () => { connection.isAlive = true; });
+    connection.on("message", (data) => {
+      try {
+        const input = JSON.parse(data.toString());
+        if (
+          input?.type !== "presence" ||
+          typeof input.module !== "string" ||
+          typeof input.name !== "string" ||
+          typeof input.color !== "string" ||
+          typeof input.clientId !== "string" ||
+          typeof input.userId !== "string" ||
+          input.module.length > 512 ||
+          input.name.length > 80 ||
+          input.color.length > 40 ||
+          input.clientId.length > 80 ||
+          input.userId.length > 80
+        ) {
+          throw new Error("Invalid workspace presence");
+        }
+        presence.set(id, {
+          id,
+          clientId: input.clientId,
+          userId: input.userId,
+          module: input.module,
+          name: input.name,
+          color: input.color,
+        });
+        broadcastPresence();
+      } catch {
+        connection.close(1003, "Invalid workspace presence");
+      }
+    });
+    connection.on("close", () => {
+      if (presence.delete(id)) broadcastPresence();
+    });
+    broadcastPresence();
   });
 
   wss.on("connection", (connection, _request, room) => {
@@ -969,7 +1033,7 @@ export async function createCollaborationServer({
   });
 
   const heartbeat = setInterval(() => {
-    for (const connection of wss.clients) {
+    for (const connection of [...wss.clients, ...presenceWss.clients]) {
       if (!connection.isAlive) connection.terminate();
       else {
         connection.isAlive = false;
@@ -1071,6 +1135,7 @@ export async function createCollaborationServer({
         }
       }
       for (const client of wss.clients) client.terminate();
+      for (const client of presenceWss.clients) client.terminate();
       await new Promise((resolve) => httpServer.close(resolve));
       for (const room of rooms.values()) {
         room.awareness.destroy();

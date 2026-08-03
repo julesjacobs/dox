@@ -208,7 +208,7 @@ button {
 }
 
 .pane-resizer {
-  position: absolute;
+  position: relative;
   top: 0;
   bottom: 0;
   z-index: 6;
@@ -316,30 +316,6 @@ button {
   height: 100%;
 }
 
-.collaboration-presence {
-  display: flex;
-  min-height: 22px;
-  align-items: center;
-  padding: 2px 12px 1px 5px;
-}
-
-.collaboration-presence[hidden] {
-  display: none;
-}
-
-.collaboration-peer {
-  display: grid;
-  width: 18px;
-  height: 18px;
-  place-items: center;
-  margin-right: -3px;
-  border: 2px solid var(--sidebar);
-  border-radius: 50%;
-  background: var(--peer-color);
-  color: white;
-  font: 600 9px/1 var(--sans);
-}
-
 .cm-ySelection {
   border-radius: 2px;
   opacity: 0.28;
@@ -347,6 +323,11 @@ button {
 
 .cm-ySelectionCaret {
   border-left-width: 1.5px;
+}
+
+/* CodeMirror's editable-widget buffer inherits heading metrics and changes the line box. */
+.workspace .cm-editor .cm-md-heading .cm-widgetBuffer:has(+ .cm-ySelectionCaret) {
+  display: none;
 }
 
 .cm-ySelectionInfo {

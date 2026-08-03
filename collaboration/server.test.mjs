@@ -80,6 +80,63 @@ const synced = (provider) => new Promise((resolve) => {
   else provider.once("sync", (value) => { if (value) resolve(); });
 });
 
+const openWorkspacePresence = (port, token) => new Promise((resolve, reject) => {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/presence?token=${token}`);
+  socket.once("open", () => resolve(socket));
+  socket.once("error", reject);
+});
+
+test("workspace presence follows participants between modules", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "dox-presence-"));
+  await fs.writeFile(path.join(root, "test.ml.md"), "# Test\n");
+  const token = "presence-token";
+  const dox = await fakeDoxServer({ token, source: "# Test\n" });
+  const collab = await createCollaborationServer({
+    root, token, doxPort: dox.port, origins: [],
+  });
+  t.after(async () => {
+    await collab.close({ mirror: false });
+    await dox.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const first = await openWorkspacePresence(collab.port, token);
+  const second = await openWorkspacePresence(collab.port, token);
+  t.after(() => { first.close(); second.close(); });
+  const messages = [];
+  second.on("message", (data) => messages.push(JSON.parse(data.toString())));
+  first.send(JSON.stringify({
+    type: "presence",
+    clientId: "first-browser",
+    userId: "first-user",
+    module: "Fib",
+    name: "Aster",
+    color: "#4f776d",
+  }));
+  await waitFor(
+    () => messages.some((message) =>
+      message.participants?.some((participant) => participant.module === "Fib")
+    ),
+    "presence did not appear on Fib",
+  );
+  first.send(JSON.stringify({
+    type: "presence",
+    clientId: "first-browser",
+    userId: "first-user",
+    module: "Demos.Inference",
+    name: "Aster",
+    color: "#4f776d",
+  }));
+  await waitFor(
+    () => messages.some((message) => {
+      const participant = message.participants?.find(
+        (candidate) => candidate.clientId === "first-browser",
+      );
+      return participant?.module === "Demos.Inference";
+    }),
+    "presence did not move to Demos.Inference",
+  );
+});
+
 test("three-way merge preserves non-overlap and marks overlap", () => {
   assert.deepEqual(mergeProjectText("A!\nB\n", "A\nB\n", "A\nB?\n"), {
     text: "A!\nB?\n",
