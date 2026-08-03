@@ -75,7 +75,7 @@ let read_request channel =
   let max_request_line = 8_192 in
   let max_header_bytes = 64_000 in
   let max_headers = 100 in
-  let max_body = 2_000_000 in
+  let max_body = 16_000_000 in
   match read_line_limited channel max_request_line with
   | `Eof -> Ok None
   | `Too_large -> Error (413, "Request line is too large.")
@@ -144,7 +144,7 @@ let send_response channel response =
   Printf.fprintf channel "Content-Type: %s\r\n" response.content_type;
   Printf.fprintf channel "Content-Length: %d\r\n" (String.length response.body);
   Printf.fprintf channel
-    "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src \
+    "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-eval'; style-src \
      'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'; \
      connect-src 'self'; base-uri 'none'; form-action 'self'\r\n";
   Printf.fprintf channel "X-Content-Type-Options: nosniff\r\n";
@@ -636,6 +636,95 @@ let evaluate_response context ~cancelled body =
              ("projectVersion", `String project_version);
            ])
 
+let browser_evaluation_plan_response context ~cancelled body =
+  let open Util in
+  match
+    let* request = json_body body in
+    let* path = string_member "path" request in
+    let* source = string_member "source" request in
+    let* base_project_version = string_member "baseProjectVersion" request in
+    match Project.snapshot context.project with
+    | Error project_error_ -> Error (Project.error_message project_error_)
+    | Ok snapshot ->
+        if not (String.equal snapshot.version base_project_version) then
+          Error "The project changed; reload before evaluating this draft."
+        else
+          let document = Document.parse ~path source in
+          (match
+             Project.resolve_documents ~cancelled context.project snapshot
+               document
+           with
+          | Error project_error_ -> Error (Project.error_message project_error_)
+          | Ok documents ->
+              Ok
+                ( document,
+                  Evaluator.browser_evaluation_plan ~documents ~target:document,
+                  snapshot.version ))
+  with
+  | Error message -> error ~status:409 message
+  | Ok (document, plan, project_version) ->
+      json
+        (`Assoc
+           [ ("document", Document.to_json document);
+             ("plan", plan);
+             ("projectVersion", `String project_version)
+           ])
+
+let browser_evaluation_result_response context ~cancelled body =
+  let open Util in
+  match
+    let* request = json_body body in
+    let* path = string_member "path" request in
+    let* source = string_member "source" request in
+    let* base_project_version = string_member "baseProjectVersion" request in
+    let* evaluation_id = string_member "evaluationId" request in
+    let result = Yojson.Safe.Util.member "result" request in
+    let* stdout = string_member "stdout" result in
+    let* stderr = string_member "stderr" result in
+    let* events = string_member "events" result in
+    let* trace = string_member "trace" result in
+    let manifests =
+      Yojson.Safe.Util.member "manifests" result
+      |> Yojson.Safe.Util.to_list
+      |> List.map Yojson.Safe.Util.to_string
+    in
+    match Project.snapshot context.project with
+    | Error project_error_ -> Error (Project.error_message project_error_)
+    | Ok snapshot ->
+        if not (String.equal snapshot.version base_project_version) then
+          Error "The project changed; reload before accepting browser results."
+        else
+          let document = Document.parse ~path source in
+          (match
+             Project.resolve_documents ~cancelled context.project snapshot
+               document
+           with
+          | Error project_error_ -> Error (Project.error_message project_error_)
+          | Ok documents ->
+              let browser_execution : Evaluator.browser_execution =
+                { browser_stdout = stdout;
+                  browser_stderr = stderr;
+                  browser_events = events;
+                  browser_trace = trace;
+                  browser_manifests = manifests
+                }
+              in
+              let evaluation =
+                Evaluator.evaluate_documents ~project_version:snapshot.version
+                  ~evaluation_id ~browser_execution ~cancelled ~documents
+                  ~target:document ()
+              in
+              Ok (document, evaluation, snapshot.version))
+  with
+  | Error message -> error ~status:409 message
+  | Ok (document, evaluation, project_version) ->
+      json
+        (`Assoc
+           [ ("document", Document.to_json document);
+             ("evaluation", Evaluator.to_json evaluation);
+             ("projectVersion", `String project_version)
+           ])
+
 let type_at_response context ~cancelled body =
   let open Util in
   let parsed =
@@ -983,6 +1072,12 @@ let route context ~cancelled method_ target headers body =
   | "POST", "/api/evaluate" ->
       require_active_request context headers (fun () ->
           evaluate_response context ~cancelled body)
+  | "POST", "/api/browser-evaluation-plan" ->
+      require_active_request context headers (fun () ->
+          browser_evaluation_plan_response context ~cancelled body)
+  | "POST", "/api/browser-evaluation-result" ->
+      require_active_request context headers (fun () ->
+          browser_evaluation_result_response context ~cancelled body)
   | "POST", "/api/type-at" ->
       require_active_request context headers (fun () ->
           type_at_response context ~cancelled body)

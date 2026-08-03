@@ -67,6 +67,10 @@ const state = {
   pendingEvaluation: null,
   requestController: null,
   evaluationController: null,
+  evaluationEngine:
+    localStorage.getItem("dox:v1:evaluation-engine") === "browser"
+      ? "browser"
+      : "server",
   sourceEditorView: null,
   sourceMode:
     localStorage.getItem("dox:v2:editor-mode") === "source"
@@ -1351,17 +1355,47 @@ function renderShell() {
   if (existingSidebar) {
     app.querySelector(".sidebar")?.replaceWith(existingSidebar);
   }
+  syncEvaluationEngineToggle();
   bindEvents();
 }
 
 function renderSidebar() {
   if (!state.project?.documents.length) {
-    return `<div class="sidebar-brand">Dox</div><div class="module-outline-host" data-module-outline></div>`;
+    return `<div class="sidebar-brand">Dox</div><div class="module-outline-host" data-module-outline></div>${renderEvaluationEngineToggle()}`;
   }
   return `
     <div class="sidebar-brand">Dox</div>
     <div class="module-outline-host" data-module-outline aria-label="Editable module outline"></div>
+    ${renderEvaluationEngineToggle()}
   `;
+}
+
+function renderEvaluationEngineToggle() {
+  const browser = state.evaluationEngine === "browser";
+  const evaluationState = state.evaluating
+    ? "evaluating"
+    : state.evaluation?.ok
+      ? "ready"
+      : state.evaluation
+        ? "error"
+        : "idle";
+  return `<button class="evaluation-engine-toggle" id="evaluation-engine-toggle" type="button" aria-pressed="${browser}" data-evaluation-state="${evaluationState}" title="Run OxCaml ${browser ? "in this browser" : "on the local Dox server"}"><span class="evaluation-engine-dot" aria-hidden="true"></span>${browser ? "Browser" : "Server"}</button>`;
+}
+
+function syncEvaluationEngineToggle() {
+  const toggle = document.querySelector("#evaluation-engine-toggle");
+  if (!toggle) return;
+  const browser = state.evaluationEngine === "browser";
+  toggle.setAttribute("aria-pressed", String(browser));
+  toggle.title = `Run OxCaml ${browser ? "in this browser" : "on the local Dox server"}`;
+  toggle.lastChild.textContent = browser ? "Browser" : "Server";
+  toggle.dataset.evaluationState = state.evaluating
+    ? "evaluating"
+    : state.evaluation?.ok
+      ? "ready"
+      : state.evaluation
+        ? "error"
+        : "idle";
 }
 
 function normalizeOutlineEntries(project) {
@@ -4284,6 +4318,56 @@ function handleCompletionKey(action) {
   return false;
 }
 
+async function performEvaluation(request, signal) {
+  const body = {
+    path: request.path,
+    source: request.source,
+    baseProjectVersion: request.baseProjectVersion,
+    requestCodeDigest: request.executionToken?.requestCodeDigest,
+  };
+  if (state.evaluationEngine !== "browser") {
+    return api("/api/evaluate", {
+      method: "POST",
+      signal,
+      body: JSON.stringify(body),
+    });
+  }
+  const planPayload = await api("/api/browser-evaluation-plan", {
+    method: "POST",
+    signal,
+    body: JSON.stringify(body),
+  });
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  const backend = await import("./oxcaml/backend.js?v=20260803d");
+  const removeStatusListener = backend.addBackendStatusListener(({ state: backendState, text }) => {
+    const toggle = document.querySelector("#evaluation-engine-toggle");
+    if (!toggle) return;
+    toggle.dataset.backendState = backendState;
+    if (text) toggle.dataset.backendStatus = text;
+    else delete toggle.dataset.backendStatus;
+  });
+  let result;
+  try {
+    result = await backend.runDoxProject(planPayload.plan, { signal });
+  } finally {
+    removeStatusListener();
+  }
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  if (result?.kind !== "ok") {
+    const detail = result?.stderr || result?.stdout || result?.message || "Unknown browser compiler failure";
+    throw new Error(`Browser OxCaml evaluation failed: ${detail.trim()}`);
+  }
+  return api("/api/browser-evaluation-result", {
+    method: "POST",
+    signal,
+    body: JSON.stringify({
+      ...body,
+      evaluationId: planPayload.plan.evaluationId,
+      result,
+    }),
+  });
+}
+
 function scheduleEvaluation(
   source,
   {
@@ -4337,16 +4421,7 @@ function scheduleEvaluation(
     state.evaluationController = controller;
     let retryWithoutExecutionCore = false;
     try {
-      const payload = await api("/api/evaluate", {
-        method: "POST",
-        signal: controller.signal,
-        body: JSON.stringify({
-          path: request.path,
-          source: request.source,
-          baseProjectVersion: request.baseProjectVersion,
-          requestCodeDigest: request.executionToken?.requestCodeDigest,
-        }),
-      });
+      const payload = await performEvaluation(request, controller.signal);
       if (
         state.pendingEvaluation !== request ||
         request.generation !== state.evalGeneration ||
@@ -4526,6 +4601,8 @@ function updateStatusOnly() {
     "aria-hidden",
     state.workspaceError ? "false" : "true",
   );
+  const engineToggle = document.querySelector("#evaluation-engine-toggle");
+  if (engineToggle) syncEvaluationEngineToggle();
 }
 
 function scheduleAutosave(session, { immediate = false } = {}) {
@@ -5201,6 +5278,25 @@ function bindEvents() {
     ?.addEventListener("click", () =>
       setSourceMode(nextSourceMode()),
     );
+  const evaluationEngineToggle = document.querySelector(
+    "#evaluation-engine-toggle",
+  );
+  if (evaluationEngineToggle) {
+    evaluationEngineToggle.onclick = (event) => {
+      state.evaluationEngine =
+        state.evaluationEngine === "browser" ? "server" : "browser";
+      localStorage.setItem("dox:v1:evaluation-engine", state.evaluationEngine);
+      const button = event.currentTarget;
+      const browser = state.evaluationEngine === "browser";
+      button.setAttribute("aria-pressed", String(browser));
+      button.title = `Run OxCaml ${browser ? "in this browser" : "on the local Dox server"}`;
+      button.lastChild.textContent = browser ? "Browser" : "Server";
+      state.evaluationController?.abort();
+      if (state.document) {
+        scheduleEvaluation(state.document.source, { immediate: true });
+      }
+    };
+  }
   document
     .querySelector("#inspector-width-toggle")
     ?.addEventListener("click", toggleInspectorExpanded);

@@ -18,6 +18,12 @@ dune exec dox -- serve
 
 Then open <http://127.0.0.1:8080>.
 
+The small switch at the bottom of the module outline chooses where OxCaml code
+runs. **Browser** compiles, links, and executes the project in a Web Worker;
+the server only supplies the project snapshot and normalizes the resulting Dox
+trace. **Server** keeps the existing local compiler path. The choice is saved
+for the browser.
+
 The server uses the current directory as the project root and finds every file
 ending in `.ml.md`. Use another project directory or port with:
 
@@ -26,9 +32,9 @@ dune exec dox -- serve --root /path/to/project --port 9000
 ```
 
 This checkout uses the project-local OxCaml compiler in
-`_toolchain/oxcaml/bin/ocamlc` for evaluation and artifacts. Its source is
-pinned in `vendor/oxcaml` at revision
-`991902cc59b71ce4ad77c522f5feac89b1e31e52`. `OCAMLC` can override it.
+`_toolchain/oxcaml/bin/ocamlc` for evaluation and artifacts. Its source is in
+`vendor/oxcaml`; the browser integration is maintained on the
+`jujacobs/dox-browser-integration` branch. `OCAMLC` can override it.
 `ocamlmerlin` provides types at the cursor and can be overridden with
 `OCAMLMERLIN`.
 
@@ -232,6 +238,13 @@ The browser uses one locally bundled CodeMirror 6 editor for the complete
 Markdown and OCaml document. The generated bundle is included. After changing
 `web/editor-source.js`, run `npm install` once and `npm run build:web`.
 
+The generated browser OxCaml compiler is also included. After changing the
+browser compiler bridge or its vendor branch, install `vendor/oxcaml` and run:
+
+```sh
+scripts/build-browser-oxcaml.sh
+```
+
 ## Implemented model
 
 - One immutable project snapshot stamps every document, evaluation, change set,
@@ -260,10 +273,12 @@ Markdown and OCaml document. The generated bundle is included. After changing
 - Artifact bundles are immutable and connect generated executables to exact
   document and project versions.
 
-OCaml code is trusted and runs with the permissions of the local user. The
-evaluation supervisor provides time and output bounds; it is not an OS security
-sandbox. Code that deliberately creates a detached process can outlive an
-evaluation.
+With the Server engine, OCaml code is trusted and runs with the permissions of
+the local user. The evaluation supervisor provides time and output bounds; it
+is not an OS security sandbox. Code that deliberately creates a detached
+process can outlive an evaluation. The Browser engine runs in a disposable Web
+Worker and is cancelled by terminating that worker, but it is not presented as
+a security boundary for untrusted source.
 
 Managed long-running services, replay debugging, multi-user permissions, and
 an external agent protocol remain future work.

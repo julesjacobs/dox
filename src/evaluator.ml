@@ -2963,6 +2963,74 @@ let instrumented_compilation_source evaluation_id documents target =
   let sources = List.map document_source documents in
   (sources, List.rev !markers, List.rev !inline_markers)
 
+let browser_evaluation_plan ~documents ~target =
+  let evaluation_id =
+    Util.random_token () |> fun token -> String.sub token 0 24
+  in
+  let sources, _, _ =
+    instrumented_compilation_source evaluation_id documents target
+  in
+  let unit_name document =
+    match Module_path.of_source_path document.Document.path with
+    | Ok module_path -> Module_path.compiler_unit module_path
+    | Error _ -> "Dox__Page_" ^ Util.digest document.path
+  in
+  let modules =
+    sources
+    |> List.filter_map (fun (document, _) ->
+        Result.to_option (Module_path.of_source_path document.Document.path))
+  in
+  let document_units =
+    sources
+    |> List.map (fun (document, source) ->
+        let module_path =
+          Result.to_option (Module_path.of_source_path document.Document.path)
+        in
+        let source = Module_path.rewrite_qualified_references ~modules source in
+        let source =
+          match module_path with
+          | None -> source
+          | Some module_path -> Module_path.ancestor_open_source module_path ^ source
+        in
+        let source =
+          match module_path with
+          | None -> source
+          | Some module_path ->
+              source ^ "\n" ^ Module_path.alias_source modules module_path
+        in
+        ( "document",
+          String.uncapitalize_ascii (unit_name document) ^ ".ml.md",
+          source ))
+  in
+  let alias_units =
+    (* Qualified page references have already been rewritten to compiler-unit
+       names above. Only lexical scope aliases remain necessary in the browser;
+       opening the root [Dox] alias makes a page depend on an alias that points
+       back to that same page. *)
+    Module_path.scope_alias_units modules
+    |> List.filter (fun (alias_name, _) ->
+        not
+          (List.exists
+             (fun module_path ->
+               String.equal alias_name (Module_path.compiler_unit module_path))
+             modules))
+    |> List.map (fun (alias_name, source) ->
+        ("alias", String.uncapitalize_ascii alias_name ^ ".ml", source))
+  in
+  let units = ("prelude", "dox_prelude.ml", prelude) :: alias_units @ document_units in
+  `Assoc
+    [ ("evaluationId", `String evaluation_id);
+      ( "units",
+        `List
+          (List.map
+             (fun (kind, filename, source) ->
+               `Assoc
+                 [ ("kind", `String kind);
+                   ("filename", `String filename);
+                   ("source", `String source) ])
+             units) )
+    ]
+
 let compile_document_units ?(prelude_source = prelude) ?entry
     ?(environment = []) ~directory ~sources ~target ~cancelled () =
   let emit_manifests = List.assoc_opt "DOX_TRACE_ALL" environment = Some "1" in
@@ -3444,12 +3512,21 @@ let project_digest ~documents ~(target : Document.t) =
         [ ("compilation", Document.compilation_source document) ] ))
   |> source_identity ~domain:"dox-project-source-v1"
 
-let evaluate_documents ?project_version ?request_code_digest
+type browser_execution = {
+  browser_stdout : string;
+  browser_stderr : string;
+  browser_events : string;
+  browser_trace : string;
+  browser_manifests : string list;
+}
+
+let evaluate_documents ?project_version ?request_code_digest ?evaluation_id
+    ?browser_execution
     ?(cancelled = fun () -> false) ~documents ~target () =
   let started = Unix.gettimeofday () in
   let started_at = Util.timestamp () in
   let evaluation_id =
-    Util.random_token () |> fun token -> String.sub token 0 24
+    Option.value evaluation_id ~default:(Util.random_token () |> fun token -> String.sub token 0 24)
   in
   let ordered_documents =
     List.sort
@@ -3517,7 +3594,73 @@ let evaluate_documents ?project_version ?request_code_digest
         | None | Some _ -> remove_temp_directory directory)
       (fun () ->
         if cancelled () then raise Cancelled;
-        if
+        match browser_execution with
+        | Some browser ->
+            let compiler_manifests =
+              browser.browser_manifests
+              |> List.mapi (fun index contents ->
+                  let path =
+                    Filename.concat directory
+                      (Printf.sprintf "browser-%d.dox-constructs" index)
+                  in
+                  match Util.write_file path contents with
+                  | Error message -> Error message
+                  | Ok () -> read_compiler_manifest path)
+            in
+            let manifest_error =
+              List.find_map
+                (function Error message -> Some message | Ok _ -> None)
+                compiler_manifests
+            in
+            (match manifest_error with
+            | Some message ->
+                ( "compile-error", "", browser.browser_stdout,
+                  browser.browser_stderr, [], [], [], true, 0, 0, 0, [],
+                  [ diagnostic ~stage:"compile" ~severity:"error" message ] )
+            | None ->
+                let compiler_manifests =
+                  List.filter_map Result.to_option compiler_manifests
+                in
+                let trace_malformed =
+                  runtime_events_malformed browser.browser_trace
+                in
+                let raw_trace_truncated =
+                  runtime_events_truncated browser.browser_trace
+                  || trace_malformed
+                in
+                let views, _ = parse_runtime_events browser.browser_events in
+                let _, traces = parse_runtime_events browser.browser_trace in
+                let views = collapse_nested_output_views views in
+                let views, traces = merge_output_events views traces in
+                let ( tail_handoffs,
+                      tail_linked_enters,
+                      tail_handoff_outcomes,
+                      tail_handoff_occurrences ) =
+                  raw_tail_stats traces
+                in
+                let traces, tail_relations_malformed =
+                  complete_tail_outcomes
+                    ~trace_truncated:raw_trace_truncated traces
+                in
+                let trace_truncated =
+                  raw_trace_truncated || tail_relations_malformed
+                in
+                let traces =
+                  List.map (normalize_trace_event documents) traces
+                in
+                let diagnostics =
+                  if trace_malformed || tail_relations_malformed then
+                    [ diagnostic ~stage:"runtime" ~severity:"warning"
+                        "Execution data was incomplete because runtime trace relations were malformed."
+                    ]
+                  else []
+                in
+                ( "ready", "", browser.browser_stdout,
+                  browser.browser_stderr, views, traces, compiler_manifests,
+                  trace_truncated, tail_handoffs, tail_linked_enters,
+                  tail_handoff_outcomes, tail_handoff_occurrences,
+                  diagnostics ))
+        | None -> if
           List.exists
             (fun diagnostic -> String.equal diagnostic.severity "error")
             parse_diagnostics

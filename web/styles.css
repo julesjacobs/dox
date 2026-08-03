@@ -316,6 +316,39 @@ button {
   height: 100%;
 }
 
+.evaluation-engine-toggle {
+  display: flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 7px;
+  margin: 8px 10px 13px 5px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  color: #66736d;
+  background: transparent;
+  font: 500 11px/1.2 var(--sans);
+  cursor: pointer;
+}
+
+.evaluation-engine-toggle:hover,
+.evaluation-engine-toggle:focus-visible {
+  color: #34443d;
+  background: rgb(255 255 255 / 42%);
+  outline: none;
+}
+
+.evaluation-engine-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #9ca6a1;
+}
+
+.evaluation-engine-toggle[aria-pressed="true"] .evaluation-engine-dot {
+  background: #4f806b;
+}
+
 .module-context {
   display: grid;
   gap: 13px;

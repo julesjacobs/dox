@@ -1,0 +1,2397 @@
+[
+  {
+    "fs_path": "/static/cmis/afl_instrument.cmi",
+    "asset_path": "browser_fs/static/cmis/afl_instrument.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/allowance.cmi",
+    "asset_path": "browser_fs/static/cmis/allowance.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/amd64_simd_defs.cmi",
+    "asset_path": "browser_fs/static/cmis/amd64_simd_defs.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/amd64_simd_instrs.cmi",
+    "asset_path": "browser_fs/static/cmis/amd64_simd_instrs.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/annot.cmi",
+    "asset_path": "browser_fs/static/cmis/annot.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/arch.cmi",
+    "asset_path": "browser_fs/static/cmis/arch.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/arg_helper.cmi",
+    "asset_path": "browser_fs/static/cmis/arg_helper.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/arrayset.cmi",
+    "asset_path": "browser_fs/static/cmis/arrayset.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/asmgen.cmi",
+    "asset_path": "browser_fs/static/cmis/asmgen.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/asmlink.cmi",
+    "asset_path": "browser_fs/static/cmis/asmlink.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/ast_helper.cmi",
+    "asset_path": "browser_fs/static/cmis/ast_helper.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/ast_invariants.cmi",
+    "asset_path": "browser_fs/static/cmis/ast_invariants.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/ast_iterator.cmi",
+    "asset_path": "browser_fs/static/cmis/ast_iterator.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/ast_mapper.cmi",
+    "asset_path": "browser_fs/static/cmis/ast_mapper.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/asttypes.cmi",
+    "asset_path": "browser_fs/static/cmis/asttypes.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/attr_helper.cmi",
+    "asset_path": "browser_fs/static/cmis/attr_helper.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/available_ranges_vars.cmi",
+    "asset_path": "browser_fs/static/cmis/available_ranges_vars.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/axis_lattice.cmi",
+    "asset_path": "browser_fs/static/cmis/axis_lattice.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/backend_var.cmi",
+    "asset_path": "browser_fs/static/cmis/backend_var.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/binary_emitter_helpers.cmi",
+    "asset_path": "browser_fs/static/cmis/binary_emitter_helpers.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/binary_emitter_verify.cmi",
+    "asset_path": "browser_fs/static/cmis/binary_emitter_verify.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/binutils.cmi",
+    "asset_path": "browser_fs/static/cmis/binutils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/blambda.cmi",
+    "asset_path": "browser_fs/static/cmis/blambda.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/blambda_of_lambda.cmi",
+    "asset_path": "browser_fs/static/cmis/blambda_of_lambda.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/branch_relaxation.cmi",
+    "asset_path": "browser_fs/static/cmis/branch_relaxation.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/branch_relaxation_intf.cmi",
+    "asset_path": "browser_fs/static/cmis/branch_relaxation_intf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/btype.cmi",
+    "asset_path": "browser_fs/static/cmis/btype.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/build_igot_and_iplt.cmi",
+    "asset_path": "browser_fs/static/cmis/build_igot_and_iplt.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/build_linker_args.cmi",
+    "asset_path": "browser_fs/static/cmis/build_linker_args.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/build_path_prefix_map.cmi",
+    "asset_path": "browser_fs/static/cmis/build_path_prefix_map.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/builtin_attributes.cmi",
+    "asset_path": "browser_fs/static/cmis/builtin_attributes.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/bytegen.cmi",
+    "asset_path": "browser_fs/static/cmis/bytegen.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/byteinstantiator.cmi",
+    "asset_path": "browser_fs/static/cmis/byteinstantiator.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/bytelibrarian.cmi",
+    "asset_path": "browser_fs/static/cmis/bytelibrarian.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/bytelink.cmi",
+    "asset_path": "browser_fs/static/cmis/bytelink.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/bytepackager.cmi",
+    "asset_path": "browser_fs/static/cmis/bytepackager.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/bytesections.cmi",
+    "asset_path": "browser_fs/static/cmis/bytesections.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cSE.cmi",
+    "asset_path": "browser_fs/static/cmis/cSE.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/camlinternalAtomic.cmi",
+    "asset_path": "browser_fs/static/cmis/camlinternalAtomic.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/camlinternalComprehension.cmi",
+    "asset_path": "browser_fs/static/cmis/camlinternalComprehension.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/camlinternalFormat.cmi",
+    "asset_path": "browser_fs/static/cmis/camlinternalFormat.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/camlinternalFormatBasics.cmi",
+    "asset_path": "browser_fs/static/cmis/camlinternalFormatBasics.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/camlinternalLazy.cmi",
+    "asset_path": "browser_fs/static/cmis/camlinternalLazy.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/camlinternalMenhirLib.cmi",
+    "asset_path": "browser_fs/static/cmis/camlinternalMenhirLib.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/camlinternalMod.cmi",
+    "asset_path": "browser_fs/static/cmis/camlinternalMod.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/camlinternalOO.cmi",
+    "asset_path": "browser_fs/static/cmis/camlinternalOO.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/camlinternalQuote.cmi",
+    "asset_path": "browser_fs/static/cmis/camlinternalQuote.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/ccomp.cmi",
+    "asset_path": "browser_fs/static/cmis/ccomp.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_available_regs.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_available_regs.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_colours.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_colours.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_comballoc.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_comballoc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_cse.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_cse.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_cse_target_intf.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_cse_target_intf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_dataflow.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_dataflow.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_deadcode.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_deadcode.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_dominators.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_dominators.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_edge.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_edge.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_format.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_format.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_intf.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_intf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_invariants.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_invariants.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_liveness.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_liveness.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_loop_infos.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_loop_infos.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_merge_blocks.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_merge_blocks.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_polling.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_polling.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_prologue.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_prologue.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_quick_hash.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_quick_hash.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_reducibility.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_reducibility.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_selectgen.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_selectgen.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_selectgen_target_intf.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_selectgen_target_intf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_selection.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_selection.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_simplify.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_simplify.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_stack_checks.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_stack_checks.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_to_linear.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_to_linear.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_to_linear_desc.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_to_linear_desc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_with_infos.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_with_infos.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cfg_with_layout.cmi",
+    "asset_path": "browser_fs/static/cmis/cfg_with_layout.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/clflags.cmi",
+    "asset_path": "browser_fs/static/cmis/clflags.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cm_bundle.cmi",
+    "asset_path": "browser_fs/static/cmis/cm_bundle.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmi_format.cmi",
+    "asset_path": "browser_fs/static/cmis/cmi_format.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmj_format.cmi",
+    "asset_path": "browser_fs/static/cmis/cmj_format.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmm.cmi",
+    "asset_path": "browser_fs/static/cmis/cmm.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmm_builtins.cmi",
+    "asset_path": "browser_fs/static/cmis/cmm_builtins.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmm_helpers.cmi",
+    "asset_path": "browser_fs/static/cmis/cmm_helpers.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmm_invariants.cmi",
+    "asset_path": "browser_fs/static/cmis/cmm_invariants.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmm_peephole_engine.cmi",
+    "asset_path": "browser_fs/static/cmis/cmm_peephole_engine.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmmgen_state.cmi",
+    "asset_path": "browser_fs/static/cmis/cmmgen_state.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmo_format.cmi",
+    "asset_path": "browser_fs/static/cmis/cmo_format.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cms_format.cmi",
+    "asset_path": "browser_fs/static/cmis/cms_format.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmt2annot.cmi",
+    "asset_path": "browser_fs/static/cmis/cmt2annot.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmt_format.cmi",
+    "asset_path": "browser_fs/static/cmis/cmt_format.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmx_format.cmi",
+    "asset_path": "browser_fs/static/cmis/cmx_format.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/cmxs_format.cmi",
+    "asset_path": "browser_fs/static/cmis/cmxs_format.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/compenv.cmi",
+    "asset_path": "browser_fs/static/cmis/compenv.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/compilation_unit.cmi",
+    "asset_path": "browser_fs/static/cmis/compilation_unit.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/compile.cmi",
+    "asset_path": "browser_fs/static/cmis/compile.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/compile_common.cmi",
+    "asset_path": "browser_fs/static/cmis/compile_common.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/compilenv.cmi",
+    "asset_path": "browser_fs/static/cmis/compilenv.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/compiler_hooks.cmi",
+    "asset_path": "browser_fs/static/cmis/compiler_hooks.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/complex_shape.cmi",
+    "asset_path": "browser_fs/static/cmis/complex_shape.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/compmisc.cmi",
+    "asset_path": "browser_fs/static/cmis/compmisc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/compute_ranges.cmi",
+    "asset_path": "browser_fs/static/cmis/compute_ranges.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/compute_ranges_intf.cmi",
+    "asset_path": "browser_fs/static/cmis/compute_ranges_intf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/config.cmi",
+    "asset_path": "browser_fs/static/cmis/config.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/consistbl.cmi",
+    "asset_path": "browser_fs/static/cmis/consistbl.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/ctype.cmi",
+    "asset_path": "browser_fs/static/cmis/ctype.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/current_unit.cmi",
+    "asset_path": "browser_fs/static/cmis/current_unit.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/data_types.cmi",
+    "asset_path": "browser_fs/static/cmis/data_types.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/datarepr.cmi",
+    "asset_path": "browser_fs/static/cmis/datarepr.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/debug.cmi",
+    "asset_path": "browser_fs/static/cmis/debug.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/debug_event.cmi",
+    "asset_path": "browser_fs/static/cmis/debug_event.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/debuginfo.cmi",
+    "asset_path": "browser_fs/static/cmis/debuginfo.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/depend.cmi",
+    "asset_path": "browser_fs/static/cmis/depend.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/diffing.cmi",
+    "asset_path": "browser_fs/static/cmis/diffing.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/diffing_with_keys.cmi",
+    "asset_path": "browser_fs/static/cmis/diffing_with_keys.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dissector.cmi",
+    "asset_path": "browser_fs/static/cmis/dissector.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dissector_log.cmi",
+    "asset_path": "browser_fs/static/cmis/dissector_log.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dll.cmi",
+    "asset_path": "browser_fs/static/cmis/dll.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/docstrings.cmi",
+    "asset_path": "browser_fs/static/cmis/docstrings.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/domainstate.cmi",
+    "asset_path": "browser_fs/static/cmis/domainstate.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/doubly_linked_list.cmi",
+    "asset_path": "browser_fs/static/cmis/doubly_linked_list.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dsl_helpers.cmi",
+    "asset_path": "browser_fs/static/cmis/dsl_helpers.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dwarf.cmi",
+    "asset_path": "browser_fs/static/cmis/dwarf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dwarf_abstract_instances.cmi",
+    "asset_path": "browser_fs/static/cmis/dwarf_abstract_instances.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dwarf_compilation_unit.cmi",
+    "asset_path": "browser_fs/static/cmis/dwarf_compilation_unit.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dwarf_concrete_instances.cmi",
+    "asset_path": "browser_fs/static/cmis/dwarf_concrete_instances.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dwarf_inlined_frames.cmi",
+    "asset_path": "browser_fs/static/cmis/dwarf_inlined_frames.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dwarf_name_laundry.cmi",
+    "asset_path": "browser_fs/static/cmis/dwarf_name_laundry.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dwarf_reg_locations.cmi",
+    "asset_path": "browser_fs/static/cmis/dwarf_reg_locations.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dwarf_state.cmi",
+    "asset_path": "browser_fs/static/cmis/dwarf_state.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dwarf_type.cmi",
+    "asset_path": "browser_fs/static/cmis/dwarf_type.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/dwarf_variables_and_parameters.cmi",
+    "asset_path": "browser_fs/static/cmis/dwarf_variables_and_parameters.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/eh_frame_registration.cmi",
+    "asset_path": "browser_fs/static/cmis/eh_frame_registration.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/emit.cmi",
+    "asset_path": "browser_fs/static/cmis/emit.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/emitaux.cmi",
+    "asset_path": "browser_fs/static/cmis/emitaux.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/emitcode.cmi",
+    "asset_path": "browser_fs/static/cmis/emitcode.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/env.cmi",
+    "asset_path": "browser_fs/static/cmis/env.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/envaux.cmi",
+    "asset_path": "browser_fs/static/cmis/envaux.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/errors.cmi",
+    "asset_path": "browser_fs/static/cmis/errors.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/errortrace.cmi",
+    "asset_path": "browser_fs/static/cmis/errortrace.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/errortrace_report.cmi",
+    "asset_path": "browser_fs/static/cmis/errortrace_report.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/extra_debug.cmi",
+    "asset_path": "browser_fs/static/cmis/extra_debug.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/extract_relocations.cmi",
+    "asset_path": "browser_fs/static/cmis/extract_relocations.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/fdo_info.cmi",
+    "asset_path": "browser_fs/static/cmis/fdo_info.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/file_sections.cmi",
+    "asset_path": "browser_fs/static/cmis/file_sections.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/flambda2.cmi",
+    "asset_path": "browser_fs/static/cmis/flambda2.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/flambda2_floats.cmi",
+    "asset_path": "browser_fs/static/cmis/flambda2_floats.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/flambda2_floats__Float32.cmi",
+    "asset_path": "browser_fs/static/cmis/flambda2_floats__Float32.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/flambda2_numbers.cmi",
+    "asset_path": "browser_fs/static/cmis/flambda2_numbers.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/flambda2_numbers__Numeric_types.cmi",
+    "asset_path": "browser_fs/static/cmis/flambda2_numbers__Numeric_types.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/flambda2_numbers__One_bit_fewer.cmi",
+    "asset_path": "browser_fs/static/cmis/flambda2_numbers__One_bit_fewer.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/flambda2_numbers__Or_infinity.cmi",
+    "asset_path": "browser_fs/static/cmis/flambda2_numbers__Or_infinity.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/flambda2_numbers__Target_ocaml_int.cmi",
+    "asset_path": "browser_fs/static/cmis/flambda2_numbers__Target_ocaml_int.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/flambda2_numbers__Targetint_32_64.cmi",
+    "asset_path": "browser_fs/static/cmis/flambda2_numbers__Targetint_32_64.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/flambda2_numbers__Vector_types.cmi",
+    "asset_path": "browser_fs/static/cmis/flambda2_numbers__Vector_types.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/form_rewrite_plan.cmi",
+    "asset_path": "browser_fs/static/cmis/form_rewrite_plan.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/format_doc.cmi",
+    "asset_path": "browser_fs/static/cmis/format_doc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/generic_fns.cmi",
+    "asset_path": "browser_fs/static/cmis/generic_fns.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/genprintval.cmi",
+    "asset_path": "browser_fs/static/cmis/genprintval.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/global_module.cmi",
+    "asset_path": "browser_fs/static/cmis/global_module.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/gprinttyp.cmi",
+    "asset_path": "browser_fs/static/cmis/gprinttyp.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/ident.cmi",
+    "asset_path": "browser_fs/static/cmis/ident.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/identifiable.cmi",
+    "asset_path": "browser_fs/static/cmis/identifiable.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/igot.cmi",
+    "asset_path": "browser_fs/static/cmis/igot.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/ikind.cmi",
+    "asset_path": "browser_fs/static/cmis/ikind.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/import_info.cmi",
+    "asset_path": "browser_fs/static/cmis/import_info.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/includeclass.cmi",
+    "asset_path": "browser_fs/static/cmis/includeclass.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/includecore.cmi",
+    "asset_path": "browser_fs/static/cmis/includecore.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/includemod.cmi",
+    "asset_path": "browser_fs/static/cmis/includemod.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/includemod_errorprinter.cmi",
+    "asset_path": "browser_fs/static/cmis/includemod_errorprinter.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/inlined_frame_ranges.cmi",
+    "asset_path": "browser_fs/static/cmis/inlined_frame_ranges.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/instantiator.cmi",
+    "asset_path": "browser_fs/static/cmis/instantiator.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/instruct.cmi",
+    "asset_path": "browser_fs/static/cmis/instruct.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/instructionId.cmi",
+    "asset_path": "browser_fs/static/cmis/instructionId.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/int_replace_polymorphic_compare.cmi",
+    "asset_path": "browser_fs/static/cmis/int_replace_polymorphic_compare.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/internal_assembler.cmi",
+    "asset_path": "browser_fs/static/cmis/internal_assembler.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/iplt.cmi",
+    "asset_path": "browser_fs/static/cmis/iplt.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/is_parameter.cmi",
+    "asset_path": "browser_fs/static/cmis/is_parameter.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/jit_backend.cmi",
+    "asset_path": "browser_fs/static/cmis/jit_backend.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/jkind.cmi",
+    "asset_path": "browser_fs/static/cmis/jkind.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/jkind_axis.cmi",
+    "asset_path": "browser_fs/static/cmis/jkind_axis.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/jkind_intf.cmi",
+    "asset_path": "browser_fs/static/cmis/jkind_intf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/jkind_types.cmi",
+    "asset_path": "browser_fs/static/cmis/jkind_types.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/jsoo_runtime.cmi",
+    "asset_path": "browser_fs/static/cmis/jsoo_runtime.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/jsoo_runtime__.cmi",
+    "asset_path": "browser_fs/static/cmis/jsoo_runtime__.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/jsoo_runtime__Runtime_version.cmi",
+    "asset_path": "browser_fs/static/cmis/jsoo_runtime__Runtime_version.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/label.cmi",
+    "asset_path": "browser_fs/static/cmis/label.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/lambda.cmi",
+    "asset_path": "browser_fs/static/cmis/lambda.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/language_extension.cmi",
+    "asset_path": "browser_fs/static/cmis/language_extension.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/language_extension_kernel.cmi",
+    "asset_path": "browser_fs/static/cmis/language_extension_kernel.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/lazy_backtrack.cmi",
+    "asset_path": "browser_fs/static/cmis/lazy_backtrack.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/ldd.cmi",
+    "asset_path": "browser_fs/static/cmis/ldd.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/ldd_intf.cmi",
+    "asset_path": "browser_fs/static/cmis/ldd_intf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/lexer.cmi",
+    "asset_path": "browser_fs/static/cmis/lexer.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/linear.cmi",
+    "asset_path": "browser_fs/static/cmis/linear.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/linear_format.cmi",
+    "asset_path": "browser_fs/static/cmis/linear_format.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/linear_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/linear_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/linkage_name.cmi",
+    "asset_path": "browser_fs/static/cmis/linkage_name.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/linkdeps.cmi",
+    "asset_path": "browser_fs/static/cmis/linkdeps.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/linkenv.cmi",
+    "asset_path": "browser_fs/static/cmis/linkenv.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/linker_script.cmi",
+    "asset_path": "browser_fs/static/cmis/linker_script.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/llvm_ir.cmi",
+    "asset_path": "browser_fs/static/cmis/llvm_ir.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/llvmize.cmi",
+    "asset_path": "browser_fs/static/cmis/llvmize.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/load_path.cmi",
+    "asset_path": "browser_fs/static/cmis/load_path.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/local_store.cmi",
+    "asset_path": "browser_fs/static/cmis/local_store.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/location.cmi",
+    "asset_path": "browser_fs/static/cmis/location.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/location_tracker_formatter.cmi",
+    "asset_path": "browser_fs/static/cmis/location_tracker_formatter.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/longident.cmi",
+    "asset_path": "browser_fs/static/cmis/longident.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/lru.cmi",
+    "asset_path": "browser_fs/static/cmis/lru.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/main_args.cmi",
+    "asset_path": "browser_fs/static/cmis/main_args.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/maindriver.cmi",
+    "asset_path": "browser_fs/static/cmis/maindriver.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/makedepend.cmi",
+    "asset_path": "browser_fs/static/cmis/makedepend.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/matching.cmi",
+    "asset_path": "browser_fs/static/cmis/matching.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/measure_object_files.cmi",
+    "asset_path": "browser_fs/static/cmis/measure_object_files.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/meta.cmi",
+    "asset_path": "browser_fs/static/cmis/meta.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/misc.cmi",
+    "asset_path": "browser_fs/static/cmis/misc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/mixed_block_shape.cmi",
+    "asset_path": "browser_fs/static/cmis/mixed_block_shape.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/mixed_product_bytes.cmi",
+    "asset_path": "browser_fs/static/cmis/mixed_product_bytes.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/mode.cmi",
+    "asset_path": "browser_fs/static/cmis/mode.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/mode_hint.cmi",
+    "asset_path": "browser_fs/static/cmis/mode_hint.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/mode_intf.cmi",
+    "asset_path": "browser_fs/static/cmis/mode_intf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/mtype.cmi",
+    "asset_path": "browser_fs/static/cmis/mtype.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/numbers.cmi",
+    "asset_path": "browser_fs/static/cmis/numbers.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/opcodes.cmi",
+    "asset_path": "browser_fs/static/cmis/opcodes.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/operation.cmi",
+    "asset_path": "browser_fs/static/cmis/operation.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/oprint.cmi",
+    "asset_path": "browser_fs/static/cmis/oprint.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/opt_fuel.cmi",
+    "asset_path": "browser_fs/static/cmis/opt_fuel.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/optcomp_intf.cmi",
+    "asset_path": "browser_fs/static/cmis/optcomp_intf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/optcompile.cmi",
+    "asset_path": "browser_fs/static/cmis/optcompile.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/opterrors.cmi",
+    "asset_path": "browser_fs/static/cmis/opterrors.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/optlibrarian.cmi",
+    "asset_path": "browser_fs/static/cmis/optlibrarian.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/optlink.cmi",
+    "asset_path": "browser_fs/static/cmis/optlink.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/optmaindriver.cmi",
+    "asset_path": "browser_fs/static/cmis/optmaindriver.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/optpackager.cmi",
+    "asset_path": "browser_fs/static/cmis/optpackager.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/out_type.cmi",
+    "asset_path": "browser_fs/static/cmis/out_type.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/outcometree.cmi",
+    "asset_path": "browser_fs/static/cmis/outcometree.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/oxcaml_args.cmi",
+    "asset_path": "browser_fs/static/cmis/oxcaml_args.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/oxcaml_flags.cmi",
+    "asset_path": "browser_fs/static/cmis/oxcaml_flags.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/parmatch.cmi",
+    "asset_path": "browser_fs/static/cmis/parmatch.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/parse.cmi",
+    "asset_path": "browser_fs/static/cmis/parse.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/parser.cmi",
+    "asset_path": "browser_fs/static/cmis/parser.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/parser_types.cmi",
+    "asset_path": "browser_fs/static/cmis/parser_types.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/parsetree.cmi",
+    "asset_path": "browser_fs/static/cmis/parsetree.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/partial_link.cmi",
+    "asset_path": "browser_fs/static/cmis/partial_link.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/partition.cmi",
+    "asset_path": "browser_fs/static/cmis/partition.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/partition_object_files.cmi",
+    "asset_path": "browser_fs/static/cmis/partition_object_files.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/path.cmi",
+    "asset_path": "browser_fs/static/cmis/path.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/patterns.cmi",
+    "asset_path": "browser_fs/static/cmis/patterns.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/peephole_optimize.cmi",
+    "asset_path": "browser_fs/static/cmis/peephole_optimize.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/peephole_rules.cmi",
+    "asset_path": "browser_fs/static/cmis/peephole_rules.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/peephole_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/peephole_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/persistent_env.cmi",
+    "asset_path": "browser_fs/static/cmis/persistent_env.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/pparse.cmi",
+    "asset_path": "browser_fs/static/cmis/pparse.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/pprintast.cmi",
+    "asset_path": "browser_fs/static/cmis/pprintast.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/predef.cmi",
+    "asset_path": "browser_fs/static/cmis/predef.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/primitive.cmi",
+    "asset_path": "browser_fs/static/cmis/primitive.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printast.cmi",
+    "asset_path": "browser_fs/static/cmis/printast.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printast_with_mappings.cmi",
+    "asset_path": "browser_fs/static/cmis/printast_with_mappings.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printblambda.cmi",
+    "asset_path": "browser_fs/static/cmis/printblambda.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printcfg.cmi",
+    "asset_path": "browser_fs/static/cmis/printcfg.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printcmm.cmi",
+    "asset_path": "browser_fs/static/cmis/printcmm.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printinstr.cmi",
+    "asset_path": "browser_fs/static/cmis/printinstr.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printlambda.cmi",
+    "asset_path": "browser_fs/static/cmis/printlambda.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printlinear.cmi",
+    "asset_path": "browser_fs/static/cmis/printlinear.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printoperation.cmi",
+    "asset_path": "browser_fs/static/cmis/printoperation.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printpat.cmi",
+    "asset_path": "browser_fs/static/cmis/printpat.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printreg.cmi",
+    "asset_path": "browser_fs/static/cmis/printreg.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printtyp.cmi",
+    "asset_path": "browser_fs/static/cmis/printtyp.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/printtyped.cmi",
+    "asset_path": "browser_fs/static/cmis/printtyped.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/priority_queue.cmi",
+    "asset_path": "browser_fs/static/cmis/priority_queue.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/probe_emission.cmi",
+    "asset_path": "browser_fs/static/cmis/probe_emission.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/proc.cmi",
+    "asset_path": "browser_fs/static/cmis/proc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/profile.cmi",
+    "asset_path": "browser_fs/static/cmis/profile.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/profile_counters_functions.cmi",
+    "asset_path": "browser_fs/static/cmis/profile_counters_functions.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/rawprinttyp.cmi",
+    "asset_path": "browser_fs/static/cmis/rawprinttyp.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/reg.cmi",
+    "asset_path": "browser_fs/static/cmis/reg.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/reg_availability_set.cmi",
+    "asset_path": "browser_fs/static/cmis/reg_availability_set.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/reg_with_debug_info.cmi",
+    "asset_path": "browser_fs/static/cmis/reg_with_debug_info.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_affinity.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_affinity.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_gi.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_gi.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_gi_state.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_gi_state.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_gi_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_gi_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_interf_graph.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_interf_graph.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_invariants.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_invariants.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_irc.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_irc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_irc_state.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_irc_state.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_irc_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_irc_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_ls.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_ls.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_ls_state.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_ls_state.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_ls_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_ls_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_rewrite.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_rewrite.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_split.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_split.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_split_state.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_split_state.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_split_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_split_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_stack_operands.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_stack_operands.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_stack_slots.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_stack_slots.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_substitution.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_substitution.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regalloc_validate.cmi",
+    "asset_path": "browser_fs/static/cmis/regalloc_validate.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regs.cmi",
+    "asset_path": "browser_fs/static/cmis/regs.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/regs_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/regs_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/relocatable_symbol_name.cmi",
+    "asset_path": "browser_fs/static/cmis/relocatable_symbol_name.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/relocation_entry.cmi",
+    "asset_path": "browser_fs/static/cmis/relocation_entry.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/relocation_table.cmi",
+    "asset_path": "browser_fs/static/cmis/relocation_table.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/rewrite_sections.cmi",
+    "asset_path": "browser_fs/static/cmis/rewrite_sections.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/runtime_shape.cmi",
+    "asset_path": "browser_fs/static/cmis/runtime_shape.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/runtimedef.cmi",
+    "asset_path": "browser_fs/static/cmis/runtimedef.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/runtimetags.cmi",
+    "asset_path": "browser_fs/static/cmis/runtimetags.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/scalar.cmi",
+    "asset_path": "browser_fs/static/cmis/scalar.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/section_table.cmi",
+    "asset_path": "browser_fs/static/cmis/section_table.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/select_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/select_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/shape.cmi",
+    "asset_path": "browser_fs/static/cmis/shape.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/shape_reduce.cmi",
+    "asset_path": "browser_fs/static/cmis/shape_reduce.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/signature_group.cmi",
+    "asset_path": "browser_fs/static/cmis/signature_group.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/signature_with_global_bindings.cmi",
+    "asset_path": "browser_fs/static/cmis/signature_with_global_bindings.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/simd.cmi",
+    "asset_path": "browser_fs/static/cmis/simd.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/simd_selection.cmi",
+    "asset_path": "browser_fs/static/cmis/simd_selection.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/simplif.cmi",
+    "asset_path": "browser_fs/static/cmis/simplif.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/simplify_terminator.cmi",
+    "asset_path": "browser_fs/static/cmis/simplify_terminator.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/slambda.cmi",
+    "asset_path": "browser_fs/static/cmis/slambda.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/slambda_fracture.cmi",
+    "asset_path": "browser_fs/static/cmis/slambda_fracture.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/slambdaeval.cmi",
+    "asset_path": "browser_fs/static/cmis/slambdaeval.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/slambdaident.cmi",
+    "asset_path": "browser_fs/static/cmis/slambdaident.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/solver.cmi",
+    "asset_path": "browser_fs/static/cmis/solver.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/solver_intf.cmi",
+    "asset_path": "browser_fs/static/cmis/solver_intf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stack_check.cmi",
+    "asset_path": "browser_fs/static/cmis/stack_check.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stack_class.cmi",
+    "asset_path": "browser_fs/static/cmis/stack_class.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stack_class_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/stack_class_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stack_reg_offset.cmi",
+    "asset_path": "browser_fs/static/cmis/stack_reg_offset.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/static_label.cmi",
+    "asset_path": "browser_fs/static/cmis/static_label.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/std_exit.cmi",
+    "asset_path": "browser_fs/static/cmis/std_exit.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Arg.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Arg.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Array.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Array.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__ArrayLabels.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__ArrayLabels.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Atomic.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Atomic.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Backoff.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Backoff.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Bigarray.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Bigarray.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Bool.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Bool.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Buffer.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Buffer.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Bytes.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Bytes.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__BytesLabels.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__BytesLabels.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Callback.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Callback.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Char.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Char.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Complex.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Complex.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Condition.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Condition.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Digest.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Digest.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Domain.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Domain.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Dynamic.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Dynamic.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Dynarray.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Dynarray.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Effect.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Effect.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Either.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Either.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Ephemeron.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Ephemeron.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Filename.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Filename.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Float.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Float.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Format.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Format.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Fun.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Fun.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Gc.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Gc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Hashtbl.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Hashtbl.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Iarray.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Iarray.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__In_channel.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__In_channel.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Int.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Int.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Int32.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Int32.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Int64.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Int64.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Lazy.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Lazy.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Lexing.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Lexing.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__List.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__List.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__ListLabels.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__ListLabels.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Map.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Map.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Marshal.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Marshal.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Modes.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Modes.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__MoreLabels.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__MoreLabels.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Mutex.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Mutex.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Nativeint.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Nativeint.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Obj.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Obj.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Oo.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Oo.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Option.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Option.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Out_channel.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Out_channel.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Pair.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Pair.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Parsing.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Parsing.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Pqueue.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Pqueue.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Printexc.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Printexc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Printf.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Printf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Queue.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Queue.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Quote.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Quote.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Random.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Random.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Repr.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Repr.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Result.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Result.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Scanf.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Scanf.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Semaphore.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Semaphore.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Seq.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Seq.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Set.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Set.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Stack.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Stack.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__StdLabels.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__StdLabels.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__String.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__String.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__StringLabels.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__StringLabels.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Sys.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Sys.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Type.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Type.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Uchar.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Uchar.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Unit.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Unit.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stdlib__Weak.cmi",
+    "asset_path": "browser_fs/static/cmis/stdlib__Weak.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/string_table.cmi",
+    "asset_path": "browser_fs/static/cmis/string_table.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/strongly_connected_components.cmi",
+    "asset_path": "browser_fs/static/cmis/strongly_connected_components.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/structured_mangling.cmi",
+    "asset_path": "browser_fs/static/cmis/structured_mangling.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/stypes.cmi",
+    "asset_path": "browser_fs/static/cmis/stypes.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/sub_cfg.cmi",
+    "asset_path": "browser_fs/static/cmis/sub_cfg.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/subst.cmi",
+    "asset_path": "browser_fs/static/cmis/subst.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/switch.cmi",
+    "asset_path": "browser_fs/static/cmis/switch.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/symbol.cmi",
+    "asset_path": "browser_fs/static/cmis/symbol.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/symbol_entry.cmi",
+    "asset_path": "browser_fs/static/cmis/symbol_entry.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/symbol_table.cmi",
+    "asset_path": "browser_fs/static/cmis/symbol_table.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/symtable.cmi",
+    "asset_path": "browser_fs/static/cmis/symtable.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/syntaxerr.cmi",
+    "asset_path": "browser_fs/static/cmis/syntaxerr.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/target_system.cmi",
+    "asset_path": "browser_fs/static/cmis/target_system.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/targetint.cmi",
+    "asset_path": "browser_fs/static/cmis/targetint.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/tast_iterator.cmi",
+    "asset_path": "browser_fs/static/cmis/tast_iterator.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/tast_mapper.cmi",
+    "asset_path": "browser_fs/static/cmis/tast_mapper.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/terminfo.cmi",
+    "asset_path": "browser_fs/static/cmis/terminfo.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/tmc.cmi",
+    "asset_path": "browser_fs/static/cmis/tmc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/topcommon.cmi",
+    "asset_path": "browser_fs/static/cmis/topcommon.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/topdirs.cmi",
+    "asset_path": "browser_fs/static/cmis/topdirs.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/topeval.cmi",
+    "asset_path": "browser_fs/static/cmis/topeval.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/toploop.cmi",
+    "asset_path": "browser_fs/static/cmis/toploop.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/topmain.cmi",
+    "asset_path": "browser_fs/static/cmis/topmain.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/topprinters.cmi",
+    "asset_path": "browser_fs/static/cmis/topprinters.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/topstart.cmi",
+    "asset_path": "browser_fs/static/cmis/topstart.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/trace.cmi",
+    "asset_path": "browser_fs/static/cmis/trace.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/transl_array_comprehension.cmi",
+    "asset_path": "browser_fs/static/cmis/transl_array_comprehension.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/transl_comprehension_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/transl_comprehension_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/transl_list_comprehension.cmi",
+    "asset_path": "browser_fs/static/cmis/transl_list_comprehension.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/translattribute.cmi",
+    "asset_path": "browser_fs/static/cmis/translattribute.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/translclass.cmi",
+    "asset_path": "browser_fs/static/cmis/translclass.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/translcore.cmi",
+    "asset_path": "browser_fs/static/cmis/translcore.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/translmod.cmi",
+    "asset_path": "browser_fs/static/cmis/translmod.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/translmode.cmi",
+    "asset_path": "browser_fs/static/cmis/translmode.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/translobj.cmi",
+    "asset_path": "browser_fs/static/cmis/translobj.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/translprim.cmi",
+    "asset_path": "browser_fs/static/cmis/translprim.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/translquote.cmi",
+    "asset_path": "browser_fs/static/cmis/translquote.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/type_shape.cmi",
+    "asset_path": "browser_fs/static/cmis/type_shape.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/typeclass.cmi",
+    "asset_path": "browser_fs/static/cmis/typeclass.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/typecore.cmi",
+    "asset_path": "browser_fs/static/cmis/typecore.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/typedecl.cmi",
+    "asset_path": "browser_fs/static/cmis/typedecl.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/typedecl_properties.cmi",
+    "asset_path": "browser_fs/static/cmis/typedecl_properties.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/typedecl_separability.cmi",
+    "asset_path": "browser_fs/static/cmis/typedecl_separability.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/typedecl_variance.cmi",
+    "asset_path": "browser_fs/static/cmis/typedecl_variance.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/typedtree.cmi",
+    "asset_path": "browser_fs/static/cmis/typedtree.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/typemod.cmi",
+    "asset_path": "browser_fs/static/cmis/typemod.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/typemode.cmi",
+    "asset_path": "browser_fs/static/cmis/typemode.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/typeopt.cmi",
+    "asset_path": "browser_fs/static/cmis/typeopt.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/types.cmi",
+    "asset_path": "browser_fs/static/cmis/types.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/typetexp.cmi",
+    "asset_path": "browser_fs/static/cmis/typetexp.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/uniqueness_analysis.cmi",
+    "asset_path": "browser_fs/static/cmis/uniqueness_analysis.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/unit_info.cmi",
+    "asset_path": "browser_fs/static/cmis/unit_info.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/untypeast.cmi",
+    "asset_path": "browser_fs/static/cmis/untypeast.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/value_rec_check.cmi",
+    "asset_path": "browser_fs/static/cmis/value_rec_check.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/value_rec_compiler.cmi",
+    "asset_path": "browser_fs/static/cmis/value_rec_compiler.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/value_rec_types.cmi",
+    "asset_path": "browser_fs/static/cmis/value_rec_types.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/vectorize.cmi",
+    "asset_path": "browser_fs/static/cmis/vectorize.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/vectorize_specific.cmi",
+    "asset_path": "browser_fs/static/cmis/vectorize_specific.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/vectorize_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/vectorize_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/vicuna_traverse_typed_tree.cmi",
+    "asset_path": "browser_fs/static/cmis/vicuna_traverse_typed_tree.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/vicuna_value_shapes.cmi",
+    "asset_path": "browser_fs/static/cmis/vicuna_value_shapes.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/warnings.cmi",
+    "asset_path": "browser_fs/static/cmis/warnings.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/x86_ast.cmi",
+    "asset_path": "browser_fs/static/cmis/x86_ast.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/x86_ast_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/x86_ast_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/x86_binary_emitter.cmi",
+    "asset_path": "browser_fs/static/cmis/x86_binary_emitter.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/x86_dsl.cmi",
+    "asset_path": "browser_fs/static/cmis/x86_dsl.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/x86_gas.cmi",
+    "asset_path": "browser_fs/static/cmis/x86_gas.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/x86_masm.cmi",
+    "asset_path": "browser_fs/static/cmis/x86_masm.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/x86_peephole_optimize.cmi",
+    "asset_path": "browser_fs/static/cmis/x86_peephole_optimize.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/x86_peephole_rules.cmi",
+    "asset_path": "browser_fs/static/cmis/x86_peephole_rules.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/x86_peephole_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/x86_peephole_utils.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/x86_proc.cmi",
+    "asset_path": "browser_fs/static/cmis/x86_proc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/x86_section.cmi",
+    "asset_path": "browser_fs/static/cmis/x86_section.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/zero_alloc.cmi",
+    "asset_path": "browser_fs/static/cmis/zero_alloc.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/zero_alloc_annotations.cmi",
+    "asset_path": "browser_fs/static/cmis/zero_alloc_annotations.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/zero_alloc_checker.cmi",
+    "asset_path": "browser_fs/static/cmis/zero_alloc_checker.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/zero_alloc_info.cmi",
+    "asset_path": "browser_fs/static/cmis/zero_alloc_info.cmi.gz",
+    "compression": "gzip"
+  },
+  {
+    "fs_path": "/static/cmis/zero_alloc_utils.cmi",
+    "asset_path": "browser_fs/static/cmis/zero_alloc_utils.cmi.gz",
+    "compression": "gzip"
+  }
+]
