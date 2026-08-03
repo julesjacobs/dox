@@ -516,6 +516,10 @@ let collaboration_flush_response context body =
                ]))
 
 let ai_collaboration_response context =
+  (* Two kinds of agent read this. One runs on the Dox host and can edit
+     projectRoot directly; one only has the URL. The filesystem instructions are
+     useless to the second kind - projectRoot does not exist on its machine - so
+     describe both paths and say which is which. *)
   json
     (`Assoc
        [
@@ -528,6 +532,8 @@ let ai_collaboration_response context =
                `String
                  "Dox mirrors live collaborative pages into ordinary Git working-tree files.";
                `String
+                 "If you cannot read projectRoot, you are not on the Dox host: use the HTTP API under \"api\" below and ignore the filesystem instructions.";
+               `String
                  "Read the token from GET /api/session, then POST {} as application/json to /api/collaboration/flush with X-Dox-Token before reading files.";
                `String
                  "Edit .ml.md files and .dox-order normally, then use Git diff and commit normally.";
@@ -538,6 +544,73 @@ let ai_collaboration_response context =
                `String
                  "Do not edit .dox/collaboration; it stores ignored CRDT recovery state.";
              ] );
+         ( "api",
+           `Assoc
+             [
+               ( "notes",
+                 `List
+                   [
+                     `String
+                       "Send X-Dox-Token from GET /api/session on every mutating request, and keep the Host and Origin of the URL you were given.";
+                     `String
+                       "baseProjectVersion is the \"version\" field of GET /api/project; a stale value is rejected with 409, so re-read it and retry.";
+                     `String
+                       "Pages created this way are mirrored into the Git working tree by Dox itself, so no filesystem access is needed.";
+                     `String
+                       "Content-Length is required; chunked request bodies are not read.";
+                   ] );
+               ( "createPage",
+                 `Assoc
+                   [
+                     ("method", `String "POST");
+                     ("path", `String "/api/page");
+                     ( "body",
+                       `Assoc
+                         [
+                           ("module", `String "<module path, e.g. Notes.Ideas>");
+                           ("baseProjectVersion", `String "<from /api/project>");
+                         ] );
+                   ] );
+               ( "createPages",
+                 `Assoc
+                   [
+                     ("method", `String "POST");
+                     ("path", `String "/api/pages");
+                     ( "body",
+                       `Assoc
+                         [
+                           ("modules", `String "<list of module paths>");
+                           ("baseProjectVersion", `String "<from /api/project>");
+                         ] );
+                   ] );
+               ( "writePage",
+                 `Assoc
+                   [
+                     ("method", `String "PUT");
+                     ("path", `String "/api/page/source");
+                     ( "body",
+                       `Assoc
+                         [
+                           ("module", `String "<module path>");
+                           ("source", `String "<full page source>");
+                           ( "expectedDigest",
+                             `String "<current digest, from /api/page>" );
+                           ("editRevision", `String "<integer>");
+                         ] );
+                   ] );
+               ( "readPage",
+                 `Assoc
+                   [
+                     ("method", `String "GET");
+                     ("path", `String "/api/page?module=<module path>");
+                   ] );
+               ( "listPages",
+                 `Assoc
+                   [
+                     ("method", `String "GET"); ("path", `String "/api/project");
+                   ] );
+             ] );
+         ("executionEngine", `String (if context.browser_execution_only then "browser" else "server"));
          ("flushEndpoint", `String "/api/collaboration/flush");
          ("sessionEndpoint", `String "/api/session");
        ])
