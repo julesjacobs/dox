@@ -37,6 +37,10 @@ import {
   keymap,
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
+import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
+import { IndexeddbPersistence } from "y-indexeddb";
+import { WebsocketProvider } from "y-websocket";
+import * as Y from "yjs";
 import { createDebugNavigationGate } from "./debug-navigation.js";
 import {
   executionAnnotationColumn,
@@ -63,6 +67,113 @@ const colors = {
 
 const setEditorMode = StateEffect.define();
 const setDebugProjection = StateEffect.define();
+
+function collaborationIdentity() {
+  const key = "dox:v1:collaboration-user";
+  try {
+    const existing = JSON.parse(localStorage.getItem(key));
+    if (existing?.name && existing?.color) return existing;
+    const names = ["Aster", "Birch", "Cedar", "Dahlia", "Elm", "Fern", "Grove", "Hazel"];
+    const colors = ["#4f776d", "#6d6683", "#8a674f", "#527187", "#7d5d6b", "#68764d"];
+    const identity = {
+      name: names[Math.floor(Math.random() * names.length)],
+      color: colors[Math.floor(Math.random() * colors.length)],
+    };
+    localStorage.setItem(key, JSON.stringify(identity));
+    return identity;
+  } catch {
+    return { name: "Collaborator", color: "#4f776d" };
+  }
+}
+
+export async function connectPageCollaboration({
+  id,
+  port,
+  token,
+  projectRoot,
+  onMeta,
+  onPresence,
+  onStatus,
+}) {
+  const doc = new Y.Doc();
+  const text = doc.getText("source");
+  const meta = doc.getMap("dox:meta");
+  const persistence = new IndexeddbPersistence(
+    `dox:${projectRoot}:${id}`,
+    doc,
+  );
+  const protocol = location.protocol === "https:" ? "wss" : "ws";
+  const provider = new WebsocketProvider(
+    `${protocol}://${location.hostname}:${port}/document`,
+    id,
+    doc,
+    { params: { token }, disableBc: false },
+  );
+  const identity = collaborationIdentity();
+  provider.awareness.setLocalStateField("user", identity);
+  const emitMeta = () => onMeta?.(Object.fromEntries(meta.entries()));
+  const emitPresence = () => {
+    const peers = Array.from(provider.awareness.getStates().entries())
+      .filter(([clientId]) => clientId !== doc.clientID)
+      .map(([clientId, value]) => ({ clientId, ...(value.user || {}) }));
+    onPresence?.(peers);
+  };
+  meta.observe(emitMeta);
+  provider.awareness.on("change", emitPresence);
+  provider.on("status", ({ status }) => onStatus?.(status));
+  try {
+    await Promise.all([
+      persistence.whenSynced,
+      new Promise((resolve, reject) => {
+        if (provider.synced) return resolve();
+        const timeout = setTimeout(
+          () => reject(new Error("Collaboration service did not finish syncing.")),
+          8000,
+        );
+        provider.once("sync", (synced) => {
+          if (!synced) return;
+          clearTimeout(timeout);
+          resolve();
+        });
+      }),
+    ]);
+  } catch (error) {
+    meta.unobserve(emitMeta);
+    provider.awareness.off("change", emitPresence);
+    provider.destroy();
+    persistence.destroy();
+    doc.destroy();
+    throw error;
+  }
+  emitMeta();
+  emitPresence();
+  return {
+    id,
+    doc,
+    text,
+    meta,
+    provider,
+    persistence,
+    awareness: provider.awareness,
+    undoManager: new Y.UndoManager(text),
+    destroy() {
+      meta.unobserve(emitMeta);
+      provider.awareness.off("change", emitPresence);
+      provider.destroy();
+      persistence.destroy();
+      doc.destroy();
+    },
+  };
+}
+
+export function encodeCollaborationUpdate(collaboration) {
+  const bytes = Y.encodeStateAsUpdate(collaboration.doc);
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
 
 function debugAnnotationKey(item, sourceLine, order) {
   return [
@@ -2020,6 +2131,7 @@ function mountEditor(
     sourceMode = "literate",
     wikiModules = [],
     onWikiNavigate,
+    collaboration = null,
   },
 ) {
   if (editorState) {
@@ -2037,7 +2149,11 @@ function mountEditor(
     return view;
   }
   const extensions = [
-    history(),
+    ...(collaboration
+      ? [yCollab(collaboration.text, collaboration.awareness, {
+          undoManager: collaboration.undoManager,
+        })]
+      : [history()]),
     drawSelection(),
     dropCursor(),
     highlightActiveLine(),
@@ -2103,7 +2219,7 @@ function mountEditor(
     ])),
     keymap.of([
       ...defaultKeymap,
-      ...historyKeymap,
+      ...(collaboration ? yUndoManagerKeymap : historyKeymap),
     ]),
     embeddedTheme,
     highlightStyle,

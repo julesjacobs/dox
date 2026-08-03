@@ -9,7 +9,16 @@ type context = {
   project : Project.t;
   assets : string;
   port : int;
+  collaboration_port : int;
   session_token : string;
+}
+
+type collaboration_process = {
+  pid : int;
+  output : in_channel;
+  watchdog : out_channel;
+  port : int;
+  alive : bool ref;
 }
 
 let status_text = function
@@ -138,7 +147,7 @@ let read_request channel =
                     Ok (Some (method_, target, headers, body))
                   with End_of_file -> Error (400, "Truncated request body.")))
 
-let send_response channel response =
+let send_response context channel response =
   Printf.fprintf channel "HTTP/1.1 %d %s\r\n" response.status
     (status_text response.status);
   Printf.fprintf channel "Content-Type: %s\r\n" response.content_type;
@@ -146,7 +155,9 @@ let send_response channel response =
   Printf.fprintf channel
     "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-eval'; style-src \
      'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'; \
-     connect-src 'self'; base-uri 'none'; form-action 'self'\r\n";
+     connect-src 'self' ws://127.0.0.1:%d ws://localhost:%d; base-uri 'none'; \
+     form-action 'self'\r\n"
+    context.collaboration_port context.collaboration_port;
   Printf.fprintf channel "X-Content-Type-Options: nosniff\r\n";
   Printf.fprintf channel "Referrer-Policy: no-referrer\r\n";
   Printf.fprintf channel "Cache-Control: no-store\r\n";
@@ -183,13 +194,115 @@ let is_json headers =
       Util.starts_with ~prefix:"application/json" (String.lowercase_ascii value)
   | None -> false
 
-let expected_hosts context =
+let collaboration_request context path value =
+  let socket = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect
+    ~finally:(fun () -> try Unix.close socket with Unix.Unix_error _ -> ())
+    (fun () ->
+      try
+        Unix.setsockopt_float socket Unix.SO_RCVTIMEO 5.;
+        Unix.setsockopt_float socket Unix.SO_SNDTIMEO 5.;
+        Unix.connect socket
+          (Unix.ADDR_INET
+             (Unix.inet_addr_loopback, context.collaboration_port));
+        let input = Unix.in_channel_of_descr (Unix.dup socket) in
+        let output = Unix.out_channel_of_descr (Unix.dup socket) in
+        let body = Yojson.Safe.to_string value in
+        Printf.fprintf output "POST %s HTTP/1.1\r\n" path;
+        Printf.fprintf output "Host: 127.0.0.1:%d\r\n"
+          context.collaboration_port;
+        Printf.fprintf output "Content-Type: application/json\r\n";
+        Printf.fprintf output "X-Dox-Token: %s\r\n" context.session_token;
+        Printf.fprintf output "Content-Length: %d\r\n" (String.length body);
+        Printf.fprintf output "Connection: close\r\n\r\n%s" body;
+        flush output;
+        let line () =
+          match input_line input with
+          | value ->
+              if Util.ends_with ~suffix:"\r" value then
+                String.sub value 0 (String.length value - 1)
+              else value
+          | exception End_of_file -> ""
+        in
+        let status_line = line () in
+        let status =
+          match String.split_on_char ' ' status_line with
+          | _ :: value :: _ -> Option.value ~default:0 (int_of_string_opt value)
+          | _ -> 0
+        in
+        let rec headers content_length =
+          match line () with
+          | "" -> content_length
+          | header_line ->
+              let key, value = Util.split_once ':' header_line in
+              let content_length =
+                match value with
+                | Some value
+                  when String.equal
+                         (String.lowercase_ascii (String.trim key))
+                         "content-length" ->
+                    Option.value ~default:content_length
+                      (int_of_string_opt (String.trim value))
+                | _ -> content_length
+              in
+              headers content_length
+        in
+        let content_length = headers 0 in
+        if content_length < 0 || content_length > 16_000_000 then
+          failwith "The collaboration response was too large.";
+        let response_body =
+          if content_length = 0 then ""
+          else really_input_string input content_length
+        in
+        close_in_noerr input;
+        close_out_noerr output;
+        if status >= 200 && status < 300 then
+          try Ok (Yojson.Safe.from_string response_body)
+          with Yojson.Json_error message ->
+            Error ("Invalid collaboration response: " ^ message)
+        else
+          let message =
+            try
+              Yojson.Safe.from_string response_body
+              |> Yojson.Safe.Util.member "error"
+              |> Yojson.Safe.Util.to_string
+            with _ -> response_body
+          in
+          Error
+            (Printf.sprintf "Collaboration request failed (%d): %s" status
+               message)
+      with Unix.Unix_error (error, operation, _) ->
+        Error
+          (Printf.sprintf "Collaboration service failed during %s: %s"
+             operation (Unix.error_message error))
+      | exception_ ->
+          Error
+            ("Collaboration service failed: " ^ Printexc.to_string exception_))
+
+let require_collaboration context path value continuation =
+  match collaboration_request context path value with
+  | Ok response -> continuation response
+  | Error message -> error ~status:503 message
+
+let rec collaboration_request_retry ?(attempts = 3) context path value =
+  match collaboration_request context path value with
+  | Ok _ as result -> result
+  | Error _ as result when attempts <= 1 -> result
+  | Error _ ->
+      ignore (Unix.select [] [] [] 0.05);
+      collaboration_request_retry ~attempts:(attempts - 1) context path value
+
+let resume_collaboration context lease =
+  collaboration_request_retry context "/internal/resume"
+    (`Assoc [ ("lease", `String lease) ])
+
+let expected_hosts (context : context) =
   [
     Printf.sprintf "127.0.0.1:%d" context.port;
     Printf.sprintf "localhost:%d" context.port;
   ]
 
-let same_origin context headers =
+let same_origin (context : context) headers =
   let host_ok =
     match header headers "host" with
     | Some host ->
@@ -206,7 +319,7 @@ let same_origin context headers =
   in
   host_ok && origin_ok
 
-let authorized context headers =
+let authorized (context : context) headers =
   same_origin context headers
   &&
   match header headers "x-dox-token" with
@@ -301,6 +414,81 @@ let save_page_response context body =
                  ("project", Project.snapshot_to_json context.project snapshot);
                ]))
 
+let collaboration_open_response context body =
+  let open Util in
+  match
+    let* request = json_body body in
+    let* module_path = string_member "module" request in
+    Ok module_path
+  with
+  | Error message -> error message
+  | Ok module_path -> (
+      match Project.snapshot context.project with
+      | Error project_error_ -> project_error project_error_
+      | Ok snapshot -> (
+          let path = Module_path.source_path module_path in
+          match Project.document snapshot path with
+          | Error project_error_ -> project_error project_error_
+          | Ok document ->
+              require_collaboration context "/internal/open"
+                (`Assoc
+                   [
+                     ("module", `String module_path);
+                     ("path", `String path);
+                     ("source", `String document.source);
+                     ("digest", `String document.version);
+                     ("projectVersion", `String snapshot.version);
+                   ])
+                (fun collaboration -> json collaboration)))
+
+let collaboration_flush_response context body =
+  match json_body body with
+  | Error message -> error message
+  | Ok request ->
+  require_collaboration context "/internal/flush" request (fun value ->
+      match Project.snapshot context.project with
+      | Error project_error_ -> project_error project_error_
+      | Ok snapshot ->
+          let documents = Yojson.Safe.Util.member "documents" value in
+          let acknowledged_sources =
+            Yojson.Safe.Util.member "acknowledgedSources" value
+          in
+          json
+            (`Assoc
+               [
+                 ("documents", documents);
+                 ("acknowledgedSources", acknowledged_sources);
+                 ("project", Project.snapshot_to_json context.project snapshot);
+                 ("projectVersion", `String snapshot.version);
+               ]))
+
+let ai_collaboration_response context =
+  json
+    (`Assoc
+       [
+         ("name", `String "Dox");
+         ("format", `String ".ml.md");
+         ("projectRoot", `String context.project.root);
+         ( "instructions",
+           `List
+             [
+               `String
+                 "Dox mirrors live collaborative pages into ordinary Git working-tree files.";
+               `String
+                 "Read the token from GET /api/session, then POST {} as application/json to /api/collaboration/flush with X-Dox-Token before reading files.";
+               `String
+                 "Edit .ml.md files and .dox-order normally, then use Git diff and commit normally.";
+               `String
+                 "Dox ingests working-tree edits into open collaborative pages. Resolve any inserted Git-style conflict markers before committing.";
+               `String
+                 "After filesystem edits, POST the flush again and require a 2xx response before inspecting git diff or committing.";
+               `String
+                 "Do not edit .dox/collaboration; it stores ignored CRDT recovery state.";
+             ] );
+         ("flushEndpoint", `String "/api/collaboration/flush");
+         ("sessionEndpoint", `String "/api/session");
+       ])
+
 let create_page_response context body =
   let open Util in
   let parsed =
@@ -386,22 +574,61 @@ let delete_pages_response context body =
   in
   match parsed with
   | Error message -> error message
-  | Ok (module_paths, page_order, base_project_version) -> (
-      match
-        Project.delete_pages ?page_order context.project ~module_paths
-          ~base_project_version ~principal:"workspace-user"
-      with
-      | Error project_error_ -> project_error project_error_
-      | Ok (snapshot, trash_path) ->
-          json
-            (`Assoc
-               [
-                 ( "deleted",
-                   `List (List.map (fun value -> `String value) module_paths) );
-                 ("trashPath", `String trash_path);
-                 ("project", Project.snapshot_to_json context.project snapshot);
-                 ("projectVersion", `String snapshot.version);
-               ]))
+  | Ok (module_paths, page_order, base_project_version) ->
+      require_collaboration context "/internal/pause" (`Assoc []) (fun pause ->
+          let lease = Yojson.Safe.Util.member "lease" pause |> Yojson.Safe.Util.to_string in
+          let resumed = ref false in
+          let resume () =
+            let result = resume_collaboration context lease in
+            if Result.is_ok result then resumed := true;
+            result
+          in
+          Fun.protect
+            ~finally:(fun () -> if not !resumed then ignore (resume ()))
+            (fun () ->
+              match
+                Project.delete_pages ?page_order context.project ~module_paths
+                  ~base_project_version ~principal:"workspace-user"
+              with
+              | Error project_error_ ->
+                  ignore (resume ());
+                  project_error project_error_
+              | Ok (snapshot, trash_path) ->
+              let paths = List.map Module_path.source_path module_paths in
+              let collaboration_warning =
+                match
+                  collaboration_request_retry context "/internal/tombstone"
+                    (`Assoc
+                       [
+                         ("lease", `String lease);
+                         ( "paths",
+                           `List
+                             (List.map (fun path -> `String path) paths) );
+                       ])
+                with
+                | Ok _ -> (
+                    match resume () with
+                    | Ok _ -> []
+                    | Error message ->
+                        [ ("collaborationWarning", `String message) ])
+                | Error message -> [ ("collaborationWarning", `String message) ]
+              in
+              if collaboration_warning <> [] then
+                ignore (resume ());
+              json
+                (`Assoc
+                   ([
+                         ( "deleted",
+                           `List
+                             (List.map
+                                (fun value -> `String value)
+                                module_paths) );
+                         ("trashPath", `String trash_path);
+                         ( "project",
+                           Project.snapshot_to_json context.project snapshot );
+                         ("projectVersion", `String snapshot.version);
+                       ]
+                   @ collaboration_warning))))
 
 let page_order_response context body =
   let open Util in
@@ -511,22 +738,82 @@ let refactor_apply_response context body =
     Ok (project_version, preview_id, renames, page_order)
   with
   | Error message -> error message
-  | Ok (project_version, preview_id, renames, page_order) -> (
-      match
-        Project.apply_module_refactor ?page_order context.project
-          ~expected_project_version:project_version
-          ~expected_preview_id:preview_id renames
-      with
-      | Error project_error_ -> project_error project_error_
-      | Ok (preview, snapshot, mapping) ->
-          json
-            (`Assoc
-               [
-                 ("preview", preview);
-                 ("mapping", mapping);
-                 ("project", Project.snapshot_to_json context.project snapshot);
-                 ("projectVersion", `String snapshot.version);
-               ]))
+  | Ok (project_version, preview_id, renames, page_order) ->
+      require_collaboration context "/internal/pause" (`Assoc []) (fun pause ->
+          let lease = Yojson.Safe.Util.member "lease" pause |> Yojson.Safe.Util.to_string in
+          let resumed = ref false in
+          let resume () =
+            let result = resume_collaboration context lease in
+            if Result.is_ok result then resumed := true;
+            result
+          in
+          Fun.protect
+            ~finally:(fun () -> if not !resumed then ignore (resume ()))
+            (fun () ->
+              match
+                Project.apply_module_refactor ?page_order context.project
+                  ~expected_project_version:project_version
+                  ~expected_preview_id:preview_id renames
+              with
+              | Error project_error_ ->
+                  ignore (resume ());
+                  project_error project_error_
+              | Ok (preview, snapshot, mapping) ->
+              let collaboration_renames =
+                match mapping with
+                | `List values ->
+                    `List
+                      (List.filter_map
+                         (fun value ->
+                           match
+                             ( Yojson.Safe.Util.member "before" value,
+                               Yojson.Safe.Util.member "after" value )
+                           with
+                           | `String before, `String after ->
+                               Some
+                                 (`Assoc
+                                    [
+                                      ( "beforePath",
+                                        `String
+                                          (Module_path.source_path before) );
+                                      ( "afterPath",
+                                        `String
+                                          (Module_path.source_path after) );
+                                      ("beforeModule", `String before);
+                                      ("afterModule", `String after);
+                                    ])
+                           | _ -> None)
+                         values)
+                | _ -> `List []
+              in
+              let collaboration_warning =
+                match
+                  collaboration_request_retry context "/internal/rebind"
+                    (`Assoc
+                       [
+                         ("lease", `String lease);
+                         ("renames", collaboration_renames);
+                       ])
+                with
+                | Ok _ -> (
+                    match resume () with
+                    | Ok _ -> []
+                    | Error message ->
+                        [ ("collaborationWarning", `String message) ])
+                | Error message -> [ ("collaborationWarning", `String message) ]
+              in
+              if collaboration_warning <> [] then
+                ignore (resume ());
+              json
+                (`Assoc
+                   ([
+                         ("preview", preview);
+                         ("mapping", mapping);
+                         ( "project",
+                           Project.snapshot_to_json context.project snapshot );
+                         ("projectVersion", `String snapshot.version);
+                       ]
+                   @ collaboration_warning))))
 
 let refactor_rewrite_response context body =
   let open Util in
@@ -1054,8 +1341,10 @@ let route context ~cancelled method_ target headers body =
                ("token", `String context.session_token);
                ("trust", `String "local-launch");
                ("projectRoot", `String context.project.root);
+               ("collaborationPort", `Int context.collaboration_port);
              ])
       else error ~status:403 "Cross-origin workspace request rejected."
+  | "GET", "/.well-known/dox-ai.json" -> ai_collaboration_response context
   | "GET", "/api/project" -> (
       match Project.to_json context.project with
       | Ok project -> json project
@@ -1096,6 +1385,12 @@ let route context ~cancelled method_ target headers body =
   | "PUT", "/api/page/source" ->
       require_active_request context headers (fun () ->
           save_page_response context body)
+  | "POST", "/api/collaboration/open" ->
+      require_active_request context headers (fun () ->
+          collaboration_open_response context body)
+  | "POST", "/api/collaboration/flush" ->
+      require_active_request context headers (fun () ->
+          collaboration_flush_response context body)
   | "POST", "/api/document" ->
       require_active_request context headers (fun () ->
           create_response context body)
@@ -1150,7 +1445,8 @@ let handle_client context descriptor =
       close_out_noerr output)
     (fun () ->
       match read_request input with
-      | Error (status, message) -> send_response output (error ~status message)
+      | Error (status, message) ->
+          send_response context output (error ~status message)
       | Ok None -> ()
       | Ok (Some (method_, target, headers, body)) ->
           let response =
@@ -1164,7 +1460,7 @@ let handle_client context descriptor =
                 error ~status:500
                   ("Internal error: " ^ Printexc.to_string exception_)
           in
-          send_response output response)
+          send_response context output response)
 
 let reap_workers workers =
   workers
@@ -1178,6 +1474,169 @@ let reap_workers workers =
 let accept_and_reap_workers socket workers =
   let client, address = Unix.accept socket in
   (client, address, reap_workers workers)
+
+let terminate_process ?(timeout = 2.) pid =
+  (try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ());
+  let deadline = Unix.gettimeofday () +. timeout in
+  let rec wait () =
+    match Unix.waitpid [ Unix.WNOHANG ] pid with
+    | 0, _ when Unix.gettimeofday () < deadline ->
+        ignore (Unix.select [] [] [] 0.05);
+        wait ()
+    | 0, _ ->
+        (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+        (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ())
+    | _ -> ()
+    | exception Unix.Unix_error _ -> ()
+  in
+  wait ()
+
+let start_collaboration ~root ~assets ~dox_port ~token =
+  let script =
+    Filename.concat (Filename.dirname assets) "collaboration/server.mjs"
+  in
+  if not (Sys.file_exists script) then
+    failwith ("Could not find the collaboration service at " ^ script);
+  let read_fd, write_fd = Unix.pipe ~cloexec:true () in
+  let watchdog_read, watchdog_write = Unix.pipe ~cloexec:true () in
+  let environment =
+    Array.append (Unix.environment ()) [| "DOX_COLLAB_TOKEN=" ^ token |]
+  in
+  let arguments =
+    [|
+      "node";
+      script;
+      "--root";
+      root;
+      "--port";
+      "0";
+      "--dox-port";
+      string_of_int dox_port;
+      "--origin";
+      Printf.sprintf "http://127.0.0.1:%d" dox_port;
+      "--origin";
+      Printf.sprintf "http://localhost:%d" dox_port;
+    |]
+  in
+  let pid =
+    try
+      Unix.create_process_env "node" arguments environment watchdog_read
+        write_fd Unix.stderr
+    with error ->
+      Unix.close read_fd;
+      Unix.close write_fd;
+      Unix.close watchdog_read;
+      Unix.close watchdog_write;
+      raise error
+  in
+  Unix.close write_fd;
+  Unix.close watchdog_read;
+  let output = Unix.in_channel_of_descr read_fd in
+  try
+    let ready, _, _ = Unix.select [ read_fd ] [] [] 8. in
+    if ready = [] then
+      failwith "The collaboration service did not start within eight seconds.";
+    let ready = Yojson.Safe.from_string (input_line output) in
+    let is_ready =
+      match Yojson.Safe.Util.member "ready" ready with `Bool value -> value | _ -> false
+    in
+    let collaboration_port = Yojson.Safe.Util.member "port" ready |> Yojson.Safe.Util.to_int in
+    if not is_ready then failwith "The collaboration service did not become ready.";
+    {
+      pid;
+      output;
+      watchdog = Unix.out_channel_of_descr watchdog_write;
+      port = collaboration_port;
+      alive = ref true;
+    }
+  with error ->
+    close_in_noerr output;
+    Unix.close watchdog_write;
+    terminate_process pid;
+    raise error
+
+let stop_collaboration collaboration =
+  close_in_noerr collaboration.output;
+  close_out_noerr collaboration.watchdog;
+  if !(collaboration.alive) then terminate_process collaboration.pid;
+  collaboration.alive := false
+
+let collaboration_alive collaboration =
+  if not !(collaboration.alive) then false
+  else
+    match Unix.waitpid [ Unix.WNOHANG ] collaboration.pid with
+    | 0, _ -> true
+    | _ ->
+        collaboration.alive := false;
+        false
+    | exception Unix.Unix_error _ ->
+        collaboration.alive := false;
+        false
+
+let flush_collaboration_before_shutdown context socket collaboration =
+  if collaboration_alive collaboration then
+    match Unix.fork () with
+    | 0 ->
+        Sys.set_signal Sys.sigint Sys.Signal_ignore;
+        Sys.set_signal Sys.sigterm Sys.Signal_ignore;
+        Unix.close socket;
+        close_in_noerr collaboration.output;
+        close_out_noerr collaboration.watchdog;
+        let status =
+          match collaboration_request context "/internal/flush" (`Assoc []) with
+          | Ok _ -> 0
+          | Error message ->
+              prerr_endline ("Could not flush live edits during shutdown: " ^ message);
+              1
+        in
+        Unix._exit status
+    | flusher ->
+        let deadline = Unix.gettimeofday () +. 5. in
+        let handlers = ref [] in
+        let reap_handlers () = handlers := reap_workers !handlers in
+        let stop_handlers () =
+          List.iter (fun pid -> terminate_process ~timeout:0.2 pid) !handlers;
+          handlers := []
+        in
+        let rec pump () =
+          reap_handlers ();
+          match Unix.waitpid [ Unix.WNOHANG ] flusher with
+          | pid, _ when pid <> 0 -> stop_handlers ()
+          | _ when Unix.gettimeofday () >= deadline ->
+              terminate_process ~timeout:0.5 flusher;
+              stop_handlers ();
+              prerr_endline
+                "Timed out flushing live edits during shutdown; the durable collaboration snapshot will be recovered on restart."
+          | _ ->
+              let ready =
+                try
+                  let ready, _, _ = Unix.select [ socket ] [] [] 0.05 in
+                  ready
+                with Unix.Unix_error (Unix.EINTR, _, _) -> []
+              in
+              if ready <> [] then (
+                let client, _ = Unix.accept socket in
+                Unix.setsockopt_float client Unix.SO_RCVTIMEO 5.;
+                Unix.setsockopt_float client Unix.SO_SNDTIMEO 5.;
+                match Unix.fork () with
+                | 0 ->
+                    Sys.set_signal Sys.sigint Sys.Signal_ignore;
+                    Sys.set_signal Sys.sigterm Sys.Signal_ignore;
+                    Unix.close socket;
+                    close_in_noerr collaboration.output;
+                    close_out_noerr collaboration.watchdog;
+                    (try handle_client context client
+                     with exception_ ->
+                       prerr_endline
+                         ("Shutdown flush request failed: "
+                         ^ Printexc.to_string exception_));
+                    Unix._exit 0
+                | pid ->
+                    Unix.close client;
+                    handlers := pid :: !handlers);
+              pump ()
+        in
+        pump ()
 
 let serve ~root ~assets ~port =
   let project = Project.create root in
@@ -1197,9 +1656,7 @@ let serve ~root ~assets ~port =
           ^ Project.error_message error)
   in
   let assets = try Unix.realpath assets with Unix.Unix_error _ -> assets in
-  let context =
-    { project; assets; port; session_token = Util.random_token () }
-  in
+  let session_token = Util.random_token () in
   let coordinator =
     match
       Compiler_workspace.start_coordinator ~root:project.root
@@ -1222,6 +1679,24 @@ let serve ~root ~assets ~port =
       Compiler_workspace.stop_coordinator !coordinator_ref;
       raise error
   in
+  let collaboration =
+    try
+      start_collaboration ~root:project.root ~assets ~dox_port:port
+        ~token:session_token
+    with error ->
+      Unix.close socket;
+      Compiler_workspace.stop_coordinator !coordinator_ref;
+      raise error
+  in
+  let context =
+    {
+      project;
+      assets;
+      port;
+      collaboration_port = collaboration.port;
+      session_token;
+    }
+  in
   Sys.set_signal Sys.sigchld Sys.Signal_default;
   Printf.printf "Dox is running at http://127.0.0.1:%d\n%!" port;
   Printf.printf "Project: %s\n%!" project.root;
@@ -1235,7 +1710,9 @@ let serve ~root ~assets ~port =
     Unix.setsockopt_float client Unix.SO_RCVTIMEO 10.;
     Unix.setsockopt_float client Unix.SO_SNDTIMEO 10.;
     let coordinator_ready =
-      if Compiler_workspace.coordinator_alive !coordinator_ref then Ok ()
+      if not (collaboration_alive collaboration) then
+        Error "The collaboration service stopped; restart Dox."
+      else if Compiler_workspace.coordinator_alive !coordinator_ref then Ok ()
       else (
         Compiler_workspace.detach_coordinator_owner !coordinator_ref;
         match Project.snapshot project with
@@ -1253,14 +1730,14 @@ let serve ~root ~assets ~port =
     match coordinator_ready with
     | Error message ->
         let output = Unix.out_channel_of_descr client in
-        send_response output
+        send_response context output
           (error ~status:503
              ("The local compiler coordinator could not restart: " ^ message));
         close_out_noerr output;
         loop workers
     | Ok () when List.length workers >= max_workers ->
         let output = Unix.out_channel_of_descr client in
-        send_response output
+        send_response context output
           (error ~status:503
              "The local workspace is busy; retry after an evaluation finishes.");
         close_out_noerr output;
@@ -1269,6 +1746,7 @@ let serve ~root ~assets ~port =
         match Unix.fork () with
         | 0 ->
             Unix.close socket;
+            close_out_noerr collaboration.watchdog;
             Compiler_workspace.detach_coordinator_owner !coordinator_ref;
             (try handle_client context client
              with exception_ ->
@@ -1284,7 +1762,6 @@ let serve ~root ~assets ~port =
   Sys.set_signal Sys.sigterm (Sys.Signal_handle stop);
   Fun.protect
     ~finally:(fun () ->
-      Unix.close socket;
       List.iter
         (fun pid ->
           try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ())
@@ -1293,5 +1770,8 @@ let serve ~root ~assets ~port =
         (fun pid ->
           try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ())
         !workers_ref;
-      Compiler_workspace.stop_coordinator !coordinator_ref)
+      flush_collaboration_before_shutdown context socket collaboration;
+      Unix.close socket;
+      Compiler_workspace.stop_coordinator !coordinator_ref;
+      stop_collaboration collaboration)
     (fun () -> try loop [] with Exit -> ())

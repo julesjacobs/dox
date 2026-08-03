@@ -99,7 +99,13 @@ let () =
         && String.equal direct.document.version document.version)
         "direct page read did not return the canonical document";
       let context : Server.context =
-        { project; assets = directory; port = 0; session_token = "test" }
+        {
+          project;
+          assets = directory;
+          port = 0;
+          collaboration_port = 0;
+          session_token = "test";
+        }
       in
       let unchanged_response =
         Server.page_response context

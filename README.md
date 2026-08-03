@@ -4,10 +4,12 @@ Dox (document OxCaml) is a working vertical slice of a live literate
 programming workspace.
 Markdown is the document language and OCaml is the inner language.
 
-It requires OCaml 5.1 or newer, Dune 3.15 or newer, Yojson 3, and Merlin 5.
+It requires OCaml 5.1 or newer, Dune 3.15 or newer, Yojson 3, Merlin 5, and
+Node.js 20 or newer.
 
 ```sh
 opam install . --deps-only
+npm ci
 ```
 
 ## Start the workspace
@@ -37,6 +39,26 @@ This checkout uses the project-local OxCaml compiler in
 `jujacobs/dox-browser-integration` branch. `OCAMLC` can override it.
 `ocamlmerlin` provides types at the cursor and can be overridden with
 `OCAMLMERLIN`.
+
+## Collaboration and Git
+
+Every open page is a Yjs document. CodeMirror shows remote selections and the
+module outline shows collaborator avatars only while another editor is present.
+Changes synchronize over a local WebSocket service started and stopped with
+Dox. The service persists CRDT state under ignored `.dox/collaboration` files,
+then mirrors settled text through Dox's normal transactional page-save API.
+
+The `.ml.md` files remain the source of truth for Git and AI tools. External
+working-tree edits are merged into open Yjs documents. Non-overlapping live and
+Git edits merge automatically; overlapping edits become visible Git-style
+conflict markers in the document and are not written back until resolved.
+Page renames flush pending text and move the stable collaboration identity;
+page deletion tombstones it so an offline client cannot recreate the page.
+
+An AI given a running Dox URL can read `/.well-known/dox-ai.json`. It identifies
+the project root and explains how to flush live edits before reading, editing,
+diffing, or committing ordinary project files. The same instructions are in an
+HTML comment on every workspace page.
 
 ## Literate source
 
@@ -280,8 +302,7 @@ process can outlive an evaluation. The Browser engine runs in a disposable Web
 Worker and is cancelled by terminating that worker, but it is not presented as
 a security boundary for untrusted source.
 
-Managed long-running services, replay debugging, multi-user permissions, and
-an external agent protocol remain future work.
+Managed long-running services and multi-user permissions remain future work.
 
 The complete design is saved in
 [`docs/high-level-design.md`](docs/high-level-design.md).

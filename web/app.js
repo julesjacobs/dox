@@ -8,7 +8,9 @@ import {
   setMarkdownEditorResultInvalidation,
   scrollMarkdownEditorTo,
   replaceEditorStateDocument,
-} from "./editor.bundle.js?v=20260801b";
+  connectPageCollaboration,
+  encodeCollaborationUpdate,
+} from "./editor.bundle.js?v=20260803a";
 import {
   dispatchExecutionIntent,
   executionPendingToken,
@@ -38,8 +40,10 @@ const state = {
   projectRequestEpoch: 0,
   projectInstallEpoch: 0,
   projectRefreshPromise: null,
+  projectRefreshQueued: false,
   projectMutationTail: Promise.resolve(),
   sessionToken: null,
+  collaborationPort: null,
   module: null,
   path: null,
   document: null,
@@ -282,6 +286,7 @@ async function initialize() {
     const session = await api("/api/session");
     state.sessionToken = session.token;
     state.projectRoot = session.projectRoot;
+    state.collaborationPort = session.collaborationPort;
     loadPaneWidths();
     const project = await refreshProjectIndex({ forceOutline: true });
     const routeModule = decodeURIComponent(
@@ -307,6 +312,204 @@ async function initialize() {
 
 function currentSession() {
   return state.module ? state.sessions.get(state.module) : null;
+}
+
+function sessionSource(session) {
+  return (
+    session?.collaboration?.text.toString() ??
+    session?.editorState?.doc.toString() ??
+    session?.document?.source ??
+    ""
+  );
+}
+
+function reconcileCollaborativeSession(session) {
+  if (!session?.collaboration) return false;
+  const source = session.collaboration.text.toString();
+  if (source === session.document.source && session.editorState?.doc.toString() === source) {
+    return false;
+  }
+  session.document = {
+    ...session.document,
+    source,
+    blocks: parseDraftBlocks(source),
+  };
+  session.editorState = replaceEditorStateDocument(session.editorState, source);
+  session.evaluation = null;
+  session.evaluationPlan = null;
+  session.evaluationInvalidation = null;
+  session.executionCore = null;
+  session.executionProblem = null;
+  return true;
+}
+
+function reconcileCollaborativeIdentity(session, meta) {
+  if (!meta.module || !meta.path) return;
+  session.collaborationIdentityPending = meta;
+  if (
+    state.outlineOptimisticRefactor ||
+    state.refactorInFlight ||
+    session.collaborationIdentityPromise
+  ) {
+    return;
+  }
+  session.collaborationIdentityPromise = (async () => {
+    while (
+      session.collaborationIdentityPending &&
+      !state.outlineOptimisticRefactor &&
+      !state.refactorInFlight
+    ) {
+      const pending = session.collaborationIdentityPending;
+      session.collaborationIdentityPending = null;
+      if (pending.module === session.module && pending.path === session.path) {
+        continue;
+      }
+      const project = await refreshProjectIndex();
+      const authoritative = project.documents?.find(
+        (document) =>
+          document.module === pending.module && document.path === pending.path,
+      );
+      if (!authoritative) continue;
+      const wasCurrent = session === currentSession();
+      const oldModule = session.module;
+      if (state.sessions.get(oldModule) === session) state.sessions.delete(oldModule);
+      session.module = pending.module;
+      session.path = pending.path;
+      session.document = { ...session.document, path: pending.path };
+      state.sessions.set(pending.module, session);
+      if (wasCurrent) {
+        state.module = pending.module;
+        state.path = pending.path;
+        state.document = session.document;
+        updateRoute(pending.module, "replace");
+        render();
+      }
+    }
+  })()
+    .catch((error) => {
+      session.conflict = error.message;
+    })
+    .finally(() => {
+      session.collaborationIdentityPromise = null;
+      if (
+        session.collaborationIdentityPending &&
+        !state.outlineOptimisticRefactor &&
+        !state.refactorInFlight
+      ) {
+        queueMicrotask(() =>
+          reconcileCollaborativeIdentity(
+            session,
+            session.collaborationIdentityPending,
+          ),
+        );
+      }
+    });
+}
+
+function renderCollaborationPresence() {
+  const host = document.querySelector("[data-collaboration-presence]");
+  if (!host) return;
+  const peers = currentSession()?.collaborationPeers || [];
+  host.hidden = peers.length === 0;
+  host.innerHTML = peers
+    .slice(0, 5)
+    .map(
+      (peer) =>
+        `<span class="collaboration-peer" style="--peer-color:${escapeHtml(peer.color || "#6c7771")}" title="${escapeHtml(peer.name || "Collaborator")}">${escapeHtml((peer.name || "?").slice(0, 1).toUpperCase())}</span>`,
+    )
+    .join("");
+}
+
+async function attachSessionCollaboration(session) {
+  if (session.collaboration || session.provisional || !state.collaborationPort) {
+    return session.collaboration || null;
+  }
+  const opened = await api("/api/collaboration/open", {
+    method: "POST",
+    body: JSON.stringify({ module: session.module }),
+  });
+  const collaboration = await connectPageCollaboration({
+    id: opened.id,
+    port: state.collaborationPort,
+    token: state.sessionToken,
+    projectRoot: state.projectRoot,
+    onMeta: (meta) => {
+      reconcileCollaborativeIdentity(session, meta);
+      if (meta.digest) session.savedVersion = meta.digest;
+      if (typeof meta.baseText === "string") session.savedSource = meta.baseText;
+      session.conflict = meta.error || null;
+      if (session === currentSession()) {
+        state.savedVersion = session.savedVersion;
+        state.savedSource = session.savedSource;
+        state.dirty = state.document.source !== state.savedSource;
+        state.workspaceError = meta.error || state.outlineConflict || null;
+        updateStatusOnly();
+      }
+      if (meta.tombstoned && !session.collaborationTombstoneHandled) {
+        session.collaborationTombstoneHandled = true;
+        queueMicrotask(async () => {
+          const project = await refreshProjectIndex().catch(() => null);
+          if (session !== currentSession()) return;
+          if (
+            project?.documents?.some(
+              (document) => document.module === session.module,
+            )
+          ) {
+            session.collaborationTombstoneHandled = false;
+            return;
+          }
+          const fallback = project?.documents?.find(
+            (document) => document.module !== session.module,
+          )?.module;
+          if (fallback) {
+            await loadDocument(fallback, {
+              force: true,
+              history: "replace",
+              focus: "main",
+            });
+          } else {
+            session.collaboration?.destroy();
+            state.sessions.delete(session.module);
+            state.module = null;
+            state.path = null;
+            state.document = null;
+            state.workspaceError =
+              "This page was deleted. Create a page in the module outline to continue.";
+            render();
+          }
+        });
+      }
+      if (meta.projectVersion && meta.projectVersion !== state.projectVersion) {
+        clearTimeout(session.collaborationProjectTimer);
+        session.collaborationProjectTimer = setTimeout(
+          () => void refreshProjectIndex(),
+          80,
+        );
+      }
+    },
+    onPresence: (peers) => {
+      session.collaborationPeers = peers;
+      if (session === currentSession()) renderCollaborationPresence();
+    },
+    onStatus: (status) => {
+      session.collaborationStatus = status;
+      if (status === "connected") {
+        session.collaborationWasConnected = true;
+        if (
+          session === currentSession() &&
+          state.workspaceError === "Live collaboration is reconnecting…"
+        ) {
+          state.workspaceError = state.outlineConflict || null;
+          updateStatusOnly();
+        }
+      } else if (session.collaborationWasConnected && session === currentSession()) {
+        state.workspaceError = "Live collaboration is reconnecting…";
+        updateStatusOnly();
+      }
+    },
+  });
+  session.collaboration = collaboration;
+  return collaboration;
 }
 
 function setExecutionCore(executionCore) {
@@ -554,7 +757,7 @@ function confirmOptimisticPage(modulePath, document) {
   const localSource =
     session === currentSession()
       ? state.document.source
-      : session.editorState?.doc.toString() || session.document.source;
+      : sessionSource(session);
   session.provisional = false;
   session.path = document.path;
   session.savedVersion = document.version;
@@ -572,6 +775,67 @@ function confirmOptimisticPage(modulePath, document) {
     localSource,
   );
   if (session === currentSession()) restoreSession(session);
+  if (state.collaborationPort) {
+    void attachSessionCollaboration(session)
+      .then((collaboration) => {
+        if (!collaboration) return;
+        // Typing may continue while the collaboration room is opening. Read the
+        // draft now, rather than using the snapshot captured before the await.
+        const latestDraft =
+          session === currentSession()
+            ? state.document.source
+            : session.editorState?.doc.toString() || session.document.source;
+        const sharedSource = collaboration.text.toString();
+        if (latestDraft !== sharedSource) {
+          const change = contiguousTextChange(document.source, latestDraft);
+          const expected = document.source.slice(change.from, change.to);
+          if (
+            sharedSource.slice(change.from, change.from + expected.length) ===
+            expected
+          ) {
+            collaboration.doc.transact(() => {
+              collaboration.text.delete(change.from, expected.length);
+              collaboration.text.insert(change.from, change.insert);
+            });
+          } else {
+            session.conflict =
+              "Another collaborator edited this new page at the same position. Both drafts are preserved below.";
+            const preserved = [
+              "<<<<<<< live Dox document",
+              latestDraft,
+              "||||||| last mirrored version",
+              document.source,
+              "======= Dox Git working tree",
+              sharedSource,
+              ">>>>>>> Git working tree",
+            ].join("\n");
+            collaboration.doc.transact(() => {
+              collaboration.text.delete(0, collaboration.text.length);
+              collaboration.text.insert(0, preserved);
+            });
+          }
+        }
+        session.editorState = null;
+        session.document = {
+          ...session.document,
+          source: collaboration.text.toString(),
+          blocks: parseDraftBlocks(collaboration.text.toString()),
+        };
+        if (session === currentSession()) {
+          restoreSession(session);
+          render();
+          queueMicrotask(() => state.sourceEditorView?.focus());
+        }
+      })
+      .catch((error) => {
+        session.conflict = error.message;
+        if (session === currentSession()) {
+          state.workspaceError = error.message;
+          updateStatusOnly();
+        }
+      });
+    return;
+  }
   if (localSource !== document.source || session.autosaveQueued) {
     scheduleAutosave(session, { immediate: true });
   }
@@ -811,8 +1075,13 @@ async function loadDocument(
     modulePath = mapping?.get(modulePath) || modulePath;
   }
   if (!force && modulePath === state.module) return true;
+  const previousSession = currentSession();
   captureCurrentSession();
   if (modulePath !== state.module) {
+    if (previousSession?.collaboration) {
+      previousSession.collaboration.awareness.setLocalStateField("cursor", null);
+      previousSession.collaboration.provider.disconnect();
+    }
     state.executionCore = null;
     state.executionProblem = null;
   }
@@ -833,6 +1102,8 @@ async function loadDocument(
   state.navigationController = controller;
   beginPendingNavigation(modulePath);
   if (cached?.document) {
+    cached.collaboration?.provider.connect();
+    reconcileCollaborativeSession(cached);
     restoreSession(cached);
     state.view = "document";
     updateRoute(modulePath, history);
@@ -911,7 +1182,9 @@ async function loadDocument(
         );
       }
     }
-    const recovery = recoveredDraft(payload.module, diskVersion);
+    const recovery = state.collaborationPort
+      ? null
+      : recoveredDraft(payload.module, diskVersion);
     const recovered =
       recovery?.source && recovery.source !== payload.document.source;
     if (recovery?.conflictKey) {
@@ -961,13 +1234,31 @@ async function loadDocument(
       conflict: null,
     };
     state.sessions.set(payload.module, session);
+    try {
+      const collaboration = await attachSessionCollaboration(session);
+      if (collaboration) {
+        const collaborativeSource = collaboration.text.toString();
+        session.document = {
+          ...session.document,
+          source: collaborativeSource,
+          blocks: parseDraftBlocks(collaborativeSource),
+        };
+        state.document = session.document;
+        state.savedVersion = session.savedVersion;
+        state.savedSource = session.savedSource;
+        state.dirty = collaborativeSource !== session.savedSource;
+      }
+    } catch (error) {
+      state.workspaceError = error.message;
+      throw error;
+    }
     state.provisionalNavigation = null;
     updateRoute(payload.module, history);
     clearPendingNavigation();
     if (focus === "outline") state.outlineFocusTransfer = true;
     render();
     void loadDependencyContext(payload.module);
-    scheduleEvaluation(payload.document.source, { immediate: true });
+    scheduleEvaluation(state.document.source, { immediate: true });
     if (recovered) scheduleAutosave(session, { immediate: true });
     if (focus === "main") {
       queueMicrotask(() => state.sourceEditorView?.focus());
@@ -1095,12 +1386,17 @@ async function rollbackProvisionalNavigation(provisional, message) {
 
 async function refreshProjectIndex({ forceOutline = false } = {}) {
   if (state.projectRefreshPromise) {
+    state.projectRefreshQueued = true;
     await state.projectRefreshPromise;
     if (forceOutline) {
       installProjectSnapshot(state.project, {
         forceOutline: true,
         installEpoch: state.projectInstallEpoch,
       });
+    }
+    if (state.projectRefreshQueued) {
+      state.projectRefreshQueued = false;
+      return refreshProjectIndex({ forceOutline });
     }
     return state.project;
   }
@@ -1120,6 +1416,10 @@ async function refreshProjectIndex({ forceOutline = false } = {}) {
     });
   state.projectRefreshPromise = request;
   await request;
+  if (state.projectRefreshQueued) {
+    state.projectRefreshQueued = false;
+    return refreshProjectIndex({ forceOutline });
+  }
   return state.project;
 }
 
@@ -1128,10 +1428,14 @@ async function revalidateCachedSession(
   provisional = null,
   refreshRetry = 0,
 ) {
+  if (session.collaboration) {
+    finishProvisionalNavigation(provisional);
+    return;
+  }
   const modulePath = session.module;
   const digest = session.savedVersion;
   const revision = session.editRevision;
-  const source = session.editorState?.doc.toString() || session.document.source;
+  const source = sessionSource(session);
   try {
     const payload = await cachedRevalidationRequest(modulePath, digest);
     if (state.sessions.get(modulePath) !== session) {
@@ -1153,7 +1457,7 @@ async function revalidateCachedSession(
     const latestSource =
       session === currentSession()
         ? state.document.source
-        : session.editorState?.doc.toString() || session.document.source;
+        : sessionSource(session);
     if (
       session.editRevision !== revision ||
       latestSource !== source ||
@@ -1180,7 +1484,7 @@ async function revalidateCachedSession(
       const latestAfterRefresh =
         session === currentSession()
           ? state.document.source
-          : session.editorState?.doc.toString() || session.document.source;
+          : sessionSource(session);
       if (
         session.editRevision !== revision ||
         latestAfterRefresh !== source ||
@@ -1356,16 +1660,18 @@ function renderShell() {
     app.querySelector(".sidebar")?.replaceWith(existingSidebar);
   }
   syncEvaluationEngineToggle();
+  renderCollaborationPresence();
   bindEvents();
 }
 
 function renderSidebar() {
   if (!state.project?.documents.length) {
-    return `<div class="sidebar-brand">Dox</div><div class="module-outline-host" data-module-outline></div>${renderEvaluationEngineToggle()}`;
+    return `<div class="sidebar-brand">Dox</div><div class="module-outline-host" data-module-outline></div><div class="collaboration-presence" data-collaboration-presence hidden></div>${renderEvaluationEngineToggle()}`;
   }
   return `
     <div class="sidebar-brand">Dox</div>
     <div class="module-outline-host" data-module-outline aria-label="Editable module outline"></div>
+    <div class="collaboration-presence" data-collaboration-presence hidden></div>
     ${renderEvaluationEngineToggle()}
   `;
 }
@@ -1822,8 +2128,7 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
       const { modulePath, payload, session } = payloads.get(oldModule);
       const savedSource = payload.document.source;
       const baseSource = bases.get(oldModule)?.source ?? session.savedSource;
-      const draft =
-        session.editorState?.doc.toString() || session.document.source;
+      const draft = sessionSource(session);
       let source = savedSource;
       let changedDuringRefactor = false;
       if (draft !== baseSource) {
@@ -1878,6 +2183,12 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
     if (nextSessions.get(oldModule) === session) {
       nextSessions.delete(oldModule);
     }
+    if (session.collaboration && session.collaboration.text.toString() !== source) {
+      session.collaboration.doc.transact(() => {
+        session.collaboration.text.delete(0, session.collaboration.text.length);
+        session.collaboration.text.insert(0, source);
+      });
+    }
     session.module = modulePath;
     session.path = payload.document.path;
     session.document = changedDuringRefactor
@@ -1887,7 +2198,7 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
           blocks: parseDraftBlocks(source),
         }
       : payload.document;
-    session.editorState = editorState;
+    session.editorState = replaceEditorStateDocument(editorState, source);
     session.savedSource = savedSource;
     session.savedVersion = payload.digest || payload.document.version;
     session.persistenceModule = null;
@@ -1897,8 +2208,8 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
     session.executionCore = null;
     session.executionProblem = null;
     session.conflict = null;
-    session.autosaveQueued = changedDuringRefactor;
-    if (changedDuringRefactor) {
+    session.autosaveQueued = changedDuringRefactor && !session.collaboration;
+    if (changedDuringRefactor && !session.collaboration) {
       storeRecoveryDraft(session, source);
       recoveryDestinations.add(modulePath);
     }
@@ -1923,8 +2234,7 @@ async function drainDirtySessions() {
   for (let pass = 0; pass < 5; pass += 1) {
     const dirty = Array.from(state.sessions.values()).filter((session) => {
       if (session.provisional) return false;
-      const source =
-        session.editorState?.doc.toString() || session.document.source;
+      const source = sessionSource(session);
       return source !== session.savedSource;
     });
     if (!dirty.length) {
@@ -1934,9 +2244,7 @@ async function drainDirtySessions() {
           .map(([modulePath, session]) => [
             modulePath,
             {
-              source:
-                session.editorState?.doc.toString() ||
-                session.document.source,
+              source: sessionSource(session),
               revision: session.editRevision,
             },
           ]),
@@ -2098,6 +2406,7 @@ async function performOutlineCommit({
   state.outlineCommitController = controller;
   let authoritativeProject = null;
   let appliedMapping = [];
+  let collaborationWarning = null;
   let releaseProjectMutation = null;
   try {
     if (operation.kind === "ambiguous") {
@@ -2127,7 +2436,7 @@ async function performOutlineCommit({
       releaseProjectMutation = await acquireProjectMutation();
       authoritativeProject = state.project;
       if (renames.length) {
-        const projectVersion = state.outlineBase.projectVersion;
+        const projectVersion = authoritativeProject.version;
         const preview = await api("/api/refactor/preview", {
           method: "POST",
           signal: controller.signal,
@@ -2144,6 +2453,7 @@ async function performOutlineCommit({
           }),
         });
         appliedMapping = payload.mapping || [];
+        collaborationWarning ||= payload.collaborationWarning || null;
         authoritativeProject = payload.project;
         migrateRecoveryDraftKeys(appliedMapping);
         state.refactorModuleMapping = new Map(
@@ -2188,8 +2498,10 @@ async function performOutlineCommit({
           }),
         });
         authoritativeProject = payload.project;
+        collaborationWarning ||= payload.collaborationWarning || null;
         operation.trashPath = payload.trashPath;
         for (const modulePath of deleted) {
+          state.sessions.get(modulePath)?.collaboration?.destroy();
           state.sessions.delete(modulePath);
           clearRecoveryDraft(modulePath);
         }
@@ -2278,7 +2590,7 @@ async function performOutlineCommit({
       }
     }
     state.outlineFailedGeneration = null;
-    if (!state.outlineConflict) state.workspaceError = null;
+    if (!state.outlineConflict) state.workspaceError = collaborationWarning;
     invalidateDependencyContext({ clear: true });
     const openedModule = remapModule(openModule, appliedMapping);
     const cursorModule = remapModule(
@@ -2406,8 +2718,15 @@ async function performOutlineCommit({
     releaseProjectMutation?.();
     state.refactorModuleMapping = null;
     state.refactorInFlight = false;
+    state.outlineOptimisticRefactor = null;
     state.outlineOperation = null;
     for (const session of state.sessions.values()) {
+      if (session.collaborationIdentityPending) {
+        reconcileCollaborativeIdentity(
+          session,
+          session.collaborationIdentityPending,
+        );
+      }
       if (session.autosaveQueued) scheduleAutosave(session, { immediate: true });
     }
     if (state.outlineCommitController === controller) {
@@ -3702,8 +4021,10 @@ function updateSource(
     session.document = state.document;
     session.editRevision += 1;
     session.conflict = null;
-    storeRecoveryDraft(session, source);
-    scheduleAutosave(session);
+    if (!session.collaboration) {
+      storeRecoveryDraft(session, source);
+      scheduleAutosave(session);
+    }
   }
   state.evaluationInvalidation = effectiveInvalidation;
   if (effectiveInvalidation) {
@@ -4618,6 +4939,47 @@ function scheduleAutosave(session, { immediate = false } = {}) {
 }
 
 async function drainAutosave(session) {
+  if (session.collaboration) {
+    try {
+      const payload = await api("/api/collaboration/flush", {
+        method: "POST",
+        body: JSON.stringify({
+          updates: session.collaboration
+            ? [
+                {
+                  id: session.collaboration.id,
+                  update: encodeCollaborationUpdate(session.collaboration),
+                },
+              ]
+            : [],
+        }),
+      });
+      if (payload.project) installAuthoritativeProject(payload.project);
+      for (const mirrored of payload.acknowledgedSources || []) {
+        const mirroredSession = Array.from(state.sessions.values()).find(
+          (candidate) => candidate.path === mirrored.path,
+        );
+        if (!mirroredSession) continue;
+        mirroredSession.savedVersion = mirrored.digest;
+        mirroredSession.savedSource =
+          mirroredSession.collaboration?.text.toString() ??
+          mirroredSession.document.source;
+      }
+      if (session === currentSession()) {
+        state.savedVersion = session.savedVersion;
+        state.savedSource = session.savedSource;
+        state.dirty = state.document.source !== session.savedSource;
+      }
+      return true;
+    } catch (error) {
+      session.conflict = error.message;
+      if (session === currentSession()) {
+        state.workspaceError = error.message;
+        updateStatusOnly();
+      }
+      return false;
+    }
+  }
   clearTimeout(session.autosaveTimer);
   session.autosaveTimer = null;
   if (session.provisional) {
@@ -4631,7 +4993,7 @@ async function drainAutosave(session) {
   const source =
     session === currentSession()
       ? state.document.source
-      : session.editorState?.doc.toString() || session.document.source;
+      : sessionSource(session);
   if (source === session.savedSource) return true;
   const revision = session.editRevision;
   const expectedDigest = session.savedVersion;
@@ -4659,7 +5021,7 @@ async function drainAutosave(session) {
     const latestSource =
       session === currentSession()
         ? state.document.source
-        : session.editorState?.doc.toString() || session.document.source;
+        : sessionSource(session);
     if (latestSource === source) clearRecoveryDraft(session.module);
     else storeRecoveryDraft(session, latestSource);
     if (session === currentSession()) {
@@ -4693,7 +5055,7 @@ async function drainAutosave(session) {
     const currentSource =
       session === currentSession()
         ? state.document.source
-        : session.editorState?.doc.toString() || session.document.source;
+        : sessionSource(session);
     if (
       succeeded &&
       (session.autosaveQueued || currentSource !== session.savedSource)
@@ -4743,6 +5105,7 @@ function mountEmbeddedEditors() {
       },
       onSave: save,
       sourceMode: state.sourceMode,
+      collaboration: session?.collaboration || null,
       onDefinitionRequest: (position, mode) =>
         isCurrentDocument()
           ? requestDefinition(state.sourceEditorView, position, mode)

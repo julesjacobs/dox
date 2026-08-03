@@ -316,6 +316,46 @@ button {
   height: 100%;
 }
 
+.collaboration-presence {
+  display: flex;
+  min-height: 22px;
+  align-items: center;
+  padding: 2px 12px 1px 5px;
+}
+
+.collaboration-presence[hidden] {
+  display: none;
+}
+
+.collaboration-peer {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  margin-right: -3px;
+  border: 2px solid var(--sidebar);
+  border-radius: 50%;
+  background: var(--peer-color);
+  color: white;
+  font: 600 9px/1 var(--sans);
+}
+
+.cm-ySelection {
+  border-radius: 2px;
+  opacity: 0.28;
+}
+
+.cm-ySelectionCaret {
+  border-left-width: 1.5px;
+}
+
+.cm-ySelectionInfo {
+  border-radius: 4px 4px 4px 0;
+  padding: 2px 5px;
+  font: 600 10px/1.25 var(--sans);
+  transform: translate(-1px, -100%);
+}
+
 .evaluation-engine-toggle {
   display: flex;
   align-items: center;
