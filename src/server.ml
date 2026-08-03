@@ -10,6 +10,17 @@ type context = {
   assets : string;
   port : int;
   collaboration_port : int;
+  (* Externally visible "host:port" when Dox is reached through a reverse proxy
+     instead of on loopback, and the collaboration port the browser should
+     connect to (a proxy in front of the collaboration service, which itself
+     stays on loopback). None / equal-to-local when serving only on loopback. *)
+  public_host : string option;
+  public_collaboration_port : int;
+  (* When true, OxCaml only ever runs in the visitor's browser: the server
+     refuses /api/evaluate and compiles without running when validating saves.
+     Required for any shared deployment, where server-side execution would let
+     every visitor run code as the user running Dox. *)
+  browser_execution_only : bool;
   session_token : string;
 }
 
@@ -147,6 +158,27 @@ let read_request channel =
                     Ok (Some (method_, target, headers, body))
                   with End_of_file -> Error (400, "Truncated request body.")))
 
+let hostname_of_host host =
+  match String.index_opt host ':' with
+  | Some index -> String.sub host 0 index
+  | None -> host
+
+let websocket_origins context =
+  [
+    Printf.sprintf "ws://127.0.0.1:%d" context.collaboration_port;
+    Printf.sprintf "ws://localhost:%d" context.collaboration_port;
+  ]
+  @
+  match context.public_host with
+  | None -> []
+  | Some host ->
+      [
+        Printf.sprintf "ws://%s:%d" (hostname_of_host host)
+          context.public_collaboration_port;
+        Printf.sprintf "wss://%s:%d" (hostname_of_host host)
+          context.public_collaboration_port;
+      ]
+
 let send_response context channel response =
   Printf.fprintf channel "HTTP/1.1 %d %s\r\n" response.status
     (status_text response.status);
@@ -155,9 +187,8 @@ let send_response context channel response =
   Printf.fprintf channel
     "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-eval'; style-src \
      'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'; \
-     connect-src 'self' ws://127.0.0.1:%d ws://localhost:%d; base-uri 'none'; \
-     form-action 'self'\r\n"
-    context.collaboration_port context.collaboration_port;
+     connect-src 'self' %s; base-uri 'none'; form-action 'self'\r\n"
+    (String.concat " " (websocket_origins context));
   Printf.fprintf channel "X-Content-Type-Options: nosniff\r\n";
   Printf.fprintf channel "Referrer-Policy: no-referrer\r\n";
   Printf.fprintf channel "Cache-Control: no-store\r\n";
@@ -296,11 +327,27 @@ let resume_collaboration context lease =
   collaboration_request_retry context "/internal/resume"
     (`Assoc [ ("lease", `String lease) ])
 
+(* The browser pairs the reported collaboration port with location.hostname, so
+   the port must match the host this request arrived on: the proxied port for the
+   public host, the local one on loopback. Reporting one port for both yields a
+   host/port pair that the CSP does not list, and the socket is blocked. *)
+let collaboration_port_for (context : context) headers =
+  match (context.public_host, header headers "host") with
+  | Some public, Some host
+    when String.equal (String.lowercase_ascii host) (String.lowercase_ascii public)
+    ->
+      context.public_collaboration_port
+  | _ -> context.collaboration_port
+
 let expected_hosts (context : context) =
   [
     Printf.sprintf "127.0.0.1:%d" context.port;
     Printf.sprintf "localhost:%d" context.port;
   ]
+  @
+  match context.public_host with
+  | None -> []
+  | Some host -> [ String.lowercase_ascii host ]
 
 let same_origin (context : context) headers =
   let host_ok =
@@ -314,7 +361,9 @@ let same_origin (context : context) headers =
     | None -> true
     | Some origin ->
         List.exists
-          (fun host -> String.equal origin ("http://" ^ host))
+          (fun host ->
+            String.equal origin ("http://" ^ host)
+            || String.equal origin ("https://" ^ host))
           (expected_hosts context)
   in
   host_ok && origin_ok
@@ -1216,8 +1265,9 @@ let save_response context ~cancelled body =
           | Ok documents -> (
               let validation =
                 Evaluator.evaluate_documents
-                  ~project_version:base_project_version ~cancelled ~documents
-                  ~target:draft ()
+                  ~project_version:base_project_version
+                  ~execute:(not context.browser_execution_only) ~cancelled
+                  ~documents ~target:draft ()
               in
               match
                 Project.save_document context.project ~path ~source
@@ -1340,8 +1390,12 @@ let route context ~cancelled method_ target headers body =
              [
                ("token", `String context.session_token);
                ("trust", `String "local-launch");
+               ( "executionEngine",
+                 `String (if context.browser_execution_only then "browser" else "server") );
+               ("executionEngineLocked", `Bool context.browser_execution_only);
                ("projectRoot", `String context.project.root);
-               ("collaborationPort", `Int context.collaboration_port);
+               ( "collaborationPort",
+                 `Int (collaboration_port_for context headers) );
              ])
       else error ~status:403 "Cross-origin workspace request rejected."
   | "GET", "/.well-known/dox-ai.json" -> ai_collaboration_response context
@@ -1358,6 +1412,10 @@ let route context ~cancelled method_ target headers body =
       | Ok changes -> json (`List changes)
       | Error project_error_ -> project_error project_error_)
   | "GET", "/api/change" -> change_response context parameters
+  | "POST", "/api/evaluate" when context.browser_execution_only ->
+      error ~status:403
+        "This workspace runs OxCaml in the browser only; server-side evaluation \
+         is disabled."
   | "POST", "/api/evaluate" ->
       require_active_request context headers (fun () ->
           evaluate_response context ~cancelled body)
@@ -1491,7 +1549,8 @@ let terminate_process ?(timeout = 2.) pid =
   in
   wait ()
 
-let start_collaboration ~root ~assets ~dox_port ~token =
+let start_collaboration ~root ~assets ~dox_port ~collaboration_port
+    ~public_origin ~token =
   let script =
     Filename.concat (Filename.dirname assets) "collaboration/server.mjs"
   in
@@ -1509,7 +1568,7 @@ let start_collaboration ~root ~assets ~dox_port ~token =
       "--root";
       root;
       "--port";
-      "0";
+      string_of_int collaboration_port;
       "--dox-port";
       string_of_int dox_port;
       "--origin";
@@ -1517,6 +1576,15 @@ let start_collaboration ~root ~assets ~dox_port ~token =
       "--origin";
       Printf.sprintf "http://localhost:%d" dox_port;
     |]
+  in
+  let arguments =
+    match public_origin with
+    | None -> arguments
+    | Some host ->
+        Array.append arguments
+          [|
+            "--origin"; "http://" ^ host; "--origin"; "https://" ^ host;
+          |]
   in
   let pid =
     try
@@ -1638,7 +1706,8 @@ let flush_collaboration_before_shutdown context socket collaboration =
         in
         pump ()
 
-let serve ~root ~assets ~port =
+let serve ~root ~assets ~port ~public_origin ~collaboration_port
+    ~public_collaboration_port ~browser_execution_only =
   let project = Project.create root in
   ignore (Evaluator.compiler_identity ());
   (match Project.recover_transactions project with
@@ -1682,7 +1751,7 @@ let serve ~root ~assets ~port =
   let collaboration =
     try
       start_collaboration ~root:project.root ~assets ~dox_port:port
-        ~token:session_token
+        ~collaboration_port ~public_origin ~token:session_token
     with error ->
       Unix.close socket;
       Compiler_workspace.stop_coordinator !coordinator_ref;
@@ -1694,6 +1763,12 @@ let serve ~root ~assets ~port =
       assets;
       port;
       collaboration_port = collaboration.port;
+      public_host = public_origin;
+      browser_execution_only;
+      public_collaboration_port =
+        (match public_collaboration_port with
+        | Some port -> port
+        | None -> collaboration.port);
       session_token;
     }
   in

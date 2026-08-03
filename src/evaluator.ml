@@ -3527,7 +3527,7 @@ type browser_execution = {
 }
 
 let evaluate_documents ?project_version ?request_code_digest ?evaluation_id
-    ?browser_execution
+    ?browser_execution ?(execute = true)
     ?(cancelled = fun () -> false) ~documents ~target () =
   let started = Unix.gettimeofday () in
   let started_at = Util.timestamp () in
@@ -3711,14 +3711,25 @@ let evaluate_documents ?project_version ?request_code_digest ?evaluation_id
                 [ compilation ] )
           | Ok compiled ->
               let runtime =
-                run_process ~timeout_seconds:5. ~cancelled
-                  ~environment:
-                    [
-                      ("DOCLANG_EVENT_PATH", event_path);
-                      ("DOCLANG_TRACE_PATH", trace_path);
-                    ]
-                  ~extra_output_paths:[ event_path ] (ocamlrun ())
-                  [ compiled.compiled_executable ]
+                if not execute then
+                  (* Browser-execution deployments compile on the server for
+                     diagnostics but never run user code here. *)
+                  {
+                    status = Unix.WEXITED 0;
+                    stdout = "";
+                    stderr = "";
+                    timed_out = false;
+                    output_limited = false;
+                  }
+                else
+                  run_process ~timeout_seconds:5. ~cancelled
+                    ~environment:
+                      [
+                        ("DOCLANG_EVENT_PATH", event_path);
+                        ("DOCLANG_TRACE_PATH", trace_path);
+                      ]
+                    ~extra_output_paths:[ event_path ] (ocamlrun ())
+                    [ compiled.compiled_executable ]
               in
               let view_events = read_file_prefix event_path 2_000_000 in
               let trace_events = read_file_prefix trace_path 12_200_000 in

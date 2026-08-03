@@ -75,6 +75,7 @@ const state = {
     localStorage.getItem("dox:v1:evaluation-engine") === "browser"
       ? "browser"
       : "server",
+  executionEngineLocked: false,
   sourceEditorView: null,
   sourceMode:
     localStorage.getItem("dox:v2:editor-mode") === "source"
@@ -287,6 +288,12 @@ async function initialize() {
     state.sessionToken = session.token;
     state.projectRoot = session.projectRoot;
     state.collaborationPort = session.collaborationPort;
+    // A shared workspace pins the engine server-side; do not let a stale
+    // localStorage preference put this browser back on server-side execution.
+    state.executionEngineLocked = session.executionEngineLocked === true;
+    if (state.executionEngineLocked) {
+      state.evaluationEngine = session.executionEngine || "browser";
+    }
     loadPaneWidths();
     const project = await refreshProjectIndex({ forceOutline: true });
     const routeModule = decodeURIComponent(
@@ -5644,7 +5651,12 @@ function bindEvents() {
   const evaluationEngineToggle = document.querySelector(
     "#evaluation-engine-toggle",
   );
-  if (evaluationEngineToggle) {
+  if (evaluationEngineToggle && state.executionEngineLocked) {
+    evaluationEngineToggle.hidden = true;
+    evaluationEngineToggle.disabled = true;
+    evaluationEngineToggle.title =
+      "This workspace runs OxCaml in your browser only";
+  } else if (evaluationEngineToggle) {
     evaluationEngineToggle.onclick = (event) => {
       state.evaluationEngine =
         state.evaluationEngine === "browser" ? "server" : "browser";

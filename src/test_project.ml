@@ -104,6 +104,9 @@ let () =
           assets = directory;
           port = 0;
           collaboration_port = 0;
+          public_host = None;
+          public_collaboration_port = 0;
+          browser_execution_only = false;
           session_token = "test";
         }
       in

@@ -2,19 +2,63 @@ let usage () =
   Printf.eprintf
     "Usage:\n\
     \  dox serve [--root DIR] [--assets DIR] [--port PORT]\n\
+    \             [--public-origin HOST:PORT] [--collaboration-port PORT]\n\
+    \             [--public-collaboration-port PORT]\n\
+    \             [--execution (browser|server)]\n\
     \  dox check FILE\n\
     \  dox audit-data FILE\n\
     \  dox artifact FILE ENTRY OUTPUT\n";
   exit 2
 
-let rec serve_options root assets port = function
-  | [] -> Server.serve ~root ~assets ~port
-  | "--root" :: value :: rest -> serve_options value assets port rest
-  | "--assets" :: value :: rest -> serve_options root value port rest
+type serve_config = {
+  root : string;
+  assets : string;
+  port : int;
+  (* Set --public-origin when Dox is reached through a reverse proxy: it is the
+     externally visible "host:port". Without it the workspace rejects any
+     request whose Host is not loopback. --collaboration-port pins the
+     collaboration service (default 0 picks an ephemeral port) so a proxy can be
+     placed in front of it, and --public-collaboration-port is the port the
+     browser should use for the WebSocket. *)
+  public_origin : string option;
+  collaboration_port : int;
+  public_collaboration_port : int option;
+  (* --execution browser refuses server-side evaluation. Use it for any
+     deployment reachable by more than the person who started Dox. *)
+  browser_execution_only : bool;
+}
+
+let rec serve_options config = function
+  | [] ->
+      Server.serve ~root:config.root ~assets:config.assets ~port:config.port
+        ~public_origin:config.public_origin
+        ~collaboration_port:config.collaboration_port
+        ~public_collaboration_port:config.public_collaboration_port
+        ~browser_execution_only:config.browser_execution_only
+  | "--root" :: value :: rest -> serve_options { config with root = value } rest
+  | "--assets" :: value :: rest ->
+      serve_options { config with assets = value } rest
   | "--port" :: value :: rest -> (
       match int_of_string_opt value with
-      | Some port -> serve_options root assets port rest
+      | Some port -> serve_options { config with port } rest
       | None -> usage ())
+  | "--public-origin" :: value :: rest ->
+      if not (String.contains value ':') then usage ()
+      else serve_options { config with public_origin = Some value } rest
+  | "--collaboration-port" :: value :: rest -> (
+      match int_of_string_opt value with
+      | Some collaboration_port ->
+          serve_options { config with collaboration_port } rest
+      | None -> usage ())
+  | "--public-collaboration-port" :: value :: rest -> (
+      match int_of_string_opt value with
+      | Some port ->
+          serve_options { config with public_collaboration_port = Some port } rest
+      | None -> usage ())
+  | "--execution" :: "browser" :: rest ->
+      serve_options { config with browser_execution_only = true } rest
+  | "--execution" :: "server" :: rest ->
+      serve_options { config with browser_execution_only = false } rest
   | _ -> usage ()
 
 let check path =
@@ -99,9 +143,17 @@ let artifact path entry output =
 let () =
   match Array.to_list Sys.argv with
   | _ :: "serve" :: rest ->
-      serve_options (Sys.getcwd ())
-        (Filename.concat (Sys.getcwd ()) "web")
-        8080 rest
+      serve_options
+        {
+          root = Sys.getcwd ();
+          assets = Filename.concat (Sys.getcwd ()) "web";
+          port = 8080;
+          public_origin = None;
+          collaboration_port = 0;
+          public_collaboration_port = None;
+          browser_execution_only = false;
+        }
+        rest
   | [ _; "check"; path ] -> check path
   | [ _; "audit-data"; path ] -> audit_data path
   | [ _; "artifact"; path; entry; output ] -> artifact path entry output
