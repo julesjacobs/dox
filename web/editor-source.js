@@ -51,6 +51,10 @@ import {
   executionAnnotationRail,
 } from "./execution-annotation-layout.js";
 import {
+  diagnosticSourceLocations,
+  formatDiagnosticMessage,
+} from "./evaluation-presentation.js";
+import {
   changeBlankOutlineDepth,
   indentOutlineSubtree,
   moveOutlineSibling,
@@ -1855,7 +1859,7 @@ class BlockResultsWidget extends WidgetType {
       appendResultRow(container, {
         kind: diagnostic.severity === "warning" ? "warning" : "error",
         marker: diagnostic.severity === "warning" ? "△" : "!",
-        text: diagnostic.message,
+        text: formatDiagnosticMessage(diagnostic.message),
       });
     }
     return container;
@@ -2105,9 +2109,22 @@ function editorDiagnostics(state, evaluation, blocks, path) {
         (!diagnostic.path || diagnostic.path === path) &&
         diagnostic.line <= state.doc.lines,
     )
-    .map((diagnostic) => {
-      const line = state.doc.line(Math.max(1, diagnostic.line));
-      const block = blockForDiagnostic(blocks, diagnostic);
+    .flatMap((diagnostic) =>
+      diagnosticSourceLocations(diagnostic)
+        .filter(
+          (location) =>
+            location.line > 0 &&
+            location.line <= state.doc.lines &&
+            (!location.path || location.path === path),
+        )
+        .map((location) => ({ diagnostic, location })),
+    )
+    .map(({ diagnostic, location }) => {
+      const line = state.doc.line(Math.max(1, location.line));
+      const block = blockForDiagnostic(blocks, {
+        ...diagnostic,
+        line: location.line,
+      });
       const sourceIndent =
         block?.kind === "ocaml" && line.text.startsWith("    ") ? 4 : 0;
       const sourceText = line.text.slice(sourceIndent);
@@ -2116,14 +2133,14 @@ function editorDiagnostics(state, evaluation, blocks, path) {
         sourceIndent +
         utf16ColumnForUtf8ByteColumn(
           sourceText,
-          diagnostic.columnStart ?? 0,
+          location.columnStart ?? 0,
         );
       let to =
         line.from +
         sourceIndent +
         utf16ColumnForUtf8ByteColumn(
           sourceText,
-          diagnostic.columnEnd ?? diagnostic.columnStart ?? 0,
+          location.columnEnd ?? location.columnStart ?? 0,
         );
       from = Math.min(Math.max(from, line.from), line.to);
       to = Math.min(Math.max(to, from), line.to);
@@ -2144,7 +2161,7 @@ function editorDiagnostics(state, evaluation, blocks, path) {
             : diagnostic.severity === "info"
               ? "info"
               : "error",
-        message: diagnostic.message,
+        message: formatDiagnosticMessage(diagnostic.message),
       };
     });
 }

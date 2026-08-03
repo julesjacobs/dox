@@ -25,6 +25,11 @@ import {
   remapModule,
 } from "./outline-operation.mjs";
 import { executionTraceNavigationTarget } from "./execution-trace.js";
+import {
+  formatDiagnosticMessage,
+  inspectorDiagnostics,
+  staleExecutionLabel,
+} from "./evaluation-presentation.js";
 
 const app = document.querySelector("#app");
 
@@ -3574,6 +3579,8 @@ function renderWholeExecutionTrace(model) {
 
 function renderExecutionCoreInspector() {
   const model = presentExecution(state.executionCore);
+  const currentEvaluationFailed =
+    state.evaluation?.ok === false && !state.evaluationInvalidation;
   if (!model.selection.constructId) return renderWholeExecutionTrace(model);
   const activationNames = [
     ...new Set(
@@ -3643,7 +3650,9 @@ function renderExecutionCoreInspector() {
           </header><div class="execution-occurrences${showExpressionColumn ? "" : " activation-only"}" role="list" aria-label="Executions of the selected expression">${rows}</div>`
         : `<p class="execution-note">${
             stale
-              ? "Execution is updating for the edited program."
+              ? currentEvaluationFailed
+                ? "This selection is not available in the last successful execution."
+                : "Execution is updating for the edited program."
               : model.occurrenceList.emptyReason === "trace-incomplete"
                 ? "The trace ended before this expression was recorded."
                 : model.occurrenceList.emptyReason === "defined-not-called"
@@ -3658,19 +3667,25 @@ function renderExecutionCoreInspector() {
 
 function renderInspector() {
   if (!state.document || state.view !== "document") return "";
-  if (state.executionCore) return renderExecutionCoreInspector();
+  const currentEvaluation = state.evaluationInvalidation
+    ? null
+    : state.evaluation;
+  const evaluationFailed = currentEvaluation?.ok === false;
+  const diagnostics = inspectorDiagnostics(currentEvaluation, {
+    path: state.path,
+    cursorLine: state.cursorPosition?.line || null,
+  });
+  const diagnosticsHtml = diagnostics.length
+      ? `<section class="inspect-section diagnostic-section"><h3>${evaluationFailed ? "Code error" : "Diagnostics"}</h3>${diagnostics.map((diagnostic) => `<button class="diagnostic" data-diagnostic-line="${diagnostic.line || ""}">${escapeHtml(formatDiagnosticMessage(diagnostic.message))}</button>`).join("")}</section>`
+      : "";
+  if (state.executionCore) {
+    const execution = renderExecutionCoreInspector();
+    if (!evaluationFailed) return execution;
+    return `${diagnosticsHtml}<div class="last-successful-execution"><p class="last-successful-execution-label">${staleExecutionLabel(currentEvaluation)}</p>${execution}</div>`;
+  }
   if (state.executionProblem && state.evaluation?.ok) {
     return `<p class="context-empty" title="${escapeHtml(state.executionProblem)}">Execution data is unavailable.</p>`;
   }
-  const diagnostics = (state.evaluation?.diagnostics || []).filter(
-    (diagnostic) =>
-      !diagnostic.line ||
-      !state.cursorPosition ||
-      diagnostic.line === state.cursorPosition.line,
-  );
-  const diagnosticsHtml = diagnostics.length
-      ? `<section class="inspect-section"><h3>Diagnostics</h3>${diagnostics.map((diagnostic) => `<button class="diagnostic" data-diagnostic-line="${diagnostic.line || ""}">${diagnostic.line ? `Line ${diagnostic.line} · ` : ""}${escapeHtml(diagnostic.message)}</button>`).join("")}</section>`
-      : "";
   if (state.evaluating) {
     return `<section class="execution-panel execution-loading" aria-live="polite">
       <span class="execution-pulse"></span>
@@ -4889,10 +4904,10 @@ function scheduleEvaluation(
             ),
           }).state);
         }
-        state.evaluationInvalidation = previousInvalidation || {
-          blockFrom: 0,
-          inlineFrom: 0,
-        };
+        // The failed result and its diagnostics describe the current source.
+        // Runtime data remains stale through executionCore, but the compiler
+        // error itself must not inherit the pending edit's faded styling.
+        state.evaluationInvalidation = null;
       }
       state.pendingEvaluation = null;
       state.evaluating = false;
