@@ -76,6 +76,7 @@ const state = {
       ? "browser"
       : "server",
   executionEngineLocked: false,
+  collaborationTransport: "websocket",
   sourceEditorView: null,
   sourceMode:
     localStorage.getItem("dox:v2:editor-mode") === "source"
@@ -291,6 +292,7 @@ async function initialize() {
     // A shared workspace pins the engine server-side; do not let a stale
     // localStorage preference put this browser back on server-side execution.
     state.executionEngineLocked = session.executionEngineLocked === true;
+    state.collaborationTransport = session.collaborationTransport || "websocket";
     if (state.executionEngineLocked) {
       state.evaluationEngine = session.executionEngine || "browser";
     }
@@ -440,6 +442,7 @@ async function attachSessionCollaboration(session) {
     port: state.collaborationPort,
     token: state.sessionToken,
     projectRoot: state.projectRoot,
+    transport: state.collaborationTransport,
     onMeta: (meta) => {
       reconcileCollaborativeIdentity(session, meta);
       if (meta.digest) session.savedVersion = meta.digest;

@@ -5,6 +5,7 @@ let usage () =
     \             [--public-origin HOST:PORT] [--collaboration-port PORT]\n\
     \             [--public-collaboration-port PORT]\n\
     \             [--execution (browser|server)]\n\
+    \             [--collaboration-transport (websocket|http)]\n\
     \  dox check FILE\n\
     \  dox audit-data FILE\n\
     \  dox artifact FILE ENTRY OUTPUT\n";
@@ -26,6 +27,9 @@ type serve_config = {
   (* --execution browser refuses server-side evaluation. Use it for any
      deployment reachable by more than the person who started Dox. *)
   browser_execution_only : bool;
+  (* Use http when serving through a proxy that authenticates with challenges:
+     browsers cannot authenticate a WebSocket handshake against one. *)
+  collaboration_transport : string;
 }
 
 let rec serve_options config = function
@@ -35,6 +39,7 @@ let rec serve_options config = function
         ~collaboration_port:config.collaboration_port
         ~public_collaboration_port:config.public_collaboration_port
         ~browser_execution_only:config.browser_execution_only
+        ~collaboration_transport:config.collaboration_transport
   | "--root" :: value :: rest -> serve_options { config with root = value } rest
   | "--assets" :: value :: rest ->
       serve_options { config with assets = value } rest
@@ -59,6 +64,8 @@ let rec serve_options config = function
       serve_options { config with browser_execution_only = true } rest
   | "--execution" :: "server" :: rest ->
       serve_options { config with browser_execution_only = false } rest
+  | "--collaboration-transport" :: (("websocket" | "http") as value) :: rest ->
+      serve_options { config with collaboration_transport = value } rest
   | _ -> usage ()
 
 let check path =
@@ -152,6 +159,7 @@ let () =
           collaboration_port = 0;
           public_collaboration_port = None;
           browser_execution_only = false;
+          collaboration_transport = "websocket";
         }
         rest
   | [ _; "check"; path ] -> check path

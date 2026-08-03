@@ -40,6 +40,10 @@ import { tags } from "@lezer/highlight";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { IndexeddbPersistence } from "y-indexeddb";
 import { WebsocketProvider } from "y-websocket";
+import * as decoding from "lib0/decoding";
+import * as encoding from "lib0/encoding";
+import * as awarenessProtocol from "y-protocols/awareness";
+import * as syncProtocol from "y-protocols/sync";
 import * as Y from "yjs";
 import { createDebugNavigationGate } from "./debug-navigation.js";
 import {
@@ -86,11 +90,204 @@ function collaborationIdentity() {
   }
 }
 
+const MESSAGE_SYNC = 0;
+const MESSAGE_AWARENESS = 1;
+
+function encodeFrame(bytes) {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function decodeFrame(text) {
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+/* Yjs sync over ordinary HTTP: EventSource downstream, POST upstream.
+
+   Exists because a browser cannot authenticate a WebSocket handshake against a
+   proxy that answers with 401/Negotiate - the WebSocket API cannot respond to a
+   challenge, so the handshake is dropped and sync never starts. Plain HTTP
+   requests, streaming ones included, authenticate normally.
+
+   Mirrors the parts of WebsocketProvider that callers here rely on. Outbound
+   frames are batched into one POST per tick to avoid a request per keystroke. */
+class HttpCollaborationProvider {
+  constructor(baseUrl, room, doc, { params = {} } = {}) {
+    this.doc = doc;
+    this.awareness = new awarenessProtocol.Awareness(doc);
+    this.synced = false;
+    this.subscriber =
+      globalThis.crypto?.randomUUID?.() ??
+      `sub-${Math.random().toString(36).slice(2)}${Date.now()}`;
+    const query = new URLSearchParams({ ...params, sub: this.subscriber });
+    this.eventsUrl = `${baseUrl}/${room}/events?${query}`;
+    this.updateUrl = `${baseUrl}/${room}/update?${query}`;
+    this.listeners = new Map();
+    this.pending = [];
+    this.flushTimer = null;
+    this.destroyed = false;
+
+    this.onDocUpdate = (update, origin) => {
+      if (origin === this) return;
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, MESSAGE_SYNC);
+      syncProtocol.writeUpdate(encoder, update);
+      this.queue(encoding.toUint8Array(encoder));
+    };
+    this.onAwarenessUpdate = ({ added, updated, removed }) => {
+      const changed = added.concat(updated, removed);
+      if (!changed.length) return;
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, MESSAGE_AWARENESS);
+      encoding.writeVarUint8Array(
+        encoder,
+        awarenessProtocol.encodeAwarenessUpdate(this.awareness, changed),
+      );
+      this.queue(encoding.toUint8Array(encoder));
+    };
+    doc.on("update", this.onDocUpdate);
+    this.awareness.on("update", this.onAwarenessUpdate);
+    this.connect();
+  }
+
+  on(event, handler) {
+    if (!this.listeners.has(event)) this.listeners.set(event, new Set());
+    this.listeners.get(event).add(handler);
+  }
+
+  off(event, handler) {
+    this.listeners.get(event)?.delete(handler);
+  }
+
+  once(event, handler) {
+    const wrapped = (...args) => {
+      this.off(event, wrapped);
+      handler(...args);
+    };
+    this.on(event, wrapped);
+  }
+
+  emit(event, ...args) {
+    for (const handler of this.listeners.get(event) ?? []) handler(...args);
+  }
+
+  connect() {
+    if (this.destroyed || this.source) return;
+    this.source = new EventSource(this.eventsUrl, { withCredentials: true });
+    this.source.onopen = () => {
+      this.emit("status", { status: "connected" });
+      // Both ends open with sync step 1: the server's step 1 makes us send our
+      // state, and ours makes the server send its state back as step 2, which is
+      // what marks this client synced. Sending only one direction leaves the
+      // handshake half-finished and `synced` never becomes true.
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, MESSAGE_SYNC);
+      syncProtocol.writeSyncStep1(encoder, this.doc);
+      this.queue(encoding.toUint8Array(encoder));
+    };
+    this.source.onerror = () => {
+      this.emit("status", { status: "disconnected" });
+    };
+    this.source.onmessage = (event) => {
+      try {
+        this.receive(decodeFrame(event.data));
+      } catch {
+        /* ignore a frame we cannot parse; the next sync repairs state */
+      }
+    };
+  }
+
+  receive(bytes) {
+    const decoder = decoding.createDecoder(bytes);
+    const messageType = decoding.readVarUint(decoder);
+    if (messageType === MESSAGE_SYNC) {
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, MESSAGE_SYNC);
+      const replyType = syncProtocol.readSyncMessage(
+        decoder,
+        encoder,
+        this.doc,
+        this,
+      );
+      if (encoding.length(encoder) > 1) this.queue(encoding.toUint8Array(encoder));
+      // Step 2 carries the server's state; once applied we are in sync.
+      if (replyType === syncProtocol.messageYjsSyncStep2 && !this.synced) {
+        this.synced = true;
+        this.emit("sync", true);
+        this.emit("status", { status: "connected" });
+      }
+    } else if (messageType === MESSAGE_AWARENESS) {
+      awarenessProtocol.applyAwarenessUpdate(
+        this.awareness,
+        decoding.readVarUint8Array(decoder),
+        this,
+      );
+    }
+  }
+
+  queue(message) {
+    if (this.destroyed) return;
+    this.pending.push(encodeFrame(message));
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flush();
+    }, 0);
+  }
+
+  async flush() {
+    if (this.destroyed || !this.pending.length) return;
+    const messages = this.pending;
+    this.pending = [];
+    try {
+      const response = await fetch(this.updateUrl, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages }),
+      });
+      if (response.status === 409) {
+        // The stream was replaced; reopen and resend.
+        this.pending = messages.concat(this.pending);
+        this.disconnect();
+        this.connect();
+      }
+    } catch {
+      this.pending = messages.concat(this.pending);
+    }
+  }
+
+  disconnect() {
+    this.source?.close();
+    this.source = null;
+    this.synced = false;
+    this.emit("status", { status: "disconnected" });
+  }
+
+  destroy() {
+    this.destroyed = true;
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.doc.off("update", this.onDocUpdate);
+    this.awareness.off("update", this.onAwarenessUpdate);
+    this.disconnect();
+    this.awareness.destroy();
+  }
+}
+
 export async function connectPageCollaboration({
   id,
   port,
   token,
   projectRoot,
+  transport,
   onMeta,
   onPresence,
   onStatus,
@@ -103,12 +300,17 @@ export async function connectPageCollaboration({
     doc,
   );
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const provider = new WebsocketProvider(
-    `${protocol}://${location.hostname}:${port}/document`,
-    id,
-    doc,
-    { params: { token }, disableBc: false },
-  );
+  const provider =
+    transport === "http"
+      ? new HttpCollaborationProvider("/document", id, doc, {
+          params: { token },
+        })
+      : new WebsocketProvider(
+          `${protocol}://${location.hostname}:${port}/document`,
+          id,
+          doc,
+          { params: { token }, disableBc: false },
+        );
   const identity = collaborationIdentity();
   provider.awareness.setLocalStateField("user", identity);
   const emitMeta = () => onMeta?.(Object.fromEntries(meta.entries()));

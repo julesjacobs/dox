@@ -40,6 +40,44 @@ This checkout uses the project-local OxCaml compiler in
 `ocamlmerlin` provides types at the cursor and can be overridden with
 `OCAMLMERLIN`.
 
+## Serving Dox to other people
+
+By default Dox binds loopback and trusts whoever reaches it: the workspace only
+accepts `127.0.0.1`/`localhost` Host headers, and OxCaml runs on the server.
+Three flags make it safe to put behind a reverse proxy that authenticates
+visitors.
+
+```sh
+dune exec dox -- serve \
+  --port 8140 \
+  --public-origin dox.example.com:443 \
+  --execution browser \
+  --collaboration-transport http \
+  --collaboration-port 8150
+```
+
+`--public-origin HOST:PORT` is the externally visible origin. It adds exactly
+that host to the accepted Host set, to the CSP `connect-src`, and to the
+collaboration service's Origin allowlist, and accepts `https` origins so a
+TLS-terminating proxy works. Any other host is still rejected.
+
+`--execution browser` keeps OxCaml execution entirely in each visitor's browser.
+Server-side evaluation is refused and saves are validated by compiling without
+running, so type errors still surface. Use it for anything reachable by more than
+the person who started Dox: otherwise a visitor can run code on the host as the
+user running Dox, which page saves do as well as explicit evaluation.
+
+`--collaboration-transport http` carries Yjs sync over ordinary HTTP -
+Server-Sent Events downstream, POST upstream - instead of a WebSocket. This is
+required behind a proxy that authenticates with HTTP challenges: a browser cannot
+answer a challenge on a WebSocket handshake, so the handshake is dropped and
+documents never sync, while the page itself loads fine. Ordinary HTTP requests,
+streaming ones included, authenticate normally.
+
+The proxy must route `/document*` to the collaboration service
+(`--collaboration-port`) and everything else to Dox, so the browser sees a single
+origin. Keep both listening on loopback and expose only the proxy.
+
 ## Collaboration and Git
 
 Every open page is a Yjs document. CodeMirror shows remote selections and the

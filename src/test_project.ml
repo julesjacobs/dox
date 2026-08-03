@@ -107,6 +107,7 @@ let () =
           public_host = None;
           public_collaboration_port = 0;
           browser_execution_only = false;
+          collaboration_transport = "websocket";
           session_token = "test";
         }
       in

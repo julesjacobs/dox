@@ -21,6 +21,10 @@ type context = {
      Required for any shared deployment, where server-side execution would let
      every visitor run code as the user running Dox. *)
   browser_execution_only : bool;
+  (* "websocket" or "http". Behind a proxy that authenticates with challenges,
+     browsers cannot authenticate a WebSocket handshake, so the HTTP transport
+     (Server-Sent Events plus POST) is the one that works. *)
+  collaboration_transport : string;
   session_token : string;
 }
 
@@ -1393,6 +1397,7 @@ let route context ~cancelled method_ target headers body =
                ( "executionEngine",
                  `String (if context.browser_execution_only then "browser" else "server") );
                ("executionEngineLocked", `Bool context.browser_execution_only);
+               ("collaborationTransport", `String context.collaboration_transport);
                ("projectRoot", `String context.project.root);
                ( "collaborationPort",
                  `Int (collaboration_port_for context headers) );
@@ -1707,7 +1712,7 @@ let flush_collaboration_before_shutdown context socket collaboration =
         pump ()
 
 let serve ~root ~assets ~port ~public_origin ~collaboration_port
-    ~public_collaboration_port ~browser_execution_only =
+    ~public_collaboration_port ~browser_execution_only ~collaboration_transport =
   let project = Project.create root in
   ignore (Evaluator.compiler_identity ());
   (match Project.recover_transactions project with
@@ -1765,6 +1770,7 @@ let serve ~root ~assets ~port ~public_origin ~collaboration_port
       collaboration_port = collaboration.port;
       public_host = public_origin;
       browser_execution_only;
+      collaboration_transport;
       public_collaboration_port =
         (match public_collaboration_port with
         | Some port -> port

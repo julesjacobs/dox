@@ -133,6 +133,58 @@ function send(connection, message) {
   if (connection.readyState === connection.OPEN) connection.send(message);
 }
 
+// Handles one inbound client message for either transport. `connection` only
+// needs readyState/OPEN/send, so an SSE subscriber works here too.
+function applyClientMessage(room, connection, bytes) {
+  const decoder = decoding.createDecoder(bytes);
+  const messageType = decoding.readVarUint(decoder);
+  if (messageType === MESSAGE_SYNC) {
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, MESSAGE_SYNC);
+    syncProtocol.readSyncMessage(decoder, encoder, room.doc, connection);
+    if (encoding.length(encoder) > 1) send(connection, encoding.toUint8Array(encoder));
+  } else if (messageType === MESSAGE_AWARENESS) {
+    const update = decoding.readVarUint8Array(decoder);
+    const controlled = room.controlledIds.get(connection);
+    if (controlled) for (const id of awarenessClientIds(update)) controlled.add(id);
+    awarenessProtocol.applyAwarenessUpdate(room.awareness, update, connection);
+  } else if (messageType === MESSAGE_QUERY_AWARENESS) {
+    send(connection, encodeAwarenessMessage(
+      room.awareness,
+      Array.from(room.awareness.getStates().keys()),
+    ));
+  }
+}
+
+// One SSE subscriber, shaped like a WebSocket connection as far as send() and
+// the broadcast paths are concerned. Frames are base64 because SSE is text.
+function createEventStreamConnection(response) {
+  const connection = {
+    OPEN: 1,
+    readyState: 1,
+    isAlive: true,
+    send(message) {
+      if (connection.readyState !== connection.OPEN) return;
+      const payload = Buffer.from(message).toString("base64");
+      try {
+        response.write(`data: ${payload}\n\n`);
+      } catch {
+        connection.readyState = 3;
+      }
+    },
+    close() {
+      if (connection.readyState === 3) return;
+      connection.readyState = 3;
+      try {
+        response.end();
+      } catch {
+        /* already gone */
+      }
+    },
+  };
+  return connection;
+}
+
 function encodeAwarenessMessage(awareness, clientIds) {
   const encoder = encoding.createEncoder();
   encoding.writeVarUint(encoder, MESSAGE_AWARENESS);
@@ -673,10 +725,129 @@ export async function createCollaborationServer({
     }
   };
 
+  // Subscribers of the HTTP transport, keyed by a client-supplied id so a POST
+  // can be attributed to the stream that opened it (needed so sync replies go
+  // back to the right client and awareness ownership is tracked).
+  const streamSubscribers = new Map();
+
+  const streamRequestValid = (request, url, room) =>
+    room &&
+    !room.tombstoned &&
+    constantTimeEqual(url.searchParams.get("token"), token) &&
+    // A same-origin request sends no Origin header at all, which is the normal
+    // case here; only reject an Origin that is present and not allowlisted.
+    (!origins.length ||
+      request.headers.origin === undefined ||
+      origins.includes(request.headers.origin));
+
+  async function handleStreamRoute(request, response, id, kind) {
+    const url = new URL(request.url, "http://localhost");
+    const room = rooms.get(id);
+    if (!streamRequestValid(request, url, room)) {
+      jsonResponse(response, 403, { error: "Forbidden" });
+      return;
+    }
+    if (projectPollingPaused?.phase === "paused") {
+      jsonResponse(response, 503, { error: "The Dox project is being reorganized." });
+      return;
+    }
+    const subscriber = url.searchParams.get("sub");
+    if (!subscriber) {
+      jsonResponse(response, 400, { error: "Missing subscriber id." });
+      return;
+    }
+
+    if (kind === "update") {
+      if (request.method !== "POST") {
+        jsonResponse(response, 405, { error: "Method not allowed." });
+        return;
+      }
+      const connection = streamSubscribers.get(subscriber);
+      if (!connection) {
+        jsonResponse(response, 409, { error: "Unknown subscriber; reopen the stream." });
+        return;
+      }
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = Buffer.concat(chunks).toString("utf8");
+      try {
+        for (const frame of JSON.parse(body).messages || []) {
+          applyClientMessage(room, connection, new Uint8Array(Buffer.from(frame, "base64")));
+        }
+      } catch {
+        jsonResponse(response, 400, { error: "Invalid collaboration message." });
+        return;
+      }
+      jsonResponse(response, 200, { ok: true });
+      return;
+    }
+
+    if (request.method !== "GET") {
+      jsonResponse(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    if (room.connections.size >= 32) {
+      jsonResponse(response, 503, { error: "This document has too many collaborators." });
+      return;
+    }
+
+    // Register before the headers go out: the client posts as soon as it sees
+    // them, and a POST for an unregistered subscriber is rejected.
+    const connection = createEventStreamConnection(response);
+    streamSubscribers.set(subscriber, connection);
+    room.connections.add(connection);
+    room.controlledIds.set(connection, new Set());
+    response.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-store",
+      "x-accel-buffering": "no",
+      connection: "keep-alive",
+    });
+
+    // Same opening exchange the WebSocket path performs.
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, MESSAGE_SYNC);
+    syncProtocol.writeSyncStep1(encoder, room.doc);
+    send(connection, encoding.toUint8Array(encoder));
+    send(
+      connection,
+      encodeAwarenessMessage(room.awareness, Array.from(room.awareness.getStates().keys())),
+    );
+    publishMeta(room);
+
+    const keepAlive = setInterval(() => {
+      if (connection.readyState !== connection.OPEN) return;
+      try {
+        response.write(": keep-alive\n\n");
+      } catch {
+        connection.readyState = 3;
+      }
+    }, 20_000);
+
+    const teardown = () => {
+      clearInterval(keepAlive);
+      streamSubscribers.delete(subscriber);
+      const controlled = room.controlledIds.get(connection) || new Set();
+      awarenessProtocol.removeAwarenessStates(room.awareness, Array.from(controlled), connection);
+      room.controlledIds.delete(connection);
+      room.connections.delete(connection);
+      connection.close();
+    };
+    request.on("close", teardown);
+    request.on("error", teardown);
+  }
+
   const httpServer = http.createServer(async (request, response) => {
     try {
       if (request.url === "/health" && request.method === "GET") {
         jsonResponse(response, 200, { ok: true });
+        return;
+      }
+      const streamRoute = request.url.match(
+        /^\/document\/([0-9a-f-]+)\/(events|update)(\?|$)/,
+      );
+      if (streamRoute) {
+        await handleStreamRoute(request, response, streamRoute[1], streamRoute[2]);
         return;
       }
       if (!constantTimeEqual(request.headers["x-dox-token"], token)) {
@@ -776,25 +947,7 @@ export async function createCollaborationServer({
           connection.close(1012, "The Dox project is being reorganized.");
           return;
         }
-        const bytes = new Uint8Array(data);
-        const decoder = decoding.createDecoder(bytes);
-        const messageType = decoding.readVarUint(decoder);
-        if (messageType === MESSAGE_SYNC) {
-          const encoder = encoding.createEncoder();
-          encoding.writeVarUint(encoder, MESSAGE_SYNC);
-          syncProtocol.readSyncMessage(decoder, encoder, room.doc, connection);
-          if (encoding.length(encoder) > 1) send(connection, encoding.toUint8Array(encoder));
-        } else if (messageType === MESSAGE_AWARENESS) {
-          const update = decoding.readVarUint8Array(decoder);
-          const controlled = room.controlledIds.get(connection);
-          for (const id of awarenessClientIds(update)) controlled.add(id);
-          awarenessProtocol.applyAwarenessUpdate(room.awareness, update, connection);
-        } else if (messageType === MESSAGE_QUERY_AWARENESS) {
-          send(connection, encodeAwarenessMessage(
-            room.awareness,
-            Array.from(room.awareness.getStates().keys()),
-          ));
-        }
+        applyClientMessage(room, connection, new Uint8Array(data));
       } catch {
         connection.close(1003, "Invalid collaboration message");
       }
