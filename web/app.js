@@ -3053,7 +3053,7 @@ function executionCoreProjection() {
         callId:
           link.kind === "parent" && link.occurrenceId
             ? `occurrence:${link.occurrenceId}`
-            : `activation:${link.activationId}`,
+            : link.activationId,
         label: link.label,
         line: range.startLine,
         column: range.startColumn,

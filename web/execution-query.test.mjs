@@ -512,6 +512,32 @@ test("structural keyword selectors never present an expression value", () => {
   }
 });
 
+test("a function definition binder presents activations without a duplicate value column", () => {
+  const { envelope: original, projectedSelectors } = fixture();
+  const input = structuredClone(original);
+  input.staticProgram.constructs.find(
+    (construct) => construct.id === "construct-call",
+  ).semanticKind = "function";
+  const built = buildExecutionSnapshot(sealExecutionEnvelope(input));
+  assert.equal(built.ok, true);
+  const view = buildExecutionView({
+    snapshot: built.snapshot,
+    documentRevisionId: "document",
+    sources: { "sample.ml.md": "fib 5 + 1" },
+    projectedSelectors: projectedSelectors.map((selector) =>
+      selector.id === "selector-callee"
+        ? { ...selector, role: "binder" }
+        : selector,
+    ),
+  });
+  const selection = selectCursor(
+    view,
+    resolveCursor(view, { path: "sample.ml.md", line: 1, column: 1 }),
+  );
+  assert.equal(selectionHasExpressionValue(view, selection), false);
+  assert.deepEqual(valuesAt(view, selection), { values: [], total: 0 });
+});
+
 test("values skip incomplete later occurrences instead of exposing null", () => {
   const { envelope: original, projectedSelectors } = fixture();
   const input = structuredClone(original);

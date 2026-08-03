@@ -57,7 +57,11 @@ export function selectionHasExpressionValue(view, selection) {
   return Boolean(
     selector &&
       !structuralSelectorRoles.has(selector.role) &&
-      construct,
+      construct &&
+      // The name in `let rec fib n = ...` identifies the activation being
+      // browsed. Treat it like `let rec`, not like a value expression. Its
+      // value is the function result already shown in the activation row.
+      !(selector.role === "binder" && construct.semanticKind === "function"),
   );
 }
 
