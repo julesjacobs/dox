@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   executionAnnotationColumn,
+  executionAnnotationRail,
   minimumExecutionAnnotationGap,
 } from "./execution-annotation-layout.js";
 
@@ -21,4 +22,14 @@ test("annotation rail preserves its minimum gap for every long line", () => {
         minimumExecutionAnnotationGap,
     );
   }
+});
+
+test("one annotation rail is shared by top level and function activations", () => {
+  const documentRail = executionAnnotationRail();
+  const topLevelColumn = executionAnnotationColumn(32, documentRail);
+  const activationColumn = executionAnnotationColumn(32, documentRail);
+  assert.equal(documentRail, 72);
+  assert.equal(topLevelColumn, activationColumn);
+  assert.equal(topLevelColumn, 72);
+  assert.equal(executionAnnotationRail(48), 48);
 });

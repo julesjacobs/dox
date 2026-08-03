@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  changeBlankOutlineDepth,
   indentOutlineSubtree,
   moveOutlineSibling,
   moveOutlineSubtree,
@@ -60,4 +61,14 @@ test("drops into a sibling as its first child", () => {
 
 test("does not allow dropping a parent into its own subtree", () => {
   assert.equal(moveOutlineSubtree(outline, 0, 1, "inside-first"), null);
+});
+
+test("indents an empty page draft before its name is typed", () => {
+  const changed = changeBlankOutlineDepth("Alpha\nBeta\n", 2, 1);
+  assert.equal(changed.source, "Alpha\nBeta\n  ");
+  assert.deepEqual(changed.originLines, [1, 2, 3]);
+});
+
+test("does not indent an empty first row without a parent", () => {
+  assert.equal(changeBlankOutlineDepth("\nAlpha", 0, 1), null);
 });

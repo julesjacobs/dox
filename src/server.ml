@@ -331,22 +331,28 @@ let create_pages_response context body =
   let open Util in
   let parsed =
     let* request = json_body body in
-    let* values = list_member "modules" request in
-    let* base_project_version = string_member "baseProjectVersion" request in
     let rec strings result = function
       | [] -> Ok (List.rev result)
       | `String value :: rest -> strings (value :: result) rest
       | _ -> Error "Expected modules to contain only strings."
     in
+    let* values = list_member "modules" request in
     let* module_paths = strings [] values in
-    Ok (module_paths, base_project_version)
+    let* page_order =
+      match Yojson.Safe.Util.member "order" request with
+      | `Null -> Ok None
+      | `List values -> Result.map Option.some (strings [] values)
+      | _ -> Error "Expected order to contain only strings."
+    in
+    let* base_project_version = string_member "baseProjectVersion" request in
+    Ok (module_paths, page_order, base_project_version)
   in
   match parsed with
   | Error message -> error message
-  | Ok (module_paths, base_project_version) -> (
+  | Ok (module_paths, page_order, base_project_version) -> (
       match
-        Project.create_pages context.project ~module_paths ~base_project_version
-          ~principal:"workspace-user"
+        Project.create_pages ?page_order context.project ~module_paths
+          ~base_project_version ~principal:"workspace-user"
       with
       | Error project_error_ -> project_error project_error_
       | Ok (documents, snapshot) ->
@@ -354,6 +360,45 @@ let create_pages_response context body =
             (`Assoc
                [
                  ("documents", `List (List.map Document.to_json documents));
+                 ("project", Project.snapshot_to_json context.project snapshot);
+                 ("projectVersion", `String snapshot.version);
+               ]))
+
+let delete_pages_response context body =
+  let open Util in
+  let parsed =
+    let* request = json_body body in
+    let rec strings result = function
+      | [] -> Ok (List.rev result)
+      | `String value :: rest -> strings (value :: result) rest
+      | _ -> Error "Expected modules to contain only strings."
+    in
+    let* values = list_member "modules" request in
+    let* module_paths = strings [] values in
+    let* page_order =
+      match Yojson.Safe.Util.member "order" request with
+      | `Null -> Ok None
+      | `List values -> Result.map Option.some (strings [] values)
+      | _ -> Error "Expected order to contain only strings."
+    in
+    let* base_project_version = string_member "baseProjectVersion" request in
+    Ok (module_paths, page_order, base_project_version)
+  in
+  match parsed with
+  | Error message -> error message
+  | Ok (module_paths, page_order, base_project_version) -> (
+      match
+        Project.delete_pages ?page_order context.project ~module_paths
+          ~base_project_version ~principal:"workspace-user"
+      with
+      | Error project_error_ -> project_error project_error_
+      | Ok (snapshot, trash_path) ->
+          json
+            (`Assoc
+               [
+                 ( "deleted",
+                   `List (List.map (fun value -> `String value) module_paths) );
+                 ("trashPath", `String trash_path);
                  ("project", Project.snapshot_to_json context.project snapshot);
                  ("projectVersion", `String snapshot.version);
                ]))
@@ -423,23 +468,35 @@ let module_renames request =
   in
   parse [] entries
 
+let optional_module_order request =
+  let rec parse result = function
+    | [] -> Ok (Some (List.rev result))
+    | `String value :: rest -> parse (value :: result) rest
+    | _ -> Error "Expected order to contain only strings."
+  in
+  match Yojson.Safe.Util.member "order" request with
+  | `Null -> Ok None
+  | `List values -> parse [] values
+  | _ -> Error "Expected order to contain only strings."
+
 let refactor_preview_response context body =
   let open Util in
   match
     let* request = json_body body in
     let* project_version = string_member "projectVersion" request in
     let* renames = module_renames request in
-    Ok (project_version, renames)
+    let* page_order = optional_module_order request in
+    Ok (project_version, renames, page_order)
   with
   | Error message -> error message
-  | Ok (project_version, renames) -> (
+  | Ok (project_version, renames, page_order) -> (
       match Project.snapshot context.project with
       | Error project_error_ -> project_error project_error_
       | Ok snapshot -> (
           if not (String.equal snapshot.version project_version) then
             error ~status:409 "The project changed before the refactor preview."
           else
-            match Project.refactor_preview snapshot renames with
+            match Project.refactor_preview ?page_order snapshot renames with
             | Error project_error_ -> project_error project_error_
             | Ok preview -> json preview))
 
@@ -450,12 +507,13 @@ let refactor_apply_response context body =
     let* project_version = string_member "projectVersion" request in
     let* preview_id = string_member "previewId" request in
     let* renames = module_renames request in
-    Ok (project_version, preview_id, renames)
+    let* page_order = optional_module_order request in
+    Ok (project_version, preview_id, renames, page_order)
   with
   | Error message -> error message
-  | Ok (project_version, preview_id, renames) -> (
+  | Ok (project_version, preview_id, renames, page_order) -> (
       match
-        Project.apply_module_refactor context.project
+        Project.apply_module_refactor ?page_order context.project
           ~expected_project_version:project_version
           ~expected_preview_id:preview_id renames
       with
@@ -555,16 +613,18 @@ let evaluate_response context ~cancelled body =
               Project.resolve_documents ~cancelled context.project snapshot
                 document
             with
-            | Error project_error_ -> Error (Project.error_message project_error_)
+            | Error project_error_ ->
+                Error (Project.error_message project_error_)
             | Ok documents ->
                 profile "resolveDocuments" resolve_started;
                 let evaluation_started = Unix.gettimeofday () in
                 let evaluation =
                   Evaluator.evaluate_documents ~project_version:snapshot.version
-                    ?request_code_digest ~cancelled ~documents ~target:document ()
+                    ?request_code_digest ~cancelled ~documents ~target:document
+                    ()
                 in
-              profile "evaluateDocuments" evaluation_started;
-              Ok (document, evaluation, snapshot.version))
+                profile "evaluateDocuments" evaluation_started;
+                Ok (document, evaluation, snapshot.version))
   with
   | Error message -> error ~status:409 message
   | Ok (document, evaluation, project_version) ->
@@ -862,8 +922,9 @@ let change_response context parameters =
 
 let content_type path =
   if Util.ends_with ~suffix:".html" path then "text/html; charset=utf-8"
-  else if Util.ends_with ~suffix:".js" path then
-    "text/javascript; charset=utf-8"
+  else if
+    Util.ends_with ~suffix:".js" path || Util.ends_with ~suffix:".mjs" path
+  then "text/javascript; charset=utf-8"
   else if Util.ends_with ~suffix:".css" path then "text/css; charset=utf-8"
   else if Util.ends_with ~suffix:".svg" path then "image/svg+xml"
   else "application/octet-stream"
@@ -949,6 +1010,9 @@ let route context ~cancelled method_ target headers body =
   | "POST", "/api/pages" ->
       require_active_request context headers (fun () ->
           create_pages_response context body)
+  | "DELETE", "/api/pages" ->
+      require_active_request context headers (fun () ->
+          delete_pages_response context body)
   | "PUT", "/api/page-order" ->
       require_active_request context headers (fun () ->
           page_order_response context body)

@@ -9,7 +9,14 @@ type diagnostic = {
 }
 
 type binding = { name : string; type_ : string }
-type view = { sequence : int; kind : string; id : string; content : string }
+
+type view = {
+  sequence : int;
+  kind : string;
+  id : string;
+  content : string;
+  parent_occurrence_id : string option;
+}
 
 type block_output = {
   path : string;
@@ -254,8 +261,7 @@ let execution_canonical_json json =
     | `Bool true -> Buffer.add_string buffer "b1"
     | `Int value -> add_length_prefixed 'i' (string_of_int value)
     | `Intlit value -> add_length_prefixed 'i' value
-    | `Float value ->
-        add_length_prefixed 'd' (Printf.sprintf "%.17g" value)
+    | `Float value -> add_length_prefixed 'd' (Printf.sprintf "%.17g" value)
     | `String value -> add_length_prefixed 's' value
     | `List values ->
         Buffer.add_char buffer 'l';
@@ -263,7 +269,11 @@ let execution_canonical_json json =
         Buffer.add_char buffer ':';
         List.iter encode values
     | `Assoc fields ->
-        let fields = List.sort (fun (left, _) (right, _) -> String.compare left right) fields in
+        let fields =
+          List.sort
+            (fun (left, _) (right, _) -> String.compare left right)
+            fields
+        in
         Buffer.add_char buffer 'o';
         Buffer.add_string buffer (string_of_int (List.length fields));
         Buffer.add_char buffer ':';
@@ -309,7 +319,9 @@ let decode_hex value =
     | _ -> invalid_arg "invalid hexadecimal character"
   in
   if String.length value mod 2 <> 0 then invalid_arg "odd hexadecimal string";
-  String.init (String.length value / 2) (fun index ->
+  String.init
+    (String.length value / 2)
+    (fun index ->
       Char.chr
         ((nibble value.[index * 2] lsl 4) lor nibble value.[(index * 2) + 1]))
 
@@ -321,18 +333,39 @@ let read_compiler_manifest path =
         match String.split_on_char '\n' contents with
         | header :: entries -> (
             match String.split_on_char '\t' header with
-            | [ "dox-construct-manifest"; "6"; unit_name;
-                top_level_scope_id; generated_path; byte_length;
-                source_digest ] ->
+            | [
+             "dox-construct-manifest";
+             "6";
+             unit_name;
+             top_level_scope_id;
+             generated_path;
+             byte_length;
+             source_digest;
+            ] ->
                 let constructs = ref [] in
                 let execution_scopes = ref [] in
                 let selectors = ref [] in
                 let parse_entry entry =
                   match String.split_on_char '\t' entry with
-                  | [ "C"; id; category; semantic_kind; source_path; start_byte; end_byte;
-                      start_line; start_column; end_line; end_column; ghost;
-                      parent_id; owner_scope_id; lexical_scope_id;
-                      syntax_fingerprint; lexical_ancestry_fingerprint ] ->
+                  | [
+                   "C";
+                   id;
+                   category;
+                   semantic_kind;
+                   source_path;
+                   start_byte;
+                   end_byte;
+                   start_line;
+                   start_column;
+                   end_line;
+                   end_column;
+                   ghost;
+                   parent_id;
+                   owner_scope_id;
+                   lexical_scope_id;
+                   syntax_fingerprint;
+                   lexical_ancestry_fingerprint;
+                  ] ->
                       constructs :=
                         {
                           construct_id = decode_hex id;
@@ -367,9 +400,22 @@ let read_compiler_manifest path =
                              else Some (decode_hex function_construct_id));
                         }
                         :: !execution_scopes
-                  | [ "L"; id; role; subject_id; source_path; start_byte;
-                      end_byte; start_line; start_column; end_line; end_column;
-                      priority; tie_break_rank; syntax_fingerprint ] ->
+                  | [
+                   "L";
+                   id;
+                   role;
+                   subject_id;
+                   source_path;
+                   start_byte;
+                   end_byte;
+                   start_line;
+                   start_column;
+                   end_line;
+                   end_column;
+                   priority;
+                   tie_break_rank;
+                   syntax_fingerprint;
+                  ] ->
                       selectors :=
                         {
                           selector_id = decode_hex id;
@@ -398,17 +444,15 @@ let read_compiler_manifest path =
                     manifest_generated_path = decode_hex generated_path;
                     manifest_byte_length = int_of_string byte_length;
                     manifest_source_digest = source_digest;
-                    manifest_top_level_scope_id =
-                      decode_hex top_level_scope_id;
+                    manifest_top_level_scope_id = decode_hex top_level_scope_id;
                     manifest_execution_scopes = List.rev !execution_scopes;
                     manifest_constructs = List.rev !constructs;
                     manifest_selectors = List.rev !selectors;
                   }
             | _ -> Error "Unsupported compiler construct manifest header.")
         | [] -> Error "Empty compiler construct manifest."
-      with
-      | Invalid_argument message | Failure message ->
-          Error ("Invalid compiler construct manifest: " ^ message))
+      with Invalid_argument message | Failure message ->
+        Error ("Invalid compiler construct manifest: " ^ message))
 
 let run_process ?cwd ?stdin ?(environment = []) ?(extra_output_paths = [])
     ?(timeout_seconds = 10.) ?(output_limit = 2_000_000)
@@ -464,7 +508,10 @@ let run_process ?cwd ?stdin ?(environment = []) ?(extra_output_paths = [])
             Option.iter Unix.chdir cwd;
             Unix.execvpe program
               (Array.of_list (program :: arguments))
-              (environment_with environment)
+              (environment_with
+                 (("DOX_PROCESS_STDOUT_PATH", stdout_path)
+                 :: ("DOX_PROCESS_STDERR_PATH", stderr_path)
+                 :: environment))
           with error ->
             prerr_endline
               ("Could not start process: " ^ Printexc.to_string error);
@@ -581,32 +628,32 @@ let trace_event sequence content =
    detail;
   ] ->
       Option.bind (int_of_string_opt domain_id) (fun domain_id ->
-        Option.bind (int_of_string_opt line) (fun line ->
-          Option.bind (int_of_string_opt column) (fun column ->
-              Option.bind (int_of_string_opt end_line) (fun end_line ->
-                  Option.map
-                    (fun end_column ->
-                      {
-                        sequence;
-                        domain_id;
-                        phase;
-                        occurrence_id;
-                        parent_id =
-                          (if String.equal parent_id "" then None
-                           else Some parent_id);
-                        site_id;
-                        kind;
-                        label;
-                        path;
-                        source_line = line;
-                        source_column = column;
-                        source_end_line = end_line;
-                        source_end_column = end_column;
-                        type_;
-                        value_complete = String.equal value_complete "1";
-                        detail;
-                      })
-                    (int_of_string_opt end_column)))))
+          Option.bind (int_of_string_opt line) (fun line ->
+              Option.bind (int_of_string_opt column) (fun column ->
+                  Option.bind (int_of_string_opt end_line) (fun end_line ->
+                      Option.map
+                        (fun end_column ->
+                          {
+                            sequence;
+                            domain_id;
+                            phase;
+                            occurrence_id;
+                            parent_id =
+                              (if String.equal parent_id "" then None
+                               else Some parent_id);
+                            site_id;
+                            kind;
+                            label;
+                            path;
+                            source_line = line;
+                            source_column = column;
+                            source_end_line = end_line;
+                            source_end_column = end_column;
+                            type_;
+                            value_complete = String.equal value_complete "1";
+                            detail;
+                          })
+                        (int_of_string_opt end_column)))))
   | _ -> None
 
 let parse_runtime_events contents =
@@ -628,9 +675,75 @@ let parse_runtime_events contents =
            match trace_event sequence content with
            | Some event -> (views, event :: traces)
            | None -> (views, traces)
-         else ({ sequence; kind; id; content } :: views, traces))
+         else
+           ( { sequence; kind; id; content; parent_occurrence_id = None }
+             :: views,
+             traces ))
        ([], [])
   |> fun (views, traces) -> (List.rev views, List.rev traces)
+
+let output_marker_site_id = "__dox_output_marker__"
+
+let merge_output_events views traces =
+  let markers = Hashtbl.create (List.length views) in
+  let traces =
+    List.filter
+      (fun (event : trace_event) ->
+        if String.equal event.site_id output_marker_site_id then (
+          Option.iter
+            (fun index -> Hashtbl.replace markers index event)
+            (int_of_string_opt event.detail);
+          false)
+        else true)
+      traces
+  in
+  let last_trace_sequence =
+    List.fold_left
+      (fun maximum (event : trace_event) -> max maximum event.sequence)
+      0 traces
+  in
+  let views =
+    List.map
+      (fun (view : view) ->
+        match Hashtbl.find_opt markers view.sequence with
+        | Some marker ->
+            {
+              view with
+              sequence = marker.sequence;
+              parent_occurrence_id = marker.parent_id;
+            }
+        | None ->
+            { view with sequence = last_trace_sequence + view.sequence + 1 })
+      views
+  in
+  (views, traces)
+
+let collapse_nested_output_views views =
+  let rec loop result = function
+    | [] -> List.rev result
+    | (view : view) :: rest when String.equal view.kind "output-collapse" -> (
+        match int_of_string_opt view.content with
+        | None -> loop result rest
+        | Some start ->
+            let latest =
+              result
+              |> List.find_opt (fun (candidate : view) ->
+                  String.equal candidate.kind view.id
+                  && candidate.sequence >= start)
+              |> Option.map (fun (candidate : view) -> candidate.sequence)
+            in
+            let result =
+              result
+              |> List.filter (fun (candidate : view) ->
+                  not
+                    (String.equal candidate.kind view.id
+                    && candidate.sequence >= start
+                    && Some candidate.sequence <> latest))
+            in
+            loop result rest)
+    | view :: rest -> loop (view :: result) rest
+  in
+  loop [] views
 
 let runtime_events_truncated contents =
   String.split_on_char '\n' contents
@@ -639,15 +752,16 @@ let runtime_events_truncated contents =
 let runtime_events_malformed contents =
   String.split_on_char '\n' contents
   |> List.exists (fun line ->
-      if String.equal line ""
-         || Util.starts_with ~prefix:"trace-truncated\t" line
+      if
+        String.equal line ""
+        || Util.starts_with ~prefix:"trace-truncated\t" line
       then false
       else
         match String.split_on_char '\t' line with
         | [ kind; id; content ] -> (
             match (hex_decode id, hex_decode content) with
             | Ok _, Ok content when String.equal kind "observe" ->
-              Option.is_none (trace_event 0 content)
+                Option.is_none (trace_event 0 content)
             | Ok _, Ok _ -> false
             | Error _, _ | _, Error _ -> true)
         | _ -> true)
@@ -656,7 +770,8 @@ let tail_relation_detail detail =
   match String.split_on_char ':' detail with
   | [ handoff; remaining ] ->
       Option.bind (int_of_string_opt handoff) (fun handoff ->
-          Option.map (fun remaining -> handoff, remaining)
+          Option.map
+            (fun remaining -> (handoff, remaining))
             (int_of_string_opt remaining))
   | _ -> None
 
@@ -670,8 +785,8 @@ let complete_tail_outcomes ~trace_truncated traces =
     (fun event ->
       if String.equal event.phase "enter" then
         Hashtbl.replace enters event.occurrence_id event
-      else if String.equal event.phase "return"
-              || String.equal event.phase "raise"
+      else if
+        String.equal event.phase "return" || String.equal event.phase "raise"
       then Hashtbl.replace outcomes event.occurrence_id event
       else if String.equal event.phase "tail-handoff" then
         match tail_relation_detail event.detail with
@@ -708,46 +823,47 @@ let complete_tail_outcomes ~trace_truncated traces =
     | Some event -> Some event
     | None when Hashtbl.mem resolving occurrence -> None
     | None ->
-      Hashtbl.replace resolving occurrence ();
-      let resolved =
-        Option.bind (Hashtbl.find_opt targets occurrence) outcome
-      in
-      Hashtbl.remove resolving occurrence;
-      resolved
+        Hashtbl.replace resolving occurrence ();
+        let resolved =
+          Option.bind (Hashtbl.find_opt targets occurrence) outcome
+        in
+        Hashtbl.remove resolving occurrence;
+        resolved
   in
   let next_sequence =
     ref
       (List.fold_left
          (fun maximum event -> max maximum event.sequence)
          (-1) traces
-       + 1)
+      + 1)
   in
   let completed = ref [] in
   let completed_occurrences = Hashtbl.create 32 in
   let rec complete occurrence =
-    if not (Hashtbl.mem outcomes occurrence)
-       && not (Hashtbl.mem completed_occurrences occurrence)
+    if
+      (not (Hashtbl.mem outcomes occurrence))
+      && not (Hashtbl.mem completed_occurrences occurrence)
     then (
       Hashtbl.replace completed_occurrences occurrence ();
       match Hashtbl.find_opt targets occurrence with
       | None -> ()
-      | Some target ->
-        if Hashtbl.mem targets target then complete target;
-        match Hashtbl.find_opt enters occurrence, outcome occurrence with
-        | Some entered, Some returned ->
-          let event =
-            {
-              entered with
-              sequence = !next_sequence;
-              phase = returned.phase;
-              value_complete = returned.value_complete;
-              detail = returned.detail;
-            }
-          in
-          incr next_sequence;
-          Hashtbl.replace outcomes occurrence event;
-          completed := event :: !completed
-        | _ -> ())
+      | Some target -> (
+          if Hashtbl.mem targets target then complete target;
+          match (Hashtbl.find_opt enters occurrence, outcome occurrence) with
+          | Some entered, Some returned ->
+              let event =
+                {
+                  entered with
+                  sequence = !next_sequence;
+                  phase = returned.phase;
+                  value_complete = returned.value_complete;
+                  detail = returned.detail;
+                }
+              in
+              incr next_sequence;
+              Hashtbl.replace outcomes occurrence event;
+              completed := event :: !completed
+          | _ -> ()))
   in
   targets |> Hashtbl.to_seq_keys |> List.of_seq |> List.sort String.compare
   |> List.iter complete;
@@ -772,17 +888,15 @@ let raw_tail_stats traces =
   let tail_linked_enters =
     List.fold_left
       (fun count event ->
-        if String.equal event.phase "tail-link"
-        then count + 1
-        else count)
+        if String.equal event.phase "tail-link" then count + 1 else count)
       0 traces
   in
   let tail_handoff_outcomes =
     List.fold_left
       (fun count event ->
-        if (String.equal event.phase "return"
-            || String.equal event.phase "raise")
-           && Hashtbl.mem handed_off event.occurrence_id
+        if
+          (String.equal event.phase "return" || String.equal event.phase "raise")
+          && Hashtbl.mem handed_off event.occurrence_id
         then count + 1
         else count)
       0 traces
@@ -790,11 +904,21 @@ let raw_tail_stats traces =
   ( !tail_handoffs,
     tail_linked_enters,
     tail_handoff_outcomes,
-    handed_off |> Hashtbl.to_seq_keys |> List.of_seq |> List.sort String.compare )
+    handed_off |> Hashtbl.to_seq_keys |> List.of_seq |> List.sort String.compare
+  )
 
 let prelude =
   {|
 module Doc = struct
+  external mark_output : string -> int -> unit = "caml_doclang_observe_write"
+
+  let output_marker_metadata =
+    String.concat "\x1f"
+      [ "__dox_output_marker__"; "output"; ""; ""; "0"; "0"; "0"; "0";
+        "int"; "" ]
+
+  let output_sequence = ref 0
+
   let hex value =
     let digits = "0123456789abcdef" in
     let output = Bytes.create (String.length value * 2) in
@@ -815,6 +939,9 @@ module Doc = struct
       | None -> stderr)
 
   let emit kind ~id content =
+    let sequence = !output_sequence in
+    incr output_sequence;
+    mark_output output_marker_metadata sequence;
     let channel = Lazy.force event_channel in
     Printf.fprintf channel "%s\t%s\t%s\n%!" kind (hex id) (hex content)
 
@@ -825,6 +952,129 @@ module Doc = struct
   let status ~id content = emit "status" ~id content
   let link ~id ~label url = emit "link" ~id (label ^ "\x1f" ^ url)
   let trace ~id content = emit "trace" ~id content
+
+  let emit_channel_range kind ~id variable start finish =
+    if finish > start then
+      match Sys.getenv_opt variable with
+      | None -> ()
+      | Some path ->
+          (try
+             let channel = open_in_bin path in
+             seek_in channel start;
+             let content = really_input_string channel (finish - start) in
+             close_in_noerr channel;
+             emit kind ~id content
+           with Sys_error _ | End_of_file -> ())
+
+  let collapse_output kind start =
+    emit "output-collapse" ~id:kind (string_of_int start)
+end
+
+let print_string value =
+  Doc.emit "stdout" ~id:"stdout" value;
+  Stdlib.print_string value
+
+let print_endline value =
+  Doc.emit "stdout" ~id:"stdout" (value ^ "\n");
+  Stdlib.print_endline value
+
+let print_char value =
+  Doc.emit "stdout" ~id:"stdout" (String.make 1 value);
+  Stdlib.print_char value
+
+let print_int value =
+  Doc.emit "stdout" ~id:"stdout" (string_of_int value);
+  Stdlib.print_int value
+
+let print_float value =
+  Doc.emit "stdout" ~id:"stdout" (string_of_float value);
+  Stdlib.print_float value
+
+let print_newline () =
+  Doc.emit "stdout" ~id:"stdout" "\n";
+  Stdlib.print_newline ()
+
+let prerr_string value =
+  Doc.emit "stderr" ~id:"stderr" value;
+  Stdlib.prerr_string value
+
+let prerr_endline value =
+  Doc.emit "stderr" ~id:"stderr" (value ^ "\n");
+  Stdlib.prerr_endline value
+
+let output_string channel value =
+  if channel == stdout then
+    Doc.emit "stdout" ~id:"stdout" value
+  else if channel == stderr then Doc.emit "stderr" ~id:"stderr" value;
+  Stdlib.output_string channel value
+
+let output_char channel value =
+  if channel == stdout then
+    Doc.emit "stdout" ~id:"stdout" (String.make 1 value)
+  else if channel == stderr then
+    Doc.emit "stderr" ~id:"stderr" (String.make 1 value);
+  Stdlib.output_char channel value
+
+module Dox_original_printf = Printf
+module Printf = struct
+  include Dox_original_printf
+
+  let fprintf channel format =
+    let target =
+      if channel == stdout then
+        Some ("stdout", "stdout", "DOX_PROCESS_STDOUT_PATH")
+      else if channel == stderr then
+        Some ("stderr", "stderr", "DOX_PROCESS_STDERR_PATH")
+      else None
+    in
+    match target with
+    | None -> Dox_original_printf.fprintf channel format
+    | Some (kind, id, variable) ->
+        let first_output = !(Doc.output_sequence) in
+        Stdlib.flush channel;
+        let start = Stdlib.pos_out channel in
+        Dox_original_printf.kfprintf
+          (fun channel ->
+            Stdlib.flush channel;
+            Doc.emit_channel_range kind ~id variable start
+              (Stdlib.pos_out channel);
+            Doc.collapse_output kind first_output)
+          channel format
+
+  let printf format = fprintf stdout format
+  let eprintf format = fprintf stderr format
+end
+
+module Dox_original_format = Format
+module Format = struct
+  include Dox_original_format
+
+  let fprintf formatter format =
+    let target =
+      if formatter == std_formatter then
+        Some (stdout, "stdout", "stdout", "DOX_PROCESS_STDOUT_PATH")
+      else if formatter == err_formatter then
+        Some (stderr, "stderr", "stderr", "DOX_PROCESS_STDERR_PATH")
+      else None
+    in
+    match target with
+    | None -> Dox_original_format.fprintf formatter format
+    | Some (channel, kind, id, variable) ->
+        let first_output = !(Doc.output_sequence) in
+        Dox_original_format.pp_print_flush formatter ();
+        Stdlib.flush channel;
+        let start = Stdlib.pos_out channel in
+        Dox_original_format.kfprintf
+          (fun formatter ->
+            Dox_original_format.pp_print_flush formatter ();
+            Stdlib.flush channel;
+            Doc.emit_channel_range kind ~id variable start
+              (Stdlib.pos_out channel);
+            Doc.collapse_output kind first_output)
+          formatter format
+
+  let printf format = fprintf std_formatter format
+  let eprintf format = fprintf err_formatter format
 end
 |}
 
@@ -916,10 +1166,7 @@ let absolute_source_utf16_offset document line column =
     | [] -> None
     | source :: rest ->
         if index = line then Some (total + column)
-        else
-          preceding
-            (total + editor_line_length source + 1)
-            (index + 1) rest
+        else preceding (total + editor_line_length source + 1) (index + 1) rest
   in
   preceding 0 1 lines
 
@@ -970,44 +1217,47 @@ let source_map_entries documents inline_markers manifests =
               | Some marker -> (
                   match document_for_path marker.document_path with
                   | None -> None
-                  | Some marker_document ->
-                  let expression = marker.inline_expression in
-                  let prefix_length = String.length "let () = try ignore (@(" in
-                  let expression_end =
-                    prefix_length + String.length expression.expression
-                  in
-                  if
-                    selector.selector_start_line <> 1
-                    || selector.selector_end_line <> 1
-                    || selector.selector_start_column < prefix_length
-                    || selector.selector_end_column > expression_end
-                  then None
-                  else
-                    let column column =
-                      expression.column_start
-                      + utf16_column_of_utf8_byte expression.expression
-                          (column - prefix_length)
-                    in
-                    match
-                      ( absolute_source_utf16_offset marker_document
-                          expression.line
-                          (column selector.selector_start_column),
-                        absolute_source_utf16_offset marker_document
-                          expression.line
-                          (column selector.selector_end_column) )
-                    with
-                    | Some start_utf16, Some end_utf16 ->
-                        Some
-                          {
-                            map_selector_id = selector.selector_id;
-                            map_generated_path = manifest.manifest_generated_path;
-                            map_start_byte = selector.selector_start_byte;
-                            map_end_byte = selector.selector_end_byte;
-                            map_document_path = marker.document_path;
-                            map_start_utf16 = start_utf16;
-                            map_end_utf16 = end_utf16;
-                          }
-                    | None, _ | _, None -> None))))
+                  | Some marker_document -> (
+                      let expression = marker.inline_expression in
+                      let prefix_length =
+                        String.length "let () = try ignore (@("
+                      in
+                      let expression_end =
+                        prefix_length + String.length expression.expression
+                      in
+                      if
+                        selector.selector_start_line <> 1
+                        || selector.selector_end_line <> 1
+                        || selector.selector_start_column < prefix_length
+                        || selector.selector_end_column > expression_end
+                      then None
+                      else
+                        let column column =
+                          expression.column_start
+                          + utf16_column_of_utf8_byte expression.expression
+                              (column - prefix_length)
+                        in
+                        match
+                          ( absolute_source_utf16_offset marker_document
+                              expression.line
+                              (column selector.selector_start_column),
+                            absolute_source_utf16_offset marker_document
+                              expression.line
+                              (column selector.selector_end_column) )
+                        with
+                        | Some start_utf16, Some end_utf16 ->
+                            Some
+                              {
+                                map_selector_id = selector.selector_id;
+                                map_generated_path =
+                                  manifest.manifest_generated_path;
+                                map_start_byte = selector.selector_start_byte;
+                                map_end_byte = selector.selector_end_byte;
+                                map_document_path = marker.document_path;
+                                map_start_utf16 = start_utf16;
+                                map_end_utf16 = end_utf16;
+                              }
+                        | None, _ | _, None -> None)))))
   |> List.sort (fun left right ->
       let by_path =
         String.compare left.map_generated_path right.map_generated_path
@@ -1072,35 +1322,34 @@ let merlin_target_source document =
   output |> Array.to_list |> String.concat "\n"
 
 let compiler_token_classification = function
-  | Parser.IF -> Some "if", false
-  | Parser.THEN -> Some "then", false
-  | Parser.ELSE -> Some "else", false
-  | Parser.LET -> Some "let", false
-  | Parser.REC -> Some "rec", false
-  | Parser.FUN | Parser.FUNCTION -> Some "function", false
-  | Parser.MATCH -> Some "match", false
-  | Parser.WITH -> Some "with", false
-  | Parser.TRY -> Some "try", false
-  | Parser.WHILE -> Some "while", false
-  | Parser.FOR -> Some "for", false
-  | Parser.DO -> Some "do", false
-  | Parser.DONE -> Some "done", false
-  | Parser.IN -> Some "in", false
-  | Parser.WHEN -> Some "when", false
-  | Parser.OF -> Some "of", false
-  | Parser.AS -> Some "as", false
-  | Parser.MINUSGREATER -> Some "arrow", false
-  | Parser.BAR -> Some "alternative", false
-  | Parser.BEGIN | Parser.END -> Some "block-delimiter", false
-  | Parser.PLUS | Parser.PLUSDOT | Parser.MINUS | Parser.MINUSDOT
-  | Parser.STAR | Parser.EQUAL | Parser.LESS | Parser.GREATER
-  | Parser.BARBAR | Parser.AMPERAMPER | Parser.AMPERSAND | Parser.OR
-  | Parser.COLONCOLON | Parser.COLONEQUAL | Parser.LESSMINUS
-  | Parser.PLUSEQ | Parser.PERCENT | Parser.BANG
-  | Parser.INFIXOP0 _ | Parser.INFIXOP1 _ | Parser.INFIXOP2 _
+  | Parser.IF -> (Some "if", false)
+  | Parser.THEN -> (Some "then", false)
+  | Parser.ELSE -> (Some "else", false)
+  | Parser.LET -> (Some "let", false)
+  | Parser.REC -> (Some "rec", false)
+  | Parser.FUN | Parser.FUNCTION -> (Some "function", false)
+  | Parser.MATCH -> (Some "match", false)
+  | Parser.WITH -> (Some "with", false)
+  | Parser.TRY -> (Some "try", false)
+  | Parser.WHILE -> (Some "while", false)
+  | Parser.FOR -> (Some "for", false)
+  | Parser.DO -> (Some "do", false)
+  | Parser.DONE -> (Some "done", false)
+  | Parser.IN -> (Some "in", false)
+  | Parser.WHEN -> (Some "when", false)
+  | Parser.OF -> (Some "of", false)
+  | Parser.AS -> (Some "as", false)
+  | Parser.MINUSGREATER -> (Some "arrow", false)
+  | Parser.BAR -> (Some "alternative", false)
+  | Parser.BEGIN | Parser.END -> (Some "block-delimiter", false)
+  | Parser.PLUS | Parser.PLUSDOT | Parser.MINUS | Parser.MINUSDOT | Parser.STAR
+  | Parser.EQUAL | Parser.LESS | Parser.GREATER | Parser.BARBAR
+  | Parser.AMPERAMPER | Parser.AMPERSAND | Parser.OR | Parser.COLONCOLON
+  | Parser.COLONEQUAL | Parser.LESSMINUS | Parser.PLUSEQ | Parser.PERCENT
+  | Parser.BANG | Parser.INFIXOP0 _ | Parser.INFIXOP1 _ | Parser.INFIXOP2 _
   | Parser.INFIXOP3 _ | Parser.INFIXOP4 _ | Parser.PREFIXOP _ ->
-      None, true
-  | _ -> None, false
+      (None, true)
+  | _ -> (None, false)
 
 let compiler_tokens document =
   let source = merlin_target_source document in
@@ -1412,12 +1661,11 @@ let execution_site_range site =
 
 let execution_range_contains outer inner =
   (outer.range_start_line < inner.range_start_line
-  || (outer.range_start_line = inner.range_start_line
-     && outer.range_start_column <= inner.range_start_column))
-  &&
-  (outer.range_end_line > inner.range_end_line
-  || (outer.range_end_line = inner.range_end_line
-     && outer.range_end_column >= inner.range_end_column))
+  || outer.range_start_line = inner.range_start_line
+     && outer.range_start_column <= inner.range_start_column)
+  && (outer.range_end_line > inner.range_end_line
+     || outer.range_end_line = inner.range_end_line
+        && outer.range_end_column >= inner.range_end_column)
 
 let execution_position_compare left_line left_column right_line right_column =
   match Int.compare left_line right_line with
@@ -1436,8 +1684,8 @@ let token_between token left right =
 
 let enrich_execution_sites sites tokens =
   let range_key range =
-    Printf.sprintf "%d:%d:%d:%d" range.range_start_line
-      range.range_start_column range.range_end_line range.range_end_column
+    Printf.sprintf "%d:%d:%d:%d" range.range_start_line range.range_start_column
+      range.range_end_line range.range_end_column
   in
   let sites_by_id = Hashtbl.create (List.length sites) in
   let children_by_parent = Hashtbl.create (List.length sites) in
@@ -1482,8 +1730,7 @@ let enrich_execution_sites sites tokens =
         (Hashtbl.find_opt children_by_parent parent_site.site_id)
     in
     List.exists
-      (fun child ->
-        is_expression child && is_operator_site child)
+      (fun child -> is_expression child && is_operator_site child)
       children
   in
   let enclosing_definition parent_site =
@@ -1494,21 +1741,19 @@ let enrich_execution_sites sites tokens =
     in
     sites
     |> List.filter (fun candidate ->
-           is_pattern candidate
-           && Option.fold ~none:false
-                ~some:(fun selection ->
-                  execution_range_contains selection parent_range)
-                candidate.site_selection)
+        is_pattern candidate
+        && Option.fold ~none:false
+             ~some:(fun selection ->
+               execution_range_contains selection parent_range)
+             candidate.site_selection)
     |> List.sort (fun left right ->
-           let left_size =
-             Option.fold ~none:max_int ~some:range_size
-               left.site_selection
-           in
-           let right_size =
-             Option.fold ~none:max_int ~some:range_size
-               right.site_selection
-           in
-           Int.compare left_size right_size)
+        let left_size =
+          Option.fold ~none:max_int ~some:range_size left.site_selection
+        in
+        let right_size =
+          Option.fold ~none:max_int ~some:range_size right.site_selection
+        in
+        Int.compare left_size right_size)
     |> function
     | definition :: _ -> Some definition
     | [] -> None
@@ -1518,10 +1763,9 @@ let enrich_execution_sites sites tokens =
     tokens
     |> List.filter (fun token -> token.token_role = Some "alternative")
     |> List.sort (fun left right ->
-           execution_position_compare left.token_range.range_start_line
-             left.token_range.range_start_column
-             right.token_range.range_start_line
-             right.token_range.range_start_column)
+        execution_position_compare left.token_range.range_start_line
+          left.token_range.range_start_column right.token_range.range_start_line
+          right.token_range.range_start_column)
     |> Array.of_list
   in
   let alternative_between left right =
@@ -1547,24 +1791,25 @@ let enrich_execution_sites sites tokens =
       let leaves =
         candidates
         |> List.filter (fun candidate ->
-               Option.value ~default:[]
-               (Hashtbl.find_opt children_by_parent candidate.site_id)
-               |> List.exists (fun child ->
-                      is_pattern child
-                      && match child.site_target with
-                         | Some target ->
-                             String.equal (range_key target) target_key
-                         | None -> false)
-               |> not)
+            Option.value ~default:[]
+              (Hashtbl.find_opt children_by_parent candidate.site_id)
+            |> List.exists (fun child ->
+                is_pattern child
+                &&
+                match child.site_target with
+                | Some target -> String.equal (range_key target) target_key
+                | None -> false)
+            |> not)
         |> List.sort (fun left right ->
-               execution_position_compare left.site_start_line
-                 left.site_start_column right.site_start_line
-                 right.site_start_column)
+            execution_position_compare left.site_start_line
+              left.site_start_column right.site_start_line
+              right.site_start_column)
       in
       let rec mark_adjacent = function
         | left :: (right :: _ as rest) ->
             if
-              alternative_between (execution_site_range left)
+              alternative_between
+                (execution_site_range left)
                 (execution_site_range right)
             then (
               Hashtbl.replace direct_patterns left.site_id true;
@@ -1580,8 +1825,8 @@ let enrich_execution_sites sites tokens =
       (fun site ->
         let direct = is_pattern site && is_direct_pattern site in
         match parent site with
-        | Some parent_site
-          when is_expression site && is_expression parent_site ->
+        | Some parent_site when is_expression site && is_expression parent_site
+          ->
             let range = execution_site_range site in
             let parent_range = execution_site_range parent_site in
             if is_operator_site site then
@@ -1654,7 +1899,7 @@ let enrich_execution_sites sites tokens =
   in
   List.map
     (fun site ->
-      if not (is_pattern site) || Option.is_some site.site_target then site
+      if (not (is_pattern site)) || Option.is_some site.site_target then site
       else
         match inherited_pattern_target site with
         | Some (target, role) ->
@@ -1670,7 +1915,9 @@ let syntax_execution_sites sites tokens =
   let all_expressions =
     List.filter (fun site -> site.site_kind = "expression") sites
   in
-  let expressions = List.filter (fun site -> not site.site_ghost) all_expressions in
+  let expressions =
+    List.filter (fun site -> not site.site_ghost) all_expressions
+  in
   let containing_expression token =
     let containing candidates =
       candidates
@@ -1678,7 +1925,8 @@ let syntax_execution_sites sites tokens =
            (fun best site ->
              if
                not
-                 (execution_range_contains (execution_site_range site)
+                 (execution_range_contains
+                    (execution_site_range site)
                     token.token_range)
              then best
              else
@@ -1700,31 +1948,28 @@ let syntax_execution_sites sites tokens =
   let definition_target range =
     sites
     |> List.filter (fun site ->
-           site.site_kind = "pattern"
-           && site.site_end_line = range.range_start_line
-           && Option.fold ~none:false
-                ~some:(fun selection ->
-                  execution_range_contains selection range
-                  && not
-                       (List.exists
-                          (fun wrapper ->
-                            wrapper.site_kind = "expression"
-                            && execution_range_size
-                                 (execution_site_range wrapper)
-                               > execution_range_size range
-                            && execution_range_contains selection
-                                 (execution_site_range wrapper)
-                            && execution_range_contains
-                                 (execution_site_range wrapper)
-                                 range)
-                          sites))
-                site.site_selection)
+        site.site_kind = "pattern"
+        && site.site_end_line = range.range_start_line
+        && Option.fold ~none:false
+             ~some:(fun selection ->
+               execution_range_contains selection range
+               && not
+                    (List.exists
+                       (fun wrapper ->
+                         wrapper.site_kind = "expression"
+                         && execution_range_size (execution_site_range wrapper)
+                            > execution_range_size range
+                         && execution_range_contains selection
+                              (execution_site_range wrapper)
+                         && execution_range_contains
+                              (execution_site_range wrapper)
+                              range)
+                       sites))
+             site.site_selection)
     |> List.sort (fun left right ->
-           Int.compare
-             (execution_range_size
-                (Option.get left.site_selection))
-             (execution_range_size
-                (Option.get right.site_selection)))
+        Int.compare
+          (execution_range_size (Option.get left.site_selection))
+          (execution_range_size (Option.get right.site_selection)))
     |> function
     | definition :: _ -> Some (execution_site_range definition)
     | [] -> None
@@ -1740,13 +1985,14 @@ let syntax_execution_sites sites tokens =
   let containing_pattern token =
     sites
     |> List.filter (fun site ->
-           site.site_kind = "pattern"
-           && execution_range_contains (execution_site_range site)
-                token.token_range)
+        site.site_kind = "pattern"
+        && execution_range_contains
+             (execution_site_range site)
+             token.token_range)
     |> List.sort (fun left right ->
-           Int.compare
-             (execution_range_size (execution_site_range left))
-             (execution_range_size (execution_site_range right)))
+        Int.compare
+          (execution_range_size (execution_site_range left))
+          (execution_range_size (execution_site_range right)))
     |> function
     | pattern :: _ -> Some (execution_site_range pattern)
     | [] -> None
@@ -1763,7 +2009,8 @@ let syntax_execution_sites sites tokens =
            if
              not
                (starts_after token site
-               && execution_range_contains (execution_site_range container)
+               && execution_range_contains
+                    (execution_site_range container)
                     (execution_site_range site))
            then best
            else
@@ -1777,10 +2024,9 @@ let syntax_execution_sites sites tokens =
                  in
                  if
                    position < 0
-                   || (position = 0
+                   || position = 0
                       && execution_range_size (execution_site_range site)
-                         > execution_range_size
-                             (execution_site_range current))
+                         > execution_range_size (execution_site_range current)
                  then Some site
                  else best)
          None
@@ -1801,10 +2047,9 @@ let syntax_execution_sites sites tokens =
                  in
                  if
                    position < 0
-                   || (position = 0
+                   || position = 0
                       && execution_range_size (execution_site_range site)
-                         > execution_range_size
-                             (execution_site_range current))
+                         > execution_range_size (execution_site_range current)
                  then Some site
                  else best)
          None
@@ -1873,8 +2118,7 @@ let syntax_execution_sites sites tokens =
   in
   let gap_selection token role target =
     if
-      List.mem role
-        [ "then"; "else"; "in"; "when"; "do"; "arrow" ]
+      List.mem role [ "then"; "else"; "in"; "when"; "do"; "arrow" ]
       && execution_position_compare token.token_range.range_end_line
            token.token_range.range_end_column target.range_start_line
            target.range_start_column
@@ -1900,16 +2144,14 @@ let syntax_execution_sites sites tokens =
               next_pattern_target token (Some container))
       | "then" | "else" | "in" | "when" | "do" ->
           Option.bind container (fun container ->
-              Option.map execution_site_range
-                (next_expression token container))
+              Option.map execution_site_range (next_expression token container))
       | _ -> (
           match container with
           | None ->
               if role = "let" || role = "rec" then
                 Option.map execution_site_range (next_expression_any token)
               else None
-          | Some container ->
-              Some (execution_site_range container))
+          | Some container -> Some (execution_site_range container))
     in
     Option.map
       (fun target ->
@@ -1922,34 +2164,32 @@ let syntax_execution_sites sites tokens =
   in
   tokens
   |> List.filter_map (fun token ->
-         Option.bind token.token_role (fun role ->
-             let target = target_for token role in
-             if
-               Option.is_none target
-               && (String.equal role "arrow"
-                  || String.equal role "alternative")
-             then None
-             else
-               let range = token.token_range in
-               Some
-                 {
-                   site_id =
-                     Printf.sprintf "syntax:%s:%d:%d:%d:%d" role
-                       range.range_start_line range.range_start_column
-                       range.range_end_line range.range_end_column;
-                   site_parent_id = None;
-                   site_kind = "syntax";
-                   site_ghost = false;
-                   site_start_line = range.range_start_line;
-                   site_start_column = range.range_start_column;
-                   site_end_line = range.range_end_line;
-                   site_end_column = range.range_end_column;
-                   site_target = target;
-                   site_selection =
-                     Option.bind target (gap_selection token role);
-                   site_role = Some role;
-                   site_direct = false;
-                 }))
+      Option.bind token.token_role (fun role ->
+          let target = target_for token role in
+          if
+            Option.is_none target
+            && (String.equal role "arrow" || String.equal role "alternative")
+          then None
+          else
+            let range = token.token_range in
+            Some
+              {
+                site_id =
+                  Printf.sprintf "syntax:%s:%d:%d:%d:%d" role
+                    range.range_start_line range.range_start_column
+                    range.range_end_line range.range_end_column;
+                site_parent_id = None;
+                site_kind = "syntax";
+                site_ghost = false;
+                site_start_line = range.range_start_line;
+                site_start_column = range.range_start_column;
+                site_end_line = range.range_end_line;
+                site_end_column = range.range_end_column;
+                site_target = target;
+                site_selection = Option.bind target (gap_selection token role);
+                site_role = Some role;
+                site_direct = false;
+              }))
 
 let execution_sites_with_cancel ~cancelled ~documents ~target =
   let source, line_offset = merlin_source ~documents ~target in
@@ -1971,7 +2211,9 @@ let execution_sites_with_cancel ~cancelled ~documents ~target =
       | Some "return" ->
           let target_line_count = 1 + newline_count target.Document.source in
           let range node =
-            let physical_start_line, start_column = position_member "start" node in
+            let physical_start_line, start_column =
+              position_member "start" node
+            in
             let physical_end_line, end_column = position_member "end" node in
             let start_line = physical_start_line - line_offset in
             let end_line = physical_end_line - line_offset in
@@ -2016,16 +2258,15 @@ let execution_sites_with_cancel ~cancelled ~documents ~target =
                       site_parent_id = parent_id;
                       site_kind;
                       site_ghost =
-                        (node |> member "ghost" |> to_bool_option
-                        |> Option.value ~default:false);
+                        node |> member "ghost" |> to_bool_option
+                        |> Option.value ~default:false;
                       site_start_line = site_range.range_start_line;
                       site_start_column = site_range.range_start_column;
                       site_end_line = site_range.range_end_line;
                       site_end_column = site_range.range_end_column;
                       site_target =
                         (if is_pattern then pattern_target else None);
-                      site_selection =
-                        (if is_pattern then selection else None);
+                      site_selection = (if is_pattern then selection else None);
                       site_role = None;
                       site_direct = false;
                     }
@@ -2091,10 +2332,9 @@ let execution_sites_with_cancel ~cancelled ~documents ~target =
                       (match kind with
                       | Some kind when Util.starts_with ~prefix:"pattern" kind
                         ->
-                         pattern_target
+                          pattern_target
                       | Some _ | None -> None)
-                      None
-                      child_parent_id)
+                      None child_parent_id)
                    accumulator
           in
           let sites =
@@ -2125,8 +2365,8 @@ let execution_site_to_json site =
       ("kind", `String site.site_kind);
       ("ghost", `Bool site.site_ghost);
       ( "role",
-        Option.fold ~none:`Null ~some:(fun role -> `String role)
-          site.site_role );
+        Option.fold ~none:`Null ~some:(fun role -> `String role) site.site_role
+      );
       ("direct", `Bool site.site_direct);
       ("startLine", `Int site.site_start_line);
       ("startColumn", `Int site.site_start_column);
@@ -2687,14 +2927,15 @@ let instrumented_compilation_source evaluation_id documents target =
             Some
               (Printf.sprintf
                  "# 1 %S\n\
-                  let () = output_string stdout %S; flush stdout; \
-                  output_string stderr %S; flush stderr;;\n\
+                  let () = Stdlib.output_string stdout %S; Stdlib.flush \
+                  stdout; Stdlib.output_string stderr %S; Stdlib.flush stderr;;\n\
                   # %d %S\n\
                   %s\n\
                   ;;\n\
                   # 1 %S\n\
-                  let () = flush stdout; output_string stdout %S; flush \
-                  stdout; flush stderr; output_string stderr %S; flush stderr;;\n"
+                  let () = Stdlib.flush stdout; Stdlib.output_string stdout \
+                  %S; Stdlib.flush stdout; Stdlib.flush stderr; \
+                  Stdlib.output_string stderr %S; Stdlib.flush stderr;;\n"
                  "<dox-block-boundary>" start_marker start_marker source_line
                  document.path source "<dox-block-boundary>" end_marker
                  end_marker)
@@ -2724,9 +2965,7 @@ let instrumented_compilation_source evaluation_id documents target =
 
 let compile_document_units ?(prelude_source = prelude) ?entry
     ?(environment = []) ~directory ~sources ~target ~cancelled () =
-  let emit_manifests =
-    List.assoc_opt "DOX_TRACE_ALL" environment = Some "1"
-  in
+  let emit_manifests = List.assoc_opt "DOX_TRACE_ALL" environment = Some "1" in
   let unit_name document =
     match Module_path.of_source_path document.Document.path with
     | Ok module_path -> Module_path.compiler_unit module_path
@@ -2884,86 +3123,93 @@ let compile_document_units ?(prelude_source = prelude) ?entry
                         diagnostic ~stage:"compile" ~severity:"error" message)
                 in
                 Result.bind manifests (fun manifests ->
-                let target_path =
-                  compiled
-                  |> List.find_map (fun (document, path, _) ->
-                      if
-                        String.equal document.Document.path target.Document.path
-                      then Some (Filename.basename path)
-                      else None)
-                  |> Option.get
-                in
-                let signature =
-                  compile [ "-I"; directory; "-open"; "Dox"; "-i"; target_path ]
-                in
-                if not (successful signature.status) then
-                  Error (process_failure ~stage:"compile" signature)
-                else
-                  let executable = Filename.concat directory "document.byte" in
-                  let objects =
-                    compiled
-                    |> List.map (fun (_, path, _) ->
-                        Filename.chop_extension (Filename.basename path)
-                        ^ ".cmo")
-                  in
-                  let driver =
-                    match entry with
-                    | None -> Ok []
-                    | Some entry ->
-                        let source =
-                          Printf.sprintf "open %s\nlet () = %s ()\n"
-                            (unit_name target) entry
-                        in
-                        Result.bind
-                          (Util.write_file
-                             (Filename.concat directory "driver.ml")
-                             source
-                          |> Result.map_error (fun message ->
-                              diagnostic ~stage:"prepare" ~severity:"error"
-                                message))
-                          (fun () ->
-                            let result =
-                              compile
-                                [
-                                  "-I";
-                                  directory;
-                                  "-open";
-                                  "Dox";
-                                  "-c";
-                                  "driver.ml";
-                                ]
-                            in
-                            if successful result.status then Ok [ "driver.cmo" ]
-                            else Error (process_failure ~stage:"compile" result))
-                  in
-                  Result.bind driver (fun driver ->
-                      let linked =
-                        compile
-                          ([
-                             "-g";
-                             "-I";
-                             "+unix";
-                             "-I";
-                             directory;
-                             "unix.cma";
-                             "dox_prelude.cmo";
-                           ]
-                          @ objects @ driver @ [ "-o"; executable ])
+                    let target_path =
+                      compiled
+                      |> List.find_map (fun (document, path, _) ->
+                          if
+                            String.equal document.Document.path
+                              target.Document.path
+                          then Some (Filename.basename path)
+                          else None)
+                      |> Option.get
+                    in
+                    let signature =
+                      compile
+                        [ "-I"; directory; "-open"; "Dox"; "-i"; target_path ]
+                    in
+                    if not (successful signature.status) then
+                      Error (process_failure ~stage:"compile" signature)
+                    else
+                      let executable =
+                        Filename.concat directory "document.byte"
                       in
-                      if not (successful linked.status) then
-                        Error (process_failure ~stage:"compile" linked)
-                      else
-                        Ok
-                          {
-                            compiled_signature = signature.stdout;
-                            compiled_executable = executable;
-                            compiled_warnings =
-                              signature.stderr :: linked.stderr :: warnings
-                              |> List.filter (fun value ->
-                                  not (String.equal (String.trim value) ""))
-                              |> String.concat "\n";
-                            compiled_manifests = manifests;
-                          }))))
+                      let objects =
+                        compiled
+                        |> List.map (fun (_, path, _) ->
+                            Filename.chop_extension (Filename.basename path)
+                            ^ ".cmo")
+                      in
+                      let driver =
+                        match entry with
+                        | None -> Ok []
+                        | Some entry ->
+                            let source =
+                              Printf.sprintf "open %s\nlet () = %s ()\n"
+                                (unit_name target) entry
+                            in
+                            Result.bind
+                              (Util.write_file
+                                 (Filename.concat directory "driver.ml")
+                                 source
+                              |> Result.map_error (fun message ->
+                                  diagnostic ~stage:"prepare" ~severity:"error"
+                                    message))
+                              (fun () ->
+                                let result =
+                                  compile
+                                    [
+                                      "-I";
+                                      directory;
+                                      "-open";
+                                      "Dox";
+                                      "-c";
+                                      "driver.ml";
+                                    ]
+                                in
+                                if successful result.status then
+                                  Ok [ "driver.cmo" ]
+                                else
+                                  Error
+                                    (process_failure ~stage:"compile" result))
+                      in
+                      Result.bind driver (fun driver ->
+                          let linked =
+                            compile
+                              ([
+                                 "-g";
+                                 "-I";
+                                 "+unix";
+                                 "-I";
+                                 directory;
+                                 "unix.cma";
+                                 "dox_prelude.cmo";
+                               ]
+                              @ objects @ driver @ [ "-o"; executable ])
+                          in
+                          if not (successful linked.status) then
+                            Error (process_failure ~stage:"compile" linked)
+                          else
+                            Ok
+                              {
+                                compiled_signature = signature.stdout;
+                                compiled_executable = executable;
+                                compiled_warnings =
+                                  signature.stderr :: linked.stderr :: warnings
+                                  |> List.filter (fun value ->
+                                      not (String.equal (String.trim value) ""))
+                                  |> String.concat "\n";
+                                compiled_manifests = manifests;
+                              }))))
 
 let split_block_output evaluation_id markers output =
   let marker_prefix = Printf.sprintf "\030DOX:%s:" evaluation_id in
@@ -3199,8 +3445,7 @@ let project_digest ~documents ~(target : Document.t) =
   |> source_identity ~domain:"dox-project-source-v1"
 
 let evaluate_documents ?project_version ?request_code_digest
-    ?(cancelled = fun () -> false)
-    ~documents ~target () =
+    ?(cancelled = fun () -> false) ~documents ~target () =
   let started = Unix.gettimeofday () in
   let started_at = Util.timestamp () in
   let evaluation_id =
@@ -3277,8 +3522,19 @@ let evaluate_documents ?project_version ?request_code_digest
             (fun diagnostic -> String.equal diagnostic.severity "error")
             parse_diagnostics
         then
-          ("invalid", "", "", "", [], [], [], false, 0, 0, 0,
-           [], parse_diagnostics)
+          ( "invalid",
+            "",
+            "",
+            "",
+            [],
+            [],
+            [],
+            false,
+            0,
+            0,
+            0,
+            [],
+            parse_diagnostics )
         else
           match
             compile_document_units
@@ -3286,8 +3542,19 @@ let evaluate_documents ?project_version ?request_code_digest
               ~directory ~sources:document_sources ~target ~cancelled ()
           with
           | Error compilation ->
-              ("compile-error", "", "", "", [], [], [], false, 0, 0, 0,
-               [], [ compilation ])
+              ( "compile-error",
+                "",
+                "",
+                "",
+                [],
+                [],
+                [],
+                false,
+                0,
+                0,
+                0,
+                [],
+                [ compilation ] )
           | Ok compiled ->
               let runtime =
                 run_process ~timeout_seconds:5. ~cancelled
@@ -3296,8 +3563,8 @@ let evaluate_documents ?project_version ?request_code_digest
                       ("DOCLANG_EVENT_PATH", event_path);
                       ("DOCLANG_TRACE_PATH", trace_path);
                     ]
-                  ~extra_output_paths:[ event_path ]
-                  (ocamlrun ()) [ compiled.compiled_executable ]
+                  ~extra_output_paths:[ event_path ] (ocamlrun ())
+                  [ compiled.compiled_executable ]
               in
               let view_events = read_file_prefix event_path 2_000_000 in
               let trace_events = read_file_prefix trace_path 12_200_000 in
@@ -3307,15 +3574,18 @@ let evaluate_documents ?project_version ?request_code_digest
               in
               let views, _ = parse_runtime_events view_events in
               let _, traces = parse_runtime_events trace_events in
+              let views = collapse_nested_output_views views in
+              let views, traces = merge_output_events views traces in
               let multiple_trace_domains =
                 traces
                 |> List.map (fun event -> event.domain_id)
-                |> List.sort_uniq Int.compare
-                |> List.length
+                |> List.sort_uniq Int.compare |> List.length
                 |> fun count -> count > 1
               in
-              let tail_handoffs, tail_linked_enters, tail_handoff_outcomes,
-                  tail_handoff_occurrences =
+              let ( tail_handoffs,
+                    tail_linked_enters,
+                    tail_handoff_outcomes,
+                    tail_handoff_occurrences ) =
                 raw_tail_stats traces
               in
               let traces, tail_relations_malformed =
@@ -3334,17 +3604,20 @@ let evaluate_documents ?project_version ?request_code_digest
                        compiled.compiled_warnings;
                    ])
                 @ (if trace_malformed || tail_relations_malformed then
-                    [
-                      diagnostic ~stage:"runtime" ~severity:"warning"
-                        "Execution data was incomplete because runtime trace relations were malformed.";
-                    ]
-                  else [])
-                @ if multiple_trace_domains then
-                    [
-                      diagnostic ~stage:"runtime" ~severity:"error"
-                        "Execution tracing currently supports one OCaml domain; this program produced events on multiple domains.";
-                    ]
-                  else []
+                     [
+                       diagnostic ~stage:"runtime" ~severity:"warning"
+                         "Execution data was incomplete because runtime trace \
+                          relations were malformed.";
+                     ]
+                   else [])
+                @
+                if multiple_trace_domains then
+                  [
+                    diagnostic ~stage:"runtime" ~severity:"error"
+                      "Execution tracing currently supports one OCaml domain; \
+                       this program produced events on multiple domains.";
+                  ]
+                else []
               in
               if multiple_trace_domains then
                 ( "runtime-error",
@@ -3360,7 +3633,8 @@ let evaluate_documents ?project_version ?request_code_digest
                   tail_handoff_outcomes,
                   tail_handoff_occurrences,
                   warning_diagnostics )
-              else if successful runtime.status && not runtime.output_limited then
+              else if successful runtime.status && not runtime.output_limited
+              then
                 ( "ready",
                   compiled.compiled_signature,
                   runtime.stdout,
@@ -3392,9 +3666,19 @@ let evaluate_documents ?project_version ?request_code_digest
                   warning_diagnostics
                   @ [ process_failure ~stage:"runtime" runtime ] ))
   in
-  let status, signature, stdout, stderr, views, traces, compiler_manifests,
-      trace_truncated, tail_handoffs, tail_linked_enters,
-      tail_handoff_outcomes, tail_handoff_occurrences, diagnostics =
+  let ( status,
+        signature,
+        stdout,
+        stderr,
+        views,
+        traces,
+        compiler_manifests,
+        trace_truncated,
+        tail_handoffs,
+        tail_linked_enters,
+        tail_handoff_outcomes,
+        tail_handoff_occurrences,
+        diagnostics ) =
     evaluated
   in
   let inline_results = inline_results inline_markers traces diagnostics in
@@ -3490,6 +3774,10 @@ let view_to_json (view : view) =
       ("kind", `String view.kind);
       ("id", `String view.id);
       ("content", `String view.content);
+      ( "parentOccurrenceId",
+        Option.fold ~none:`Null
+          ~some:(fun occurrence_id -> `String occurrence_id)
+          view.parent_occurrence_id );
     ]
 
 let block_output_to_json (output : block_output) =
@@ -3609,10 +3897,11 @@ let compiler_manifest_to_json manifest =
           (List.map compiler_execution_scope_to_json
              manifest.manifest_execution_scopes) );
       ( "constructs",
-        `List
-          (List.map compiler_construct_to_json manifest.manifest_constructs) );
+        `List (List.map compiler_construct_to_json manifest.manifest_constructs)
+      );
       ( "selectors",
-        `List (List.map compiler_selector_to_json manifest.manifest_selectors) );
+        `List (List.map compiler_selector_to_json manifest.manifest_selectors)
+      );
     ]
 
 let user_execution_traces manifests traces =
@@ -3620,8 +3909,7 @@ let user_execution_traces manifests traces =
   List.iter
     (fun manifest ->
       List.iter
-        (fun construct ->
-          Hashtbl.replace sites construct.construct_id ())
+        (fun construct -> Hashtbl.replace sites construct.construct_id ())
         manifest.manifest_constructs)
     manifests;
   List.filter
@@ -3702,8 +3990,7 @@ let compiler_static_program_to_json ?mapped_selector_ids ~code_revision_id
                     ~some:(fun id -> `String id)
                     construct.construct_parent_id );
                 ("ownerScopeId", `String construct.construct_owner_scope_id);
-                ( "lexicalScopeId",
-                  `String construct.construct_lexical_scope_id );
+                ("lexicalScopeId", `String construct.construct_lexical_scope_id);
                 ( "syntaxFingerprint",
                   `String construct.construct_syntax_fingerprint );
                 ( "lexicalAncestryFingerprint",
@@ -3768,9 +4055,9 @@ let normalized_execution_to_json manifests (traces : trace_event list)
     (fun event ->
       match event.phase with
       | "enter" -> Hashtbl.replace enters event.occurrence_id event
-      | "return" | "raise" ->
-          Hashtbl.replace outcomes event.occurrence_id event
-      | "call-attempt-open" -> call_attempt_opens := event :: !call_attempt_opens
+      | "return" | "raise" -> Hashtbl.replace outcomes event.occurrence_id event
+      | "call-attempt-open" ->
+          call_attempt_opens := event :: !call_attempt_opens
       | "call-attempt-return" | "call-attempt-raise" ->
           Hashtbl.replace call_attempt_outcomes event.occurrence_id event
       | "call-attempt-consumed" ->
@@ -3810,10 +4097,12 @@ let normalized_execution_to_json manifests (traces : trace_event list)
     match Hashtbl.find_opt function_scope_by_construct construct_id with
     | Some scope_id -> scope_id
     | None ->
-      Hashtbl.find_opt scope_by_construct construct_id
-      |> Option.value ~default:"unknown-scope"
+        Hashtbl.find_opt scope_by_construct construct_id
+        |> Option.value ~default:"unknown-scope"
   in
-  let fallback_manifest = match manifests with manifest :: _ -> Some manifest | [] -> None in
+  let fallback_manifest =
+    match manifests with manifest :: _ -> Some manifest | [] -> None
+  in
   let manifest_for_event (event : trace_event) =
     match manifest_for_site event.site_id with
     | Some _ as manifest -> manifest
@@ -3849,7 +4138,8 @@ let normalized_execution_to_json manifests (traces : trace_event list)
         ("type", `String event.type_);
         ("display", `String event.detail);
         ( "fingerprint",
-          if complete then `String (Util.digest (event.type_ ^ "\000" ^ event.detail))
+          if complete then
+            `String (Util.digest (event.type_ ^ "\000" ^ event.detail))
           else `Null );
         ("complete", `Bool complete);
       ]
@@ -3885,9 +4175,11 @@ let normalized_execution_to_json manifests (traces : trace_event list)
           [
             ( "kind",
               `String
-                (if String.equal event.phase "call-attempt-raise"
-                    || String.equal event.phase "raise"
-                 then "raise" else "return") );
+                (if
+                   String.equal event.phase "call-attempt-raise"
+                   || String.equal event.phase "raise"
+                 then "raise"
+                 else "return") );
             ("value", captured_value event);
             ("source", `String "call-attempt");
           ]
@@ -3903,7 +4195,8 @@ let normalized_execution_to_json manifests (traces : trace_event list)
     | _ -> "expression"
   in
   let enter_events =
-    Hashtbl.to_seq_values enters |> List.of_seq
+    Hashtbl.to_seq_values enters
+    |> List.of_seq
     |> List.sort (fun left right -> Int.compare left.sequence right.sequence)
   in
   let same_activation (left : trace_event) (right : trace_event) =
@@ -3977,7 +4270,8 @@ let normalized_execution_to_json manifests (traces : trace_event list)
   let occurrences_for_activation activation_id =
     all_occurrence_entries
     |> List.filter (fun (_, owner, _, _) -> String.equal owner activation_id)
-    |> List.sort (fun (_, _, left, _) (_, _, right, _) -> Int.compare left right)
+    |> List.sort (fun (_, _, left, _) (_, _, right, _) ->
+        Int.compare left right)
   in
   let function_events =
     List.filter
@@ -4027,8 +4321,7 @@ let normalized_execution_to_json manifests (traces : trace_event list)
     `Assoc
       [
         ("id", `String activation_id);
-        ( "scopeId",
-          `String (activation_scope_for_construct event.site_id) );
+        ("scopeId", `String (activation_scope_for_construct event.site_id));
         ("functionOccurrenceId", `String event.occurrence_id);
         ("functionConstructId", `String event.site_id);
         ( "closureId",
@@ -4036,9 +4329,7 @@ let normalized_execution_to_json manifests (traces : trace_event list)
           | Some id when not (String.equal id "") -> `String ("closure:" ^ id)
           | Some _ | None -> `Null );
         ( "dynamicParentId",
-          Option.fold ~none:`Null
-            ~some:(fun id -> `String id)
-            dynamic_parent );
+          Option.fold ~none:`Null ~some:(fun id -> `String id) dynamic_parent );
         ( "callsiteOccurrenceId",
           Option.fold ~none:`Null
             ~some:(fun (callsite : trace_event) ->
@@ -4050,7 +4341,8 @@ let normalized_execution_to_json manifests (traces : trace_event list)
             (consumed_attempt_for_function event) );
         ( "occurrenceIds",
           `List (List.map (fun (id, _, _, _) -> `String id) owned) );
-        ("parameterOccurrenceIds", `List (List.map (fun id -> `String id) parameter_ids));
+        ( "parameterOccurrenceIds",
+          `List (List.map (fun id -> `String id) parameter_ids) );
         ("enteredAt", `Int event.sequence);
         ( "outcomeAt",
           Option.fold ~none:`Null
@@ -4147,7 +4439,8 @@ let normalized_execution_to_json manifests (traces : trace_event list)
     List.rev !call_attempt_consumptions
     |> List.filter_map (fun consumed ->
         match attempt_occurrence_for_consumption consumed with
-        | Some occurrence_id when String.equal occurrence_id call.occurrence_id ->
+        | Some occurrence_id when String.equal occurrence_id call.occurrence_id
+          ->
             Some ("activation:" ^ consumed.occurrence_id)
         | Some _ | None -> None)
   in
@@ -4166,10 +4459,10 @@ let normalized_execution_to_json manifests (traces : trace_event list)
         ("id", `String ("attempt:" ^ call.occurrence_id));
         ("ownerActivationId", `String (activation_id_for_event call));
         ("callOccurrenceId", `String call.occurrence_id);
-        ( "tail",
-          `Bool (List.mem call.occurrence_id tail_handoff_occurrences) );
+        ("tail", `Bool (List.mem call.occurrence_id tail_handoff_occurrences));
         ("openedAt", `Int opened.sequence);
-        ("producerActivationIds", `List (List.map (fun id -> `String id) (producer_ids call)));
+        ( "producerActivationIds",
+          `List (List.map (fun id -> `String id) (producer_ids call)) );
         ( "outcomeAt",
           Option.fold ~none:`Null
             ~some:(fun event -> `Int event.sequence)
@@ -4195,7 +4488,8 @@ let normalized_execution_to_json manifests (traces : trace_event list)
         ("functionConstructId", `String event.site_id);
         ("createdAt", `Int event.sequence);
         ( "originActivationId",
-          Option.fold ~none:`Null ~some:(fun id -> `String id)
+          Option.fold ~none:`Null
+            ~some:(fun id -> `String id)
             origin_activation_id );
       ]
   in
@@ -4204,14 +4498,14 @@ let normalized_execution_to_json manifests (traces : trace_event list)
     | [ "derived"; source_id ] ->
         Some
           (`Assoc
-            [
-              ("closureId", `String ("closure:" ^ event.occurrence_id));
-              ("sequence", `Int event.sequence);
-              ("kind", `String "derived");
-              ("activationId", `Null);
-              ("callsiteOccurrenceId", `Null);
-              ("sourceClosureId", `String ("closure:" ^ source_id));
-            ])
+             [
+               ("closureId", `String ("closure:" ^ event.occurrence_id));
+               ("sequence", `Int event.sequence);
+               ("kind", `String "derived");
+               ("activationId", `Null);
+               ("callsiteOccurrenceId", `Null);
+               ("sourceClosureId", `String ("closure:" ^ source_id));
+             ])
     | _ -> None
   in
   let closure_creations = List.rev !closure_creations in
@@ -4257,20 +4551,30 @@ let execution_artifact_to_json result =
     in
     let mapped_selector_ids = mapped_selector_ids result.source_map_entries in
     let static_program =
-      compiler_static_program_to_json
-        ~mapped_selector_ids
+      compiler_static_program_to_json ~mapped_selector_ids
         ~code_revision_id:result.code_revision_id ~compiler_inputs_digest
         result.compiler_manifests
     in
     let execution =
-      normalized_execution_to_json result.compiler_manifests traces
-        ~tail_handoff_occurrences:result.tail_handoff_occurrences
-        ~trace_truncated:result.trace_truncated
+      match
+        normalized_execution_to_json result.compiler_manifests traces
+          ~tail_handoff_occurrences:result.tail_handoff_occurrences
+          ~trace_truncated:result.trace_truncated
+      with
+      | `Assoc fields ->
+          `Assoc
+            (fields @ [ ("events", `List (List.map view_to_json result.views)) ])
+      | _ -> assert false
     in
     let final_sequence =
+      let trace_maximum =
+        List.fold_left
+          (fun maximum event -> max maximum event.sequence)
+          0 traces
+      in
       List.fold_left
-        (fun maximum event -> max maximum event.sequence)
-        0 traces
+        (fun maximum (event : view) -> max maximum event.sequence)
+        trace_maximum result.views
     in
     let terminal_without_checksum =
       `Assoc
@@ -4280,8 +4584,9 @@ let execution_artifact_to_json result =
                (if result.trace_truncated then "truncated" else "complete") );
            ("finalSequence", `Int final_sequence);
          ]
-        @ if result.trace_truncated then [ ("reason", `String "size-limit") ]
-          else [])
+        @
+        if result.trace_truncated then [ ("reason", `String "size-limit") ]
+        else [])
     in
     let terminal_checksum =
       terminal_without_checksum |> execution_canonical_json
@@ -4289,7 +4594,8 @@ let execution_artifact_to_json result =
     in
     let terminal =
       match terminal_without_checksum with
-      | `Assoc fields -> `Assoc (fields @ [ ("checksum", `String terminal_checksum) ])
+      | `Assoc fields ->
+          `Assoc (fields @ [ ("checksum", `String terminal_checksum) ])
       | _ -> assert false
     in
     let source_maps =
@@ -4319,8 +4625,7 @@ let execution_artifact_to_json result =
         ("schemaVersion", `Int 1);
         ("evaluationId", `String result.evaluation_id);
         ("requestCodeDigest", `String result.request_code_digest);
-        ( "projectDigest",
-          `String result.project_digest );
+        ("projectDigest", `String result.project_digest);
         ("codeRevisionId", `String result.code_revision_id);
         ("compilerInputsDigest", `String compiler_inputs_digest);
         ("staticProgram", static_program);
@@ -4339,9 +4644,7 @@ let to_json result =
     source_identity ~domain:"dox-compiler-input-v1"
       [ ("\000compiler", [ ("identity", result.compiler) ]) ]
   in
-  let traces =
-    user_execution_traces result.compiler_manifests result.traces
-  in
+  let traces = user_execution_traces result.compiler_manifests result.traces in
   `Assoc
     [
       ("ok", `Bool result.ok);
@@ -4371,8 +4674,7 @@ let to_json result =
       ( "staticProgram",
         compiler_static_program_to_json
           ~mapped_selector_ids:(mapped_selector_ids result.source_map_entries)
-          ~code_revision_id:result.code_revision_id
-          ~compiler_inputs_digest
+          ~code_revision_id:result.code_revision_id ~compiler_inputs_digest
           result.compiler_manifests );
       ("executionArtifact", execution_artifact_to_json result);
       ("traceTruncated", `Bool result.trace_truncated);

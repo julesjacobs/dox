@@ -10,14 +10,16 @@ import {
   replaceEditorStateDocument,
 } from "./editor.bundle.js?v=20260801b";
 import {
-  buildExecutionAuditLine,
-  createExecutionAuditBaseline,
   dispatchExecutionIntent,
   executionPendingToken,
   installExecutionArtifact,
   presentExecution,
 } from "./execution-adapter.js";
-import { pointerColumn } from "./debug-explorer.js";
+import {
+  deriveOutlineOperation,
+  remapModule,
+} from "./outline-operation.mjs";
+import { executionTraceNavigationTarget } from "./execution-trace.js";
 
 const app = document.querySelector("#app");
 
@@ -67,12 +69,11 @@ const state = {
   evaluationController: null,
   sourceEditorView: null,
   sourceMode:
-    ["source", "debug"].includes(localStorage.getItem("dox:v2:editor-mode"))
-      ? localStorage.getItem("dox:v2:editor-mode")
+    localStorage.getItem("dox:v2:editor-mode") === "source"
+      ? "source"
       : "literate",
-  debugCursor: null,
-  debugAuditBaseline: null,
   paneWidths: { sidebar: 160, inspector: 340 },
+  inspectorExpanded: false,
   typeInfo: null,
   cursorPosition: null,
   definitionInfo: null,
@@ -113,6 +114,9 @@ const state = {
   outlineCommitController: null,
   outlineCommitting: false,
   outlineCommitPromise: null,
+  outlineOperation: null,
+  outlineOptimisticRefactor: null,
+  outlinePageDraft: null,
   refactorInFlight: false,
   refactorSessionRefresh: null,
   refactorModuleMapping: null,
@@ -122,8 +126,6 @@ const state = {
   dependencyGeneration: 0,
   dependencyController: null,
 };
-
-const debugMatrixCache = new WeakMap();
 
 const escapeHtml = (value = "") =>
   value
@@ -305,12 +307,6 @@ function currentSession() {
 
 function setExecutionCore(executionCore) {
   state.executionCore = executionCore;
-  if (
-    state.sourceMode === "debug" &&
-    state.debugAuditBaseline?.view !== executionCore?.view
-  ) {
-    state.debugAuditBaseline = createExecutionAuditBaseline(executionCore);
-  }
   const session = currentSession();
   if (session) session.executionCore = executionCore;
   return executionCore;
@@ -333,7 +329,6 @@ function captureCurrentSession() {
   session.evaluationInvalidation = state.evaluationInvalidation;
   session.executionCore = state.executionCore;
   session.executionProblem = state.executionProblem;
-  session.debugCursor = state.debugCursor;
   session.selected = state.selected;
   session.editorState = editor?.state || session.editorState;
   session.scrollTop =
@@ -357,13 +352,302 @@ function restoreSession(session) {
   state.evaluationInvalidation = session.evaluationInvalidation || null;
   state.executionCore = session.executionCore || null;
   state.executionProblem = session.executionProblem || null;
-  state.debugCursor = session.debugCursor || null;
-  state.debugAuditBaseline =
-    state.sourceMode === "debug"
-      ? createExecutionAuditBaseline(state.executionCore)
-      : null;
   state.selected = session.selected || session.document.blocks[0]?.id || null;
   state.dirty = session.document.source !== session.savedSource;
+}
+
+function moduleSourcePath(modulePath) {
+  return `${modulePath
+    .split(".")
+    .map((component) =>
+      component ? component[0].toLowerCase() + component.slice(1) : component
+    )
+    .join("/")}.ml.md`;
+}
+
+function beginOptimisticPage(modulePath, { focus = "main" } = {}) {
+  const existing = state.sessions.get(modulePath);
+  if (existing) {
+    restoreSession(existing);
+    if (window.location.pathname !== `/page/${encodeURIComponent(modulePath)}`) {
+      updateRoute(modulePath, "push");
+    }
+    render();
+    return existing;
+  }
+  captureCurrentSession();
+  invalidateEvaluation();
+  invalidateDependencyContext({ clear: true });
+  const source = `# ${modulePath}\n\n`;
+  const path = moduleSourcePath(modulePath);
+  const document = {
+    path,
+    source,
+    version: null,
+    blocks: parseDraftBlocks(source),
+  };
+  const session = {
+    module: modulePath,
+    path,
+    document,
+    savedVersion: null,
+    savedSource: source,
+    evaluation: null,
+    evaluationPlan: null,
+    evaluationInvalidation: null,
+    executionCore: null,
+    executionProblem: null,
+    selected: document.blocks[0]?.id || null,
+    editorState: null,
+    scrollTop: 0,
+    editRevision: 0,
+    acknowledgedRevision: 0,
+    autosaveTimer: null,
+    autosaveInFlight: false,
+    autosaveQueued: false,
+    conflict: null,
+    provisional: true,
+  };
+  state.sessions.set(modulePath, session);
+  restoreSession(session);
+  state.view = "document";
+  state.workspaceError = null;
+  state.outlineOperation = {
+    kind: "create",
+    modulePath,
+  };
+  updateRoute(modulePath, "push");
+  clearPendingNavigation();
+  if (focus === "outline") state.outlineFocusTransfer = true;
+  render();
+  queueMicrotask(() => {
+    if (focus === "outline") {
+      state.outlineView?.focus();
+      queueMicrotask(() => {
+        state.outlineFocusTransfer = false;
+      });
+    } else {
+      state.sourceEditorView?.focus();
+    }
+  });
+  return session;
+}
+
+function beginOutlinePageDraft(selection) {
+  if (state.outlinePageDraft) return;
+  captureCurrentSession();
+  const previousModule = state.module;
+  invalidateEvaluation();
+  invalidateDependencyContext({ clear: true });
+  const source = "# \n\n";
+  const document = {
+    path: null,
+    source,
+    version: null,
+    blocks: parseDraftBlocks(source),
+  };
+  state.outlinePageDraft = {
+    previousModule,
+    selection,
+    modulePath: null,
+  };
+  state.module = null;
+  state.path = null;
+  state.document = document;
+  state.savedVersion = null;
+  state.savedSource = source;
+  state.evaluation = null;
+  state.evaluationPlan = null;
+  state.evaluationInvalidation = null;
+  state.executionCore = null;
+  state.executionProblem = null;
+  state.selected = document.blocks[0]?.id || null;
+  state.dirty = false;
+  state.view = "document";
+  state.workspaceError = null;
+  state.outlineFocusTransfer = true;
+  render();
+  queueMicrotask(() => {
+    state.outlineView?.focus();
+    queueMicrotask(() => {
+      state.outlineFocusTransfer = false;
+    });
+  });
+}
+
+function updateOutlinePageDraftPreview(view) {
+  const draft = state.outlinePageDraft;
+  if (!draft || !state.document) return;
+  const position = Math.min(draft.selection, view.state.doc.length);
+  const line = view.state.doc.lineAt(position);
+  const row = outlineRowAtLine(line.number);
+  const title = row?.proposedPath || line.text.trim();
+  const source = `# ${title}\n\n`;
+  draft.modulePath = row?.targetModule || null;
+  state.path = draft.modulePath ? moduleSourcePath(draft.modulePath) : null;
+  state.document = {
+    path: state.path,
+    source,
+    version: null,
+    blocks: parseDraftBlocks(source),
+  };
+  state.savedSource = source;
+  state.selected = state.document.blocks[0]?.id || null;
+  if (state.sourceEditorView) {
+    state.sourceEditorView.setState(
+      replaceEditorStateDocument(state.sourceEditorView.state, source),
+    );
+    state.sourceEditorView.doxModule = null;
+  }
+}
+
+async function reconcileCreatedOperation(operation) {
+  if (operation?.kind !== "create" || !operation.created?.length) return false;
+  try {
+    const project = await refreshProjectIndex();
+    if (
+      !operation.created.every((modulePath) =>
+        project.pageIndex?.modules?.includes(modulePath)
+      )
+    ) {
+      return false;
+    }
+    for (const modulePath of operation.created) {
+      const payload = await api(
+        `/api/page?module=${encodeURIComponent(modulePath)}`,
+      );
+      confirmOptimisticPage(modulePath, payload.document);
+    }
+    state.workspaceError = null;
+    render();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function rollbackOptimisticPage(modulePath, previousModule) {
+  const provisional = state.sessions.get(modulePath);
+  if (provisional?.provisional) state.sessions.delete(modulePath);
+  if (state.module !== modulePath || !provisional?.provisional) return;
+  const previous = previousModule ? state.sessions.get(previousModule) : null;
+  if (previous) {
+    restoreSession(previous);
+    updateRoute(previousModule, "replace");
+  } else {
+    state.module = null;
+    state.path = null;
+    state.document = null;
+  }
+  state.outlineOperation = null;
+  render();
+  queueMicrotask(() => state.outlineView?.focus());
+}
+
+function confirmOptimisticPage(modulePath, document) {
+  const session = state.sessions.get(modulePath);
+  if (!session?.provisional || !document) return;
+  const localSource =
+    session === currentSession()
+      ? state.document.source
+      : session.editorState?.doc.toString() || session.document.source;
+  session.provisional = false;
+  session.path = document.path;
+  session.savedVersion = document.version;
+  session.savedSource = document.source;
+  session.document =
+    localSource === document.source
+      ? document
+      : {
+          ...document,
+          source: localSource,
+          blocks: parseDraftBlocks(localSource),
+        };
+  session.editorState = replaceEditorStateDocument(
+    session.editorState,
+    localSource,
+  );
+  if (session === currentSession()) restoreSession(session);
+  if (localSource !== document.source || session.autosaveQueued) {
+    scheduleAutosave(session, { immediate: true });
+  }
+}
+
+function currentOutlineOperation(openModule = null) {
+  if (state.outlineDraftError || !state.outlineBase) return null;
+  try {
+    const draft = parseOutlineDraft(state.outlineText, {
+      previousRows: state.outlineDraftRows,
+    });
+    return deriveOutlineOperation({
+      committedRows: state.outlineBase.committedRowsWithOrigins,
+      draftRows: draft.rows,
+      openModule,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function remapSessions(mapping, { preservePersistence = false } = {}) {
+  const sessions = new Map();
+  for (const [modulePath, session] of state.sessions) {
+    const nextModule = remapModule(modulePath, mapping);
+    if (preservePersistence && nextModule !== modulePath) {
+      session.persistenceModule ||= modulePath;
+    }
+    session.module = nextModule;
+    session.path = moduleSourcePath(nextModule);
+    if (session.document) {
+      session.document = { ...session.document, path: session.path };
+    }
+    sessions.set(nextModule, session);
+  }
+  state.sessions = sessions;
+}
+
+function beginOptimisticRefactor(operation) {
+  if (
+    operation?.kind !== "refactor" ||
+    !operation.renames?.length ||
+    state.outlineOptimisticRefactor
+  ) {
+    return;
+  }
+  const nextModule = remapModule(state.module, operation.renames);
+  if (!nextModule || nextModule === state.module) return;
+  captureCurrentSession();
+  const previousModule = state.module;
+  remapSessions(operation.renames, { preservePersistence: true });
+  state.outlineOptimisticRefactor = {
+    mapping: operation.renames,
+    previousModule,
+    nextModule,
+  };
+  const current = state.sessions.get(nextModule);
+  if (current) restoreSession(current);
+  updateRoute(nextModule, "replace");
+  render();
+  queueMicrotask(() => state.outlineView?.focus());
+}
+
+function rollbackOptimisticRefactor() {
+  const optimistic = state.outlineOptimisticRefactor;
+  if (!optimistic) return;
+  const inverse = [...optimistic.mapping]
+    .reverse()
+    .map(({ before, after }) => ({ before: after, after: before }));
+  captureCurrentSession();
+  remapSessions(inverse);
+  for (const session of state.sessions.values()) {
+    session.persistenceModule = null;
+  }
+  const current = state.sessions.get(optimistic.previousModule);
+  if (current) restoreSession(current);
+  updateRoute(optimistic.previousModule, "replace");
+  state.outlineOptimisticRefactor = null;
+  render();
+  queueMicrotask(() => state.outlineView?.focus());
 }
 
 function updateRoute(modulePath, mode = "push") {
@@ -526,8 +810,6 @@ async function loadDocument(
   captureCurrentSession();
   if (modulePath !== state.module) {
     state.executionCore = null;
-    state.debugCursor = null;
-    state.debugAuditBaseline = null;
     state.executionProblem = null;
   }
   const inheritedProvisional = state.provisionalNavigation;
@@ -665,7 +947,6 @@ async function loadDocument(
       evaluationPlan: null,
       evaluationInvalidation: null,
       executionCore: null,
-      debugCursor: null,
       selected: payload.document.blocks[0]?.id || null,
       editorState: null,
       scrollTop: 0,
@@ -941,7 +1222,6 @@ async function revalidateCachedSession(
     session.evaluationInvalidation = null;
     session.executionCore = null;
     session.executionProblem = null;
-    session.debugCursor = null;
     if (session === currentSession()) {
       restoreSession(session);
       state.workspaceError = state.outlineConflict || null;
@@ -1028,11 +1308,10 @@ function disposeMountedEditors() {
   }
 }
 
-const sourceModeOrder = ["literate", "source", "debug"];
+const sourceModeOrder = ["literate", "source"];
 const sourceModeName = {
   literate: "Document",
   source: "Source",
-  debug: "Debug",
 };
 
 function nextSourceMode(mode = state.sourceMode) {
@@ -1045,21 +1324,22 @@ function renderShell() {
   const existingSidebar = app.querySelector(".sidebar");
   app.innerHTML = `
     <div
-      class="workspace ${state.view === "document" ? "document-context" : ""} ${state.sourceMode === "source" ? "source-context" : ""} ${state.sourceMode === "debug" ? "debug-context" : ""}"
+      class="workspace ${state.view === "document" ? "document-context" : ""} ${state.sourceMode === "source" ? "source-context" : ""} ${state.inspectorExpanded ? "inspector-expanded" : ""}"
       style="--sidebar-width: ${state.paneWidths.sidebar}px; --inspector-width: ${state.paneWidths.inspector}px"
     >
       <div class="body-grid">
         <aside class="sidebar">${renderSidebar()}</aside>
         <div class="pane-resizer pane-resizer-left" data-pane-resizer="sidebar" role="separator" aria-label="Resize module pane" aria-orientation="vertical" tabindex="0"></div>
+        <button class="pane-toggle files-toggle" id="files-toggle" type="button" aria-label="Show project files" aria-expanded="false" title="Show project files"><span class="files-toggle-icon" aria-hidden="true"></span></button>
         <main class="main" id="main-pane">
           <div class="main-actions">
-            <button class="button pane-toggle files-toggle" id="files-toggle" aria-label="Show project files">Files</button>
             <button class="button secondary-action ${state.sourceMode !== "literate" ? "active" : ""}" id="source-mode-button" aria-label="Switch to ${sourceModeName[nextSourceMode()]} view">${sourceModeName[nextSourceMode()]}</button>
           </div>
           ${renderMain()}
         </main>
         <div class="pane-resizer pane-resizer-right" data-pane-resizer="inspector" role="separator" aria-label="Resize context pane" aria-orientation="vertical" tabindex="0"></div>
         <aside class="inspector">${renderInspector()}</aside>
+        <button type="button" class="inspector-width-toggle" id="inspector-width-toggle" aria-label="${state.inspectorExpanded ? "Restore context pane width" : "Expand context pane"}" aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter" aria-pressed="${state.inspectorExpanded}" title="${state.inspectorExpanded ? "Restore context pane" : "Expand context pane"} (Command/Control–Shift–Enter)"><span aria-hidden="true">${state.inspectorExpanded ? "⤡" : "⤢"}</span></button>
       </div>
       ${
         state.workspaceError
@@ -1576,12 +1856,12 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
     session.editorState = editorState;
     session.savedSource = savedSource;
     session.savedVersion = payload.digest || payload.document.version;
+    session.persistenceModule = null;
     session.evaluation = null;
     session.evaluationPlan = null;
     session.evaluationInvalidation = null;
     session.executionCore = null;
     session.executionProblem = null;
-    session.debugCursor = null;
     session.conflict = null;
     session.autosaveQueued = changedDuringRefactor;
     if (changedDuringRefactor) {
@@ -1608,21 +1888,24 @@ async function drainDirtySessions() {
   captureCurrentSession();
   for (let pass = 0; pass < 5; pass += 1) {
     const dirty = Array.from(state.sessions.values()).filter((session) => {
+      if (session.provisional) return false;
       const source =
         session.editorState?.doc.toString() || session.document.source;
       return source !== session.savedSource;
     });
     if (!dirty.length) {
       return new Map(
-        Array.from(state.sessions.entries()).map(([modulePath, session]) => [
-          modulePath,
-          {
-            source:
-              session.editorState?.doc.toString() ||
-              session.document.source,
-            revision: session.editRevision,
-          },
-        ]),
+        Array.from(state.sessions.entries())
+          .filter(([, session]) => !session.provisional)
+          .map(([modulePath, session]) => [
+            modulePath,
+            {
+              source:
+                session.editorState?.doc.toString() ||
+                session.document.source,
+              revision: session.editRevision,
+            },
+          ]),
       );
     }
     for (const session of dirty) {
@@ -1756,36 +2039,17 @@ async function performOutlineCommit({
   const submittedCursorColumn = submittedCursorDocumentLine
     ? state.outlineSelection - submittedCursorDocumentLine.from
     : 0;
-  const previous = outlineModules(
-    state.outlineBase?.committedRowsWithOrigins || [],
-  );
-  const next = draft.modules;
-  const previousSet = new Set(previous);
-  const nextSet = new Set(next);
-  const removed = previous.filter((modulePath) => !nextSet.has(modulePath));
-  const added = next.filter((modulePath) => !previousSet.has(modulePath));
-  const renames = draft.rows
-    .filter(
-      (row) =>
-        row.originTarget &&
-        row.targetModule &&
-        row.originTarget !== row.targetModule,
-    )
-    .map((row) => ({
-      before: row.originTarget,
-      after: row.targetModule,
-    }));
-  const renamedFrom = new Set(renames.map(({ before }) => before));
-  const renamedTo = new Set(renames.map(({ after }) => after));
-  const deleted = removed.filter((modulePath) => !renamedFrom.has(modulePath));
-  const created = added.filter((modulePath) => !renamedTo.has(modulePath));
-  const orderChanged =
-    previous.length !== next.length ||
-    previous.some((modulePath, index) => modulePath !== next[index]);
+  const operation = deriveOutlineOperation({
+    committedRows: state.outlineBase?.committedRowsWithOrigins || [],
+    draftRows: draft.rows,
+    openModule,
+  });
+  const next = operation.order;
+  const renames = operation.renames || [];
+  const deleted = operation.deleted || [];
+  const created = operation.created || [];
   if (
-    !removed.length &&
-    !added.length &&
-    !orderChanged &&
+    operation.kind === "none" &&
     state.outlineText !== state.outlineCommittedText
   ) {
     if (!submittedDraft.split("\n").some((line) => !line.trim())) {
@@ -1794,6 +2058,7 @@ async function performOutlineCommit({
     return true;
   }
   state.outlineCommitting = true;
+  state.outlineOperation = operation;
   state.outlineSubmittedGeneration = submittedGeneration;
   const controller = new AbortController();
   state.outlineCommitController = controller;
@@ -1801,12 +2066,22 @@ async function performOutlineCommit({
   let appliedMapping = [];
   let releaseProjectMutation = null;
   try {
-    if (deleted.length) {
+    if (operation.kind === "ambiguous") {
       throw new Error(
-        "Removing a module requires an explicit delete confirmation.",
+        "Create, rename, and delete pages in separate outline operations.",
       );
     }
-    if (renames.length || created.length) {
+    if (deleted.length) {
+      const description =
+        deleted.length === 1
+          ? deleted[0]
+          : `${deleted.length} pages`;
+      if (!window.confirm(`Move ${description} to Dox trash?`)) {
+        cancelOutlineDraft();
+        return false;
+      }
+    }
+    if (renames.length || created.length || deleted.length) {
       if (new Set(renames.map(({ after }) => after)).size !== renames.length) {
         throw new Error(
           "This outline edit is ambiguous. Rename or move one module at a time.",
@@ -1822,7 +2097,7 @@ async function performOutlineCommit({
         const preview = await api("/api/refactor/preview", {
           method: "POST",
           signal: controller.signal,
-          body: JSON.stringify({ projectVersion, renames }),
+          body: JSON.stringify({ projectVersion, renames, order: next }),
         });
         const payload = await api("/api/refactor/apply", {
           method: "POST",
@@ -1831,6 +2106,7 @@ async function performOutlineCommit({
             projectVersion,
             previewId: preview.previewId,
             renames,
+            order: next,
           }),
         });
         appliedMapping = payload.mapping || [];
@@ -1853,17 +2129,38 @@ async function performOutlineCommit({
           }
         }
       }
+      let createdDocuments = [];
       if (created.length) {
         const payload = await api("/api/pages", {
           method: "POST",
           signal: controller.signal,
           body: JSON.stringify({
             modules: created,
+            order: next,
             baseProjectVersion: authoritativeProject.version,
           }),
         });
         authoritativeProject = payload.project;
+        createdDocuments = payload.documents || [];
       }
+      if (deleted.length) {
+        const payload = await api("/api/pages", {
+          method: "DELETE",
+          signal: controller.signal,
+          body: JSON.stringify({
+            modules: deleted,
+            order: next,
+            baseProjectVersion: authoritativeProject.version,
+          }),
+        });
+        authoritativeProject = payload.project;
+        operation.trashPath = payload.trashPath;
+        for (const modulePath of deleted) {
+          state.sessions.delete(modulePath);
+          clearRecoveryDraft(modulePath);
+        }
+      }
+      operation.createdDocuments = createdDocuments;
     } else {
       authoritativeProject = state.project;
     }
@@ -1876,15 +2173,14 @@ async function performOutlineCommit({
       authoritativeOrder.some(
         (modulePath, index) => modulePath !== next[index],
       );
-    const structuralOrderChange = renames.length > 0 || created.length > 0;
-    if (shouldPersistOrder || structuralOrderChange) {
+    if (shouldPersistOrder) {
       releaseProjectMutation ??= await acquireProjectMutation();
       const payload = await api("/api/page-order", {
         method: "PUT",
         signal: controller.signal,
         body: JSON.stringify({
           modules: next,
-          baseOrder: structuralOrderChange ? [] : authoritativeOrder,
+          baseOrder: authoritativeOrder,
           baseProjectVersion: authoritativeProject.version,
         }),
       });
@@ -1892,17 +2188,19 @@ async function performOutlineCommit({
     }
 
     const draftAdvanced = state.outlineDraftGeneration > submittedGeneration;
-    const retainsInsertionRow = submittedDraft
+    const retainsInsertionRow = !deleted.length && submittedDraft
       .split("\n")
       .some((line) => !line.trim());
     const retainsActiveDraft = draft.rows.some(
       (row) => row.changed && row.sourceLine === submittedCursorLine,
     );
-    const newerDraft = draftAdvanced
-      ? state.outlineText
-      : !openModule && (retainsInsertionRow || retainsActiveDraft)
-        ? submittedDraft
-        : null;
+    const newerDraft = deleted.length
+      ? null
+      : draftAdvanced
+        ? state.outlineText
+        : !openModule && (retainsInsertionRow || retainsActiveDraft)
+          ? submittedDraft
+          : null;
     const newerRows =
       newerDraft !== null
         ? draftAdvanced
@@ -1910,6 +2208,9 @@ async function performOutlineCommit({
           : draft.rows
         : null;
     installAuthoritativeProject(authoritativeProject, { forceOutline: true });
+    for (let index = 0; index < created.length; index += 1) {
+      confirmOptimisticPage(created[index], operation.createdDocuments?.[index]);
+    }
     if (newerDraft !== null) {
       state.outlineText = newerDraft;
       try {
@@ -1945,17 +2246,12 @@ async function performOutlineCommit({
     state.outlineFailedGeneration = null;
     if (!state.outlineConflict) state.workspaceError = null;
     invalidateDependencyContext({ clear: true });
-    const openedModule = appliedMapping.reduce(
-      (modulePath, mapping) =>
-        modulePath === mapping.before ? mapping.after : modulePath,
-      openModule,
-    );
-    const cursorModule = appliedMapping.reduce(
-      (modulePath, mapping) =>
-        modulePath === mapping.before ? mapping.after : modulePath,
+    const openedModule = remapModule(openModule, appliedMapping);
+    const cursorModule = remapModule(
       submittedCursorRow?.targetModule ||
         submittedCursorRow?.originTarget ||
         null,
+      appliedMapping,
     );
     const cursorPath = appliedMapping.reduce(
       (path, mapping) =>
@@ -1970,6 +2266,21 @@ async function performOutlineCommit({
       newerDraft !== null
         ? state.outlineDraftRows
         : state.outlineBase.committedRowsWithOrigins;
+    const deletedCurrent = deleted.includes(state.module);
+    const deletedIndex = operation.previous?.indexOf(state.module) ?? -1;
+    const fallbackModule = deletedCurrent
+      ? next[Math.min(Math.max(deletedIndex, 0), next.length - 1)] || null
+      : null;
+    if (deletedCurrent) {
+      state.module = null;
+      state.path = null;
+      state.document = null;
+      state.savedVersion = null;
+      state.savedSource = null;
+      state.evaluation = null;
+      state.executionCore = null;
+      state.executionProblem = null;
+    }
     const cursorPosition = outlinePositionForCursor(currentEntries, {
       modulePath: cursorModule,
       path: cursorPath,
@@ -1983,7 +2294,19 @@ async function performOutlineCommit({
       );
       if (position !== null) state.outlineSelection = position;
     }
+    if (reason === "reorder") state.outlineFocusTransfer = true;
     render();
+    if (deletedCurrent && fallbackModule) {
+      await loadDocument(fallbackModule, {
+        force: true,
+        history: "replace",
+        focus: "outline",
+      });
+      toast(
+        `${deleted.length === 1 ? deleted[0] : `${deleted.length} pages`} moved to Dox trash.`,
+      );
+      return true;
+    }
     if (state.document && !state.executionCore) {
       scheduleEvaluation(state.document.source, {
         immediate: true,
@@ -1993,9 +2316,25 @@ async function performOutlineCommit({
     syncOutlineEditor({
       moveSelection: cursorPosition !== null || Boolean(openedModule),
     });
+    if (reason === "reorder") {
+      queueMicrotask(() => {
+        state.outlineView?.focus();
+        queueMicrotask(() => {
+          state.outlineFocusTransfer = false;
+        });
+      });
+    }
+    state.outlineOptimisticRefactor = null;
     if (state.module) void loadDependencyContext(state.module);
+    if (deleted.length) {
+      toast(
+        `${deleted.length === 1 ? deleted[0] : `${deleted.length} pages`} moved to Dox trash.`,
+      );
+    }
     return true;
   } catch (error) {
+    if (await reconcileCreatedOperation(operation)) return true;
+    if (!appliedMapping.length) rollbackOptimisticRefactor();
     if (authoritativeProject && appliedMapping.length) {
       const outlineText = state.outlineText;
       const outlineRows = state.outlineDraftRows;
@@ -2033,6 +2372,7 @@ async function performOutlineCommit({
     releaseProjectMutation?.();
     state.refactorModuleMapping = null;
     state.refactorInFlight = false;
+    state.outlineOperation = null;
     for (const session of state.sessions.values()) {
       if (session.autosaveQueued) scheduleAutosave(session, { immediate: true });
     }
@@ -2072,41 +2412,76 @@ async function openOutlineModule(row, kind) {
     row?.originTarget ||
     (row?.originPath && !row?.originModule ? row.proposedPath || row.path : null);
   if (!modulePath) return;
+  const pageDraft = state.outlinePageDraft;
+  const optimisticCreation = Boolean(
+    !state.project?.pageIndex?.modules?.includes(modulePath),
+  );
+  const previousModule = pageDraft?.previousModule || state.module;
+  if (optimisticCreation) {
+    state.outlinePageDraft = null;
+    beginOptimisticPage(modulePath, { focus: "outline" });
+  }
+  else beginOptimisticRefactor(currentOutlineOperation(modulePath));
   if (state.outlineText !== state.outlineCommittedText) {
     const committed = await commitOutline({
       reason: "navigate",
       openModule: modulePath,
     });
-    if (!committed) return;
+    if (!committed) {
+      if (optimisticCreation) {
+        rollbackOptimisticPage(modulePath, previousModule);
+      }
+      return false;
+    }
   }
+  state.outlinePageDraft = null;
   if (!state.project?.pageIndex?.modules?.includes(modulePath)) {
     if (state.outlineConflict || state.outlineDraftError) return;
     await withProjectMutation(async () => {
+      const order = state.outlineLineMap.flatMap((entry) => {
+        if (entry === row) return [modulePath];
+        const page = entry?.targetModule || entry?.pageModule;
+        return page ? [page] : [];
+      });
       const payload = await api("/api/pages", {
         method: "POST",
         body: JSON.stringify({
           modules: [modulePath],
+          order,
           baseProjectVersion: state.projectVersion,
         }),
       });
       installAuthoritativeProject(payload.project, { forceOutline: true });
+      confirmOptimisticPage(modulePath, payload.documents?.[0]);
     });
     render();
   }
   if (modulePath === state.module) {
-    queueMicrotask(() => state.outlineView?.focus());
-    return;
+    queueMicrotask(() => {
+      if (optimisticCreation) state.sourceEditorView?.focus();
+      else state.outlineView?.focus();
+    });
+    return true;
   }
-  await loadDocument(modulePath, {
+  return loadDocument(modulePath, {
     history: outlineHistoryMode(kind),
     focus: "outline",
   });
 }
 
 function cancelOutlineDraft() {
+  const pageDraft = state.outlinePageDraft;
+  state.outlinePageDraft = null;
   state.outlineConflict = null;
   state.outlineDraftError = null;
   installProjectSnapshot(state.project, { forceOutline: true });
+  const previous = pageDraft?.previousModule
+    ? state.sessions.get(pageDraft.previousModule)
+    : null;
+  if (previous) {
+    restoreSession(previous);
+    updateRoute(pageDraft.previousModule, "replace");
+  }
   render();
   queueMicrotask(() => state.outlineView?.focus());
 }
@@ -2134,6 +2509,12 @@ function mountOutlineEditor() {
     pendingVisible: state.pendingVisible,
     lineMap: state.outlineLineMap,
     onChange: (source, update, { moveOrigins = null } = {}) => {
+      if (state.outlinePageDraft) {
+        state.outlinePageDraft.selection = update.changes.mapPos(
+          state.outlinePageDraft.selection,
+          1,
+        );
+      }
       state.outlineText = source;
       state.outlineSelection = update.state.selection.main.head;
       state.workspaceError = state.outlineConflict || null;
@@ -2180,6 +2561,7 @@ function mountOutlineEditor() {
           };
         });
       }
+      updateOutlinePageDraftPreview(update.view);
       scheduleOutlineEditorSync();
     },
     onSelectionChange: (selection) => {
@@ -2196,12 +2578,16 @@ function mountOutlineEditor() {
     },
     onCommit: (reason, selection) => {
       if (selection !== undefined) state.outlineSelection = selection;
+      if (reason === "new-draft") {
+        beginOutlinePageDraft(state.outlineSelection);
+        return;
+      }
       const line =
         state.outlineView?.state.doc.lineAt(state.outlineSelection).number || 1;
       const row = outlineRowAtLine(line);
       const openModule =
         reason === "enter" || reason === "mod-enter"
-          ? row?.targetModule || row?.originTarget || null
+          ? row?.targetModule || (row?.blank ? null : row?.originTarget) || null
           : null;
       if (openModule) {
         void openOutlineModule(row, "explicit").catch((error) => {
@@ -2209,6 +2595,7 @@ function mountOutlineEditor() {
           updateStatusOnly();
         });
       } else {
+        beginOptimisticRefactor(currentOutlineOperation());
         void commitOutline({ reason });
       }
     },
@@ -2219,6 +2606,23 @@ function mountOutlineEditor() {
     onBlur: () => {
       if (state.outlineFocusTransfer) return;
       state.outlineNavigationRun = false;
+      const pageDraft = state.outlinePageDraft;
+      const draftLine = pageDraft
+        ? state.outlineView?.state.doc.lineAt(
+            Math.min(
+              pageDraft.selection,
+              state.outlineView.state.doc.length,
+            ),
+          ).number
+        : null;
+      const draftRow = draftLine ? outlineRowAtLine(draftLine) : null;
+      if (draftRow?.targetModule) {
+        void openOutlineModule(draftRow, "explicit").catch((error) => {
+          state.workspaceError = error.message;
+          updateStatusOnly();
+        });
+        return;
+      }
       if (
         state.outlineText !== state.outlineCommittedText &&
         !state.outlineDraftError
@@ -2260,206 +2664,10 @@ function renderView(view) {
 }
 
 function renderDocument() {
-  if (state.sourceMode === "debug") return renderExecutionDebugView();
   return `
     <article class="document-shell ${state.sourceMode === "source" ? "source-mode" : ""}">
       <div class="literate-document-editor" data-document-editor aria-label="${state.sourceMode === "source" ? "Raw Markdown source editor" : "Editable Markdown and OCaml document"}"></div>
     </article>`;
-}
-
-function executionDebugSource() {
-  return String(state.document?.source || "").replace(/\r\n?/g, "\n");
-}
-
-function normalizedDebugCursor() {
-  const lines = executionDebugSource().split("\n");
-  const fallbackLine =
-    state.cursorPosition?.line ||
-    state.document.blocks.find((block) => block.kind === "ocaml")?.sourceLine ||
-    1;
-  const line = Math.min(
-    Math.max(state.debugCursor?.line || fallbackLine, 1),
-    lines.length,
-  );
-  const source = lines[line - 1] || "";
-  const fallbackColumn = Math.max(0, source.search(/\S|$/));
-  const column = Math.min(
-    Math.max(state.debugCursor?.column ?? state.cursorPosition?.column ?? fallbackColumn, 0),
-    source.length,
-  );
-  state.debugCursor = { line, column };
-  return state.debugCursor;
-}
-
-function executionDebugMatrix() {
-  const baseline = state.debugAuditBaseline || state.executionCore;
-  if (!baseline || !state.path || !state.document) return null;
-  const cursor = normalizedDebugCursor();
-  const source = executionDebugSource();
-  let byDocument = debugMatrixCache.get(baseline);
-  if (!byDocument) {
-    byDocument = new Map();
-    debugMatrixCache.set(baseline, byDocument);
-  }
-  const key = `${state.path}\u001f${cursor.line}\u001f${source}`;
-  if (!byDocument.has(key)) {
-    byDocument.set(
-      key,
-      buildExecutionAuditLine(baseline, {
-        path: state.path,
-        source,
-        line: cursor.line,
-      }),
-    );
-  }
-  return byDocument.get(key);
-}
-
-function debugHighlightedSource(source, band, cursorColumn, selectedLine) {
-  let html = "";
-  for (let start = 0; start < source.length; ) {
-    const width =
-      source.charCodeAt(start) >= 0xd800 &&
-      source.charCodeAt(start) <= 0xdbff &&
-      source.charCodeAt(start + 1) >= 0xdc00 &&
-      source.charCodeAt(start + 1) <= 0xdfff
-        ? 2
-        : 1;
-    const end = start + width;
-    const stateName = band[start] || ".";
-    const className =
-      stateName === "E"
-        ? " debug-band-expression"
-        : stateName === "S"
-          ? " debug-band-activation"
-          : stateName === "G"
-            ? " debug-band-greyed"
-            : "";
-    if (selectedLine && cursorColumn === start) {
-      html += '<i class="debug-source-caret" aria-hidden="true"></i>';
-    }
-    const internalCaret =
-      selectedLine && cursorColumn > start && cursorColumn < end
-        ? '<i class="debug-source-caret internal" aria-hidden="true"></i>'
-        : "";
-    html += `<span class="debug-source-run${className}${internalCaret ? " has-internal-caret" : ""}" data-debug-from="${start}">${escapeHtml(source.slice(start, end))}${internalCaret}</span>`;
-    start = end;
-  }
-  if (selectedLine && cursorColumn === source.length) {
-    html += '<i class="debug-source-caret" aria-hidden="true"></i>';
-  }
-  return html || (selectedLine ? '<i class="debug-source-caret" aria-hidden="true"></i>' : " ");
-}
-
-function renderDebugRail(kind, boundaries, selectedColumn) {
-  const property =
-    kind === "C" ? "columnId" : kind === "H" ? "highlightId" : "rightPaneId";
-  return `<div class="debug-mapping-rail" aria-label="${kind} state at each cursor boundary">
-    <span class="debug-rail-name">${kind}</span>
-    <div class="debug-rail-boundaries">${boundaries
-      .map(
-        (boundary) =>
-          `<button type="button" data-debug-boundary="${boundary.column}" class="debug-boundary${boundary.column === selectedColumn ? " selected" : ""}" aria-label="${kind} column ${boundary.column}: state ${escapeHtml(boundary[property])}" title="column ${boundary.column}">${escapeHtml(boundary[property])}</button>`,
-      )
-      .join("")}</div>
-  </div>`;
-}
-
-function renderExecutionDebugView() {
-  const matrix = executionDebugMatrix();
-  if (!matrix) {
-    return `<article class="document-shell execution-debug-view"><p class="execution-debug-empty">Execution data is not available for this document yet.</p></article>`;
-  }
-  const cursor = normalizedDebugCursor();
-  const selected = matrix.states[cursor.column];
-  const bands = new Map(selected.highlights.map((item) => [item.line, item.band]));
-  const annotations = new Map(selected.column.map((item) => [item.line, item]));
-  const model = presentExecution(matrix.reducerStates[cursor.column]);
-  const stale = model?.authority !== "exact";
-  const boundaries = matrix.lines[0].boundaries;
-  const lines = executionDebugSource().split("\n");
-  return `<article class="document-shell execution-debug-view${stale ? " stale" : ""}" data-execution-debug tabindex="0" aria-label="Execution audit explorer">
-    <header class="execution-debug-header">
-      <span>Cursor ${cursor.line}:${cursor.column}${stale ? ' <em class="execution-debug-status">previous execution</em>' : ""}</span>
-      <span><b>E</b> expression <b>S</b> activation <b>G</b> greyed</span>
-    </header>
-    <div class="execution-debug-source">${lines
-      .map((source, index) => {
-        const line = index + 1;
-        const isSelected = line === cursor.line;
-        const annotation = annotations.get(line);
-        return `<div class="debug-source-row${isSelected ? " selected" : ""}" data-debug-line="${line}">
-          <span class="debug-line-number">${line}</span>
-          <code data-debug-code>${debugHighlightedSource(source, bands.get(line) || ".".repeat(source.length), cursor.column, isSelected)}</code>
-          <span class="debug-line-value">${annotation ? escapeHtml(annotation.value) : ""}</span>
-        </div>${
-          isSelected
-            ? `<div class="debug-line-mapping">${renderDebugRail("C", boundaries, cursor.column)}${renderDebugRail("H", boundaries, cursor.column)}${renderDebugRail("R", boundaries, cursor.column)}</div>`
-            : ""
-        }`;
-      })
-      .join("")}</div>
-  </article>`;
-}
-
-function debugTableEntry(entries, id) {
-  return entries.find((entry) => entry.id === id)?.state || null;
-}
-
-function renderExecutionDebugInspector() {
-  const matrix = executionDebugMatrix();
-  if (!matrix) return '<p class="context-empty">Execution audit unavailable.</p>';
-  const cursor = normalizedDebugCursor();
-  const boundary = matrix.lines[0].boundaries[cursor.column];
-  const column = debugTableEntry(matrix.tables.columns, boundary.columnId) || [];
-  const highlights = debugTableEntry(
-    matrix.tables.highlights,
-    boundary.highlightId,
-  ) || [];
-  const rightPane = debugTableEntry(
-    matrix.tables.rightPanes,
-    boundary.rightPaneId,
-  );
-  const navigationRows = presentExecution(
-    matrix.reducerStates[cursor.column],
-  )?.occurrenceList.rows || [];
-  const stale =
-    presentExecution(matrix.reducerStates[cursor.column])?.authority !== "exact";
-  const activeLineCount = highlights.filter((item) => /[ES]/.test(item.band)).length;
-  const greyedLineCount = highlights.filter(
-    (item) => /G/.test(item.band) && !/[ES]/.test(item.band),
-  ).length;
-  const markedHighlights = highlights.filter((item) => /[ESG]/.test(item.band));
-  const unchangedHighlights = highlights.filter((item) => !/[ESG]/.test(item.band));
-  const renderBandFacts = (items) => items
-    .map((item) => `<div class="debug-band-fact${item.line === cursor.line ? " selected" : ""}"><span>${item.line}</span><code>${escapeHtml(item.band)}</code></div>`)
-    .join("");
-  const hasFocusedOccurrence = rightPane?.rows.some(
-    (candidate) => candidate.selectedExpressionValue,
-  );
-  return `<section class="execution-debug-inspector">
-    <header><span>${cursor.line}:${cursor.column}${stale ? ' · previous execution' : ""}</span><span class="debug-state-ids">C${escapeHtml(boundary.columnId)} H${escapeHtml(boundary.highlightId)} R${escapeHtml(boundary.rightPaneId)}</span></header>
-    <section><h3>Value column</h3>${
-      column.length
-        ? column.map((item) => `<div class="debug-fact"><span>${item.line}</span><code><small>${escapeHtml(item.kind)}</small> ${escapeHtml(item.value)}</code></div>`).join("")
-        : '<p class="execution-note">No displayed values.</p>'
-    }</section>
-    <section><h3>Source display</h3>${
-      highlights.length
-        ? `${renderBandFacts(markedHighlights)}${unchangedHighlights.length ? `<details class="debug-unchanged-bands"><summary>${unchangedHighlights.length} unchanged line${unchangedHighlights.length === 1 ? "" : "s"}</summary>${renderBandFacts(unchangedHighlights)}</details>` : ""}<p class="debug-band-summary">${activeLineCount} activation line${activeLineCount === 1 ? "" : "s"} · ${greyedLineCount} greyed line${greyedLineCount === 1 ? "" : "s"}</p>`
-        : '<p class="execution-note">No execution highlighting.</p>'
-    }</section>
-    <section><h3>Right pane</h3>${
-      rightPane?.rows.length
-        ? `<div class="debug-right-expression"><code>${escapeHtml(rightPane.expression)}</code><span>${rightPane.count}</span></div>${rightPane.rows.map((row, index) => {
-            const navigation = navigationRows[index];
-            const selected = row.selectedExpressionValue ||
-              (!hasFocusedOccurrence && row.selectedActivation);
-            return `<div class="debug-right-row${selected ? " selected" : ""}"><button type="button" class="debug-right-call" data-debug-audit-activation="${escapeHtml(navigation?.activationId || "")}" title="Open this activation in Document" ${selected ? 'aria-current="true"' : ""}><code>${escapeHtml(row.name)}(${row.inputs.map(escapeHtml).join(", ")}) ${row.arrow} ${escapeHtml(row.outcome)}</code>${row.repeat ? `<small class="debug-right-repeat">${escapeHtml(row.repeat)}</small>` : ""}</button>${row.expressionValue ? `<button type="button" class="debug-right-value" data-debug-audit-occurrence="${escapeHtml(navigation?.occurrenceId || "")}" title="Open this expression occurrence in Document"><small>value ${escapeHtml(row.expressionValue)}</small></button>` : row.valueStatus ? `<small>${escapeHtml(row.valueStatus)}</small>` : ""}</div>`;
-          }).join("")}`
-        : `<p class="execution-note">${escapeHtml(rightPane?.emptyReason || "No executions.")}</p>`
-    }</section>
-  </section>`;
 }
 
 function renderProject() {
@@ -2794,6 +3002,7 @@ function executionCoreProjection() {
               truncated: annotation.value.truncated,
               segments: annotation.value.segments,
               occurrenceId: annotation.occurrenceId,
+              selected: annotation.selected === true,
             },
           ],
         },
@@ -2889,18 +3098,16 @@ function installExecutionNavigation(result, { animate = true } = {}) {
 
 function navigateDebugCall(callId) {
   if (state.executionCore && callId) {
-    const separator = callId.indexOf(":");
-    const targetKind = separator < 0 ? "activation" : callId.slice(0, separator);
-    const targetId = separator < 0 ? callId : callId.slice(separator + 1);
+    const target = executionTraceNavigationTarget(callId);
     return installExecutionNavigation(
       dispatchExecutionIntent(state.executionCore, {
         kind:
-          targetKind === "occurrence"
+          target.kind === "occurrence"
             ? "occurrence-chosen"
             : "activation-navigated",
-        ...(targetKind === "occurrence"
-          ? { occurrenceId: targetId }
-          : { activationId: targetId }),
+        ...(target.kind === "occurrence"
+          ? { occurrenceId: target.id }
+          : { activationId: target.id }),
       }),
     );
   }
@@ -2924,8 +3131,75 @@ function executionValueHtml(value) {
     .join("");
 }
 
+function executionValueFullText(value) {
+  return String(value?.fullText ?? value?.text ?? "…");
+}
+
+function executionValueCellAttributes(fullText, truncated = false) {
+  return `data-execution-value-full="${escapeHtml(String(fullText))}" data-execution-value-truncated="${Boolean(truncated)}"`;
+}
+
+function renderWholeExecutionTrace(model) {
+  const rows = model.wholeTrace
+    .map((row) => {
+      const depth = Math.max(0, row.depth || 0);
+      if (row.kind === "activation") {
+        const inputs = row.inputs
+          .map(
+            (input) =>
+              `<code ${executionValueCellAttributes(executionValueFullText(input), input.truncated)}>${executionValueHtml(input)}</code>`,
+          )
+          .join('<span class="execution-trace-argument-gap"> </span>');
+        const arrow = row.outcome.kind === "raise" ? "⇑" : "→";
+        return `<button type="button" class="execution-trace-row execution-trace-call" style="--trace-indent:${depth * 2}ch" data-execution-trace-activation="${escapeHtml(row.activationId)}" aria-label="Open ${escapeHtml(row.name)} activation">
+          <span class="execution-trace-name">${escapeHtml(row.name)}</span>${inputs ? `<span class="execution-trace-inputs">${inputs}</span>` : ""}<span class="execution-trace-arrow${row.outcome.kind === "raise" ? " raised" : ""}">${arrow}</span><code class="execution-trace-result" ${executionValueCellAttributes(executionValueFullText(row.outcome), row.outcome.truncated)}>${executionValueHtml(row.outcome)}</code>
+        </button>`;
+      }
+      const output = row.output;
+      const navigation = row.occurrenceId
+        ? ` data-execution-trace-occurrence="${escapeHtml(row.occurrenceId)}"`
+        : row.activationId
+          ? ` data-execution-trace-activation="${escapeHtml(row.activationId)}"`
+          : "";
+      const tag = navigation ? "button" : "div";
+      const label = output.label
+        ? `<span class="execution-trace-output-label">${escapeHtml(output.label)}</span>`
+        : "";
+      const type = output.type
+        ? `<span class="execution-trace-output-type">${escapeHtml(output.type)}</span>`
+        : "";
+      return `<${tag}${tag === "button" ? ' type="button"' : ""} class="execution-trace-row execution-trace-output execution-trace-output-${escapeHtml(output.kind)}" style="--trace-indent:${depth * 2}ch"${navigation}>
+        <span class="execution-trace-output-marker" aria-hidden="true">${escapeHtml(output.marker)}</span>${label}<code>${escapeHtml(output.text)}</code>${type}
+      </${tag}>`;
+    })
+    .join("");
+  return `<section class="execution-panel execution-whole-trace${model.authority !== "exact" ? " stale" : ""}">
+    ${rows ? `<div class="execution-trace-list" role="list" aria-label="Program execution trace">${rows}</div>` : '<p class="execution-note">This execution made no user function calls or output.</p>'}
+  </section>`;
+}
+
 function renderExecutionCoreInspector() {
   const model = presentExecution(state.executionCore);
+  if (!model.selection.constructId) return renderWholeExecutionTrace(model);
+  const activationNames = [
+    ...new Set(
+      model.occurrenceList.rows.map((row) =>
+        row.isProgram ? "top level" : row.name,
+      ),
+    ),
+  ];
+  const activationHeading =
+    activationNames.length === 1 ? activationNames[0] : "activation";
+  const resultHeading = ["activation", "fun"].includes(activationHeading)
+    ? "result"
+    : activationHeading;
+  const parameterHeading = model.occurrenceList.parameterHeading;
+  const programRows =
+    model.occurrenceList.rows.length > 0 &&
+    model.occurrenceList.rows.every((row) => row.isProgram);
+  const showExpressionColumn = model.occurrenceList.rows.some(
+    (row) => row.value || row.valueStatus,
+  );
   const rows = model.occurrenceList.rows
     .map((row) => {
       const selectedActivation =
@@ -2934,33 +3208,45 @@ function renderExecutionCoreInspector() {
         row.occurrenceId === model.occurrenceList.selectedOccurrenceId;
       const inputs = row.inputs
         .map((input) => executionValueHtml(input))
-        .join(" ");
-      const renderedInputs = inputs ? `<code>${inputs}</code>` : "";
+        .join('<span class="execution-choice-separator">, </span>');
+      const inputsFullText = row.inputs
+        .map((input) => executionValueFullText(input))
+        .join(", ");
+      const inputsTruncated = row.inputs.some((input) => input.truncated);
+      const renderedInputs = `<span class="execution-choice-inputs"><code ${executionValueCellAttributes(inputsFullText, inputsTruncated)}>${inputs}</code></span>`;
       const repeat = row.totalInActivation > 1
         ? `<span class="execution-occurrence-index">${row.ordinal}/${row.totalInActivation}</span>`
         : "";
       const valueButton = row.value
-        ? `<button type="button" class="execution-occurrence-value" data-execution-core-occurrence="${escapeHtml(row.occurrenceId)}" ${selectedOccurrence ? 'aria-current="true"' : ""}>
+        ? `<button type="button" class="execution-occurrence-value" data-execution-core-occurrence="${escapeHtml(row.occurrenceId)}" ${executionValueCellAttributes(executionValueFullText(row.value), row.value.truncated)} ${selectedOccurrence ? 'aria-current="true"' : ""} aria-label="Value of ${escapeHtml(model.occurrenceList.expression)}: ${escapeHtml(row.value.fullText || row.value.text)}">
           <code>${executionValueHtml(row.value)}</code>
         </button>`
         : row.valueStatus === "trace-incomplete"
           ? '<span class="execution-occurrence-status">trace ended before the value returned</span>'
         : "";
-      return `<div class="execution-occurrence${selectedOccurrence ? " selected" : ""}" role="listitem">
-        <button type="button" class="execution-occurrence-activation" data-execution-core-activation="${escapeHtml(row.activationId)}" ${selectedActivation ? 'aria-current="true"' : ""}>
-          <span class="execution-choice-call"><strong>${escapeHtml(row.name)}</strong>${renderedInputs}</span>
+      const activationContents = row.isProgram
+        ? '<span class="execution-choice-program" aria-hidden="true"></span>'
+        : `${renderedInputs}
           <span class="execution-choice-arrow ${row.outcome.kind === "raise" ? "raised" : ""}">${row.outcome.kind === "raise" ? "⇑" : "→"}</span>
-          <code>${executionValueHtml(row.outcome)}</code>${repeat}
+          <span class="execution-choice-result"><code class="execution-occurrence-outcome" ${executionValueCellAttributes(executionValueFullText(row.outcome), row.outcome.truncated)}>${executionValueHtml(row.outcome)}</code>${repeat}</span>`;
+      return `<div class="execution-occurrence${row.isProgram ? " program" : ""}${row.value ? "" : " no-value"}${selectedActivation || selectedOccurrence ? " selected" : ""}" role="listitem">
+        <button type="button" class="execution-occurrence-activation" data-execution-core-activation="${escapeHtml(row.activationId)}" ${selectedActivation ? 'aria-current="true"' : ""} aria-label="${row.isProgram ? "Top-level activation" : `Select ${escapeHtml(row.name)} activation`}">
+          ${activationContents}
         </button>
         ${valueButton}
       </div>`;
     })
     .join("");
   const stale = model.authority !== "exact";
-  return `<section class="execution-panel${stale ? " stale" : ""}">
+  return `<section class="execution-panel${showExpressionColumn ? "" : " activation-only"}${stale ? " stale" : ""}">
     ${
       rows
-        ? `<header class="execution-occurrence-heading"><code>${escapeHtml(model.occurrenceList.expression)}</code><span>${model.occurrenceList.count} occurrence${model.occurrenceList.count === 1 ? "" : "s"}</span></header><div class="execution-occurrences" role="list" aria-label="Executions of the selected expression">${rows}</div>`
+        ? `<header class="execution-occurrence-heading${programRows ? " program" : ""}${showExpressionColumn ? "" : " activation-only"}">
+            ${programRows
+              ? '<code class="execution-activation-heading" title="Top-level activation">top level</code>'
+              : `<code class="execution-arguments-heading" title="${escapeHtml(`Function parameters: ${parameterHeading.fullText}`)}">${escapeHtml(parameterHeading.text)}</code><span class="execution-heading-arrow" aria-hidden="true">→</span><code class="execution-result-heading" title="Function result">${escapeHtml(resultHeading)}</code>`}
+            ${showExpressionColumn ? `<span class="execution-expression-heading" title="Selected expression"><code>${escapeHtml(model.occurrenceList.expression)}</code>${model.occurrenceList.count > 1 ? `<small>${model.occurrenceList.count}×</small>` : ""}</span>` : ""}
+          </header><div class="execution-occurrences${showExpressionColumn ? "" : " activation-only"}" role="list" aria-label="Executions of the selected expression">${rows}</div>`
         : `<p class="execution-note">${
             stale
               ? "Execution is updating for the edited program."
@@ -2978,7 +3264,6 @@ function renderExecutionCoreInspector() {
 
 function renderInspector() {
   if (!state.document || state.view !== "document") return "";
-  if (state.sourceMode === "debug") return renderExecutionDebugInspector();
   if (state.executionCore) return renderExecutionCoreInspector();
   if (state.executionProblem && state.evaluation?.ok) {
     return `<p class="context-empty" title="${escapeHtml(state.executionProblem)}">Execution data is unavailable.</p>`;
@@ -4007,6 +4292,12 @@ function scheduleEvaluation(
     retryCount = 0,
   } = {},
 ) {
+  const session = currentSession();
+  if (session?.provisional) {
+    session.evaluationQueued = { source, plan };
+    state.evaluating = false;
+    return;
+  }
   const pending = state.pendingEvaluation;
   if (
     pending &&
@@ -4238,7 +4529,7 @@ function updateStatusOnly() {
 }
 
 function scheduleAutosave(session, { immediate = false } = {}) {
-  if (state.refactorInFlight) {
+  if (state.refactorInFlight || session.provisional) {
     session.autosaveQueued = true;
     return;
   }
@@ -4252,6 +4543,10 @@ function scheduleAutosave(session, { immediate = false } = {}) {
 async function drainAutosave(session) {
   clearTimeout(session.autosaveTimer);
   session.autosaveTimer = null;
+  if (session.provisional) {
+    session.autosaveQueued = true;
+    return true;
+  }
   if (session.autosaveInFlight) {
     session.autosaveQueued = true;
     return false;
@@ -4271,7 +4566,7 @@ async function drainAutosave(session) {
       const result = await api("/api/page/source", {
         method: "PUT",
         body: JSON.stringify({
-          module: session.module,
+          module: session.persistenceModule || session.module,
           source,
           expectedDigest,
           editRevision: revision,
@@ -4517,12 +4812,152 @@ function openSourceLine(line) {
   editor.focus();
 }
 
+let executionValueLensAnchor = null;
+let executionValueLensHideTimer = null;
+
+function ensureExecutionValueLens() {
+  let lens = document.querySelector("#execution-value-lens");
+  if (lens) return lens;
+  lens = document.createElement("div");
+  lens.id = "execution-value-lens";
+  lens.className = "execution-value-lens";
+  lens.hidden = true;
+  lens.setAttribute("role", "tooltip");
+  lens.innerHTML = '<code></code><span class="execution-value-lens-note"></span>';
+  lens.addEventListener("pointerenter", () => {
+    if (executionValueLensHideTimer !== null) {
+      clearTimeout(executionValueLensHideTimer);
+      executionValueLensHideTimer = null;
+    }
+  });
+  lens.addEventListener("pointerleave", () => hideExecutionValueLens());
+  document.body.append(lens);
+  return lens;
+}
+
+function executionValueCellIsClipped(cell) {
+  const content = cell.matches("code") ? cell : cell.querySelector("code");
+  return Boolean(
+    cell.dataset.executionValueTruncated === "true" ||
+      (content && content.scrollWidth > content.clientWidth + 1),
+  );
+}
+
+function positionExecutionValueLens() {
+  const lens = document.querySelector("#execution-value-lens");
+  const anchor = executionValueLensAnchor;
+  if (!lens || lens.hidden || !anchor?.isConnected) return;
+  const anchorRect = anchor.getBoundingClientRect();
+  const lensRect = lens.getBoundingClientRect();
+  const margin = 12;
+  const gap = 8;
+  const left = Math.min(
+    Math.max(anchorRect.left, margin),
+    Math.max(margin, window.innerWidth - lensRect.width - margin),
+  );
+  let top = anchorRect.bottom + gap;
+  if (top + lensRect.height > window.innerHeight - margin) {
+    top = Math.max(margin, anchorRect.top - lensRect.height - gap);
+  }
+  lens.style.left = `${Math.round(left)}px`;
+  lens.style.top = `${Math.round(top)}px`;
+}
+
+function showExecutionValueLens(anchor, fullText, { recordedPreview = false } = {}) {
+  if (!anchor?.isConnected || !fullText) return;
+  if (executionValueLensHideTimer !== null) {
+    clearTimeout(executionValueLensHideTimer);
+    executionValueLensHideTimer = null;
+  }
+  const lens = ensureExecutionValueLens();
+  lens.querySelector("code").textContent = fullText;
+  const note = lens.querySelector(".execution-value-lens-note");
+  note.textContent = recordedPreview ? "recorded preview" : "";
+  note.hidden = !recordedPreview;
+  executionValueLensAnchor = anchor;
+  lens.hidden = false;
+  lens.style.left = "0";
+  lens.style.top = "0";
+  requestAnimationFrame(positionExecutionValueLens);
+}
+
+function hideExecutionValueLens({ immediately = false } = {}) {
+  if (executionValueLensHideTimer !== null) {
+    clearTimeout(executionValueLensHideTimer);
+    executionValueLensHideTimer = null;
+  }
+  const hide = () => {
+    const lens = document.querySelector("#execution-value-lens");
+    if (lens) lens.hidden = true;
+    executionValueLensAnchor = null;
+    executionValueLensHideTimer = null;
+  };
+  if (immediately) hide();
+  else executionValueLensHideTimer = window.setTimeout(hide, 90);
+}
+
+function bindExecutionValueLens(inspector) {
+  inspector
+    ?.querySelectorAll("[data-execution-value-full]")
+    .forEach((cell) => {
+      cell.addEventListener("pointerenter", () => {
+        if (!executionValueCellIsClipped(cell)) return;
+        const fullText = cell.dataset.executionValueFull;
+        const displayed = (cell.matches("code") ? cell : cell.querySelector("code"))
+          ?.textContent.trim();
+        showExecutionValueLens(cell, fullText, {
+          recordedPreview:
+            cell.dataset.executionValueTruncated === "true" &&
+            displayed === fullText,
+        });
+      });
+      cell.addEventListener("pointerleave", () => hideExecutionValueLens());
+    });
+  inspector
+    ?.querySelectorAll("[data-execution-core-activation]")
+    .forEach((button) => {
+      button.addEventListener("focus", () => {
+        requestAnimationFrame(() => {
+          if (!button.matches(":focus-visible")) return;
+          const cells = [...button.querySelectorAll("[data-execution-value-full]")];
+          if (!cells.some((cell) => executionValueCellIsClipped(cell))) return;
+          const [inputs, outcome] = cells.map(
+            (cell) => cell.dataset.executionValueFull,
+          );
+          showExecutionValueLens(
+            button,
+            outcome === undefined ? inputs : `${inputs} → ${outcome}`,
+          );
+        });
+      });
+      button.addEventListener("blur", () => hideExecutionValueLens());
+    });
+}
+
 function bindInspectorEvents() {
   const inspector = document.querySelector(".inspector");
+  bindExecutionValueLens(inspector);
+  inspector
+    ?.querySelectorAll("[data-execution-trace-activation]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        hideExecutionValueLens({ immediately: true });
+        navigateDebugCall(button.dataset.executionTraceActivation);
+      });
+    });
+  inspector
+    ?.querySelectorAll("[data-execution-trace-occurrence]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        hideExecutionValueLens({ immediately: true });
+        navigateDebugCall(`occurrence:${button.dataset.executionTraceOccurrence}`);
+      });
+    });
   inspector
     ?.querySelectorAll("[data-execution-core-activation]")
     .forEach((button) => {
       button.addEventListener("click", () => {
+        hideExecutionValueLens({ immediately: true });
         if (!state.executionCore) return;
         const result = dispatchExecutionIntent(state.executionCore, {
           kind: "activation-chosen",
@@ -4537,6 +4972,7 @@ function bindInspectorEvents() {
     ?.querySelectorAll("[data-execution-core-occurrence]")
     .forEach((button) => {
       button.addEventListener("click", () => {
+        hideExecutionValueLens({ immediately: true });
         if (!state.executionCore) return;
         installExecutionNavigation(
           dispatchExecutionIntent(state.executionCore, {
@@ -4573,7 +5009,50 @@ function paneWidthLimits(pane) {
       : state.paneWidths.sidebar;
   return pane === "sidebar"
     ? { minimum: 160, maximum: Math.max(160, Math.min(420, viewport - other - 410)) }
-    : { minimum: 220, maximum: Math.max(220, Math.min(520, viewport - other - 410)) };
+    : { minimum: 220, maximum: Math.max(220, viewport - other - 360) };
+}
+
+function setInspectorExpanded(expanded) {
+  if (window.matchMedia("(max-width: 1000px)").matches) expanded = false;
+  state.inspectorExpanded = Boolean(expanded);
+  document
+    .querySelector(".workspace")
+    ?.classList.toggle("inspector-expanded", state.inspectorExpanded);
+  const separator = document.querySelector('[data-pane-resizer="inspector"]');
+  const actualWidth = Math.round(
+    document.querySelector(".inspector")?.getBoundingClientRect().width ||
+      state.paneWidths.inspector,
+  );
+  const limits = paneWidthLimits("inspector");
+  separator?.setAttribute(
+    "aria-valuemax",
+    String(Math.max(limits.maximum, actualWidth)),
+  );
+  separator?.setAttribute("aria-valuenow", String(actualWidth));
+  const button = document.querySelector("#inspector-width-toggle");
+  if (!button) return;
+  const label = state.inspectorExpanded
+    ? "Restore context pane width"
+    : "Expand context pane";
+  button.setAttribute("aria-label", label);
+  button.setAttribute("aria-pressed", String(state.inspectorExpanded));
+  button.title = `${state.inspectorExpanded ? "Restore context pane" : "Expand context pane"} (Command/Control–Shift–Enter)`;
+  button.querySelector("span").textContent = state.inspectorExpanded ? "⤡" : "⤢";
+}
+
+function toggleInspectorExpanded() {
+  if (state.view !== "document") return false;
+  setInspectorExpanded(!state.inspectorExpanded);
+  return true;
+}
+
+function collapseInspectorForResize() {
+  if (!state.inspectorExpanded) return;
+  const expandedWidth = document
+    .querySelector(".inspector")
+    ?.getBoundingClientRect().width;
+  setInspectorExpanded(false);
+  if (expandedWidth) setPaneWidth("inspector", expandedWidth);
 }
 
 function setPaneWidth(pane, width, { persist = false } = {}) {
@@ -4600,6 +5079,7 @@ function bindPaneResizers() {
     setPaneWidth(pane, state.paneWidths[pane]);
     separator.addEventListener("pointerdown", (event) => {
       if (window.matchMedia("(max-width: 1000px)").matches) return;
+      if (pane === "inspector") collapseInspectorForResize();
       const startX = event.clientX;
       const startWidth = state.paneWidths[pane];
       separator.setPointerCapture(event.pointerId);
@@ -4624,12 +5104,14 @@ function bindPaneResizers() {
       event.preventDefault();
     });
     separator.addEventListener("dblclick", () => {
+      if (pane === "inspector") collapseInspectorForResize();
       setPaneWidth(pane, pane === "sidebar" ? 160 : 340, {
         persist: true,
       });
     });
     separator.addEventListener("keydown", (event) => {
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (pane === "inspector") collapseInspectorForResize();
       const direction = event.key === "ArrowRight" ? 1 : -1;
       const delta = direction * (event.shiftKey ? 32 : 12);
       setPaneWidth(
@@ -4643,107 +5125,19 @@ function bindPaneResizers() {
 }
 
 function clampPaneWidths() {
-  if (window.matchMedia("(max-width: 1000px)").matches) return;
+  if (window.matchMedia("(max-width: 1000px)").matches) {
+    setInspectorExpanded(false);
+    return;
+  }
   setPaneWidth("sidebar", state.paneWidths.sidebar);
   setPaneWidth("inspector", state.paneWidths.inspector);
   setPaneWidth("sidebar", state.paneWidths.sidebar);
-}
-
-function storeCursorInSession(position = normalizedDebugCursor()) {
-  const session = currentSession();
-  const editorState = session?.editorState;
-  if (!editorState || !position) return;
-  const lineNumber = Math.min(
-    Math.max(position.line, 1),
-    editorState.doc.lines,
-  );
-  const line = editorState.doc.line(lineNumber);
-  const anchor = Math.min(
-    Math.max(line.from + position.column, line.from),
-    line.to,
-  );
-  session.editorState = editorState.update({
-    selection: { anchor },
-  }).state;
-}
-
-function moveEditorToDebugCursor({ animate = false, focus = false } = {}) {
-  const editor = state.sourceEditorView;
-  const position = normalizedDebugCursor();
-  if (!editor || !position) return false;
-  const lineNumber = Math.min(
-    Math.max(position.line, 1),
-    editor.state.doc.lines,
-  );
-  const line = editor.state.doc.line(lineNumber);
-  const anchor = Math.min(
-    Math.max(line.from + position.column, line.from),
-    line.to,
-  );
-  editor.dispatch({
-    selection: { anchor },
-    userEvent: "select.execution-audit",
-  });
-  scrollMarkdownEditorTo(
-    editor,
-    { line: lineNumber, column: anchor - line.from },
-    { animate },
-  );
-  if (focus) editor.focus();
-  return true;
-}
-
-function debugCodeBlockAtLine(lineNumber) {
-  return state.document?.blocks.find((block) => {
-    if (block.kind !== "ocaml") return false;
-    const firstLine = block.sourceLine || block.lineStart;
-    const lastLine =
-      firstLine + Math.max(String(block.source || "").split("\n").length - 1, 0);
-    return lineNumber >= firstLine && lineNumber <= lastLine;
-  });
+  if (state.inspectorExpanded) setInspectorExpanded(true);
 }
 
 function setSourceMode(mode) {
-  const previousMode = state.sourceMode;
-  if (mode === "debug") {
-    const editor = state.sourceEditorView;
-    if (editor) {
-      const position = editor.state.selection.main.head;
-      const line = editor.state.doc.lineAt(position);
-      const block = debugCodeBlockAtLine(line.number);
-      if (block) {
-        state.debugCursor = {
-          line: line.number,
-          column: position - line.from,
-        };
-      } else {
-        const firstCodeLine = state.document?.blocks.find(
-          (item) => item.kind === "ocaml",
-        )?.sourceLine;
-        if (firstCodeLine) {
-          const source = editor.state.doc.line(firstCodeLine).text;
-          state.debugCursor = {
-            line: firstCodeLine,
-            column: Math.max(0, source.search(/\S|$/)),
-          };
-        }
-      }
-    }
-    state.debugAuditBaseline = createExecutionAuditBaseline(state.executionCore);
-  }
-  if (previousMode === "debug" && mode !== "debug") {
-    storeCursorInSession();
-    state.debugAuditBaseline = null;
-  }
   state.sourceMode = mode;
   localStorage.setItem("dox:v2:editor-mode", mode);
-  if (previousMode === "debug" || mode === "debug") {
-    render();
-    if (previousMode === "debug" && mode !== "debug") {
-      moveEditorToDebugCursor();
-    }
-    return;
-  }
   setMarkdownEditorMode(state.sourceEditorView, mode);
   document
     .querySelector(".workspace")
@@ -4765,140 +5159,6 @@ function setSourceMode(mode) {
     button.setAttribute("aria-label", `Switch to ${sourceModeName[next]} view`);
     button.classList.toggle("active", mode !== "literate");
   }
-}
-
-function debugColumnFromPointer(event, code) {
-  const source = executionDebugSource().split("\n")[
-    Number(code.closest("[data-debug-line]")?.dataset.debugLine || 1) - 1
-  ] || "";
-  return pointerColumn({
-    document_: document,
-    code,
-    source,
-    clientX: event.clientX,
-    clientY: event.clientY,
-  });
-}
-
-function refreshExecutionDebug({ focus = false } = {}) {
-  const shell = document.querySelector(".execution-debug-view");
-  if (shell) shell.outerHTML = renderDocument();
-  const inspector = document.querySelector(".inspector");
-  if (inspector) {
-    inspector.innerHTML = renderInspector();
-    inspector.dataset.rendered = "true";
-    state.inspectorHtml = inspector.innerHTML;
-  }
-  bindDebugEvents();
-  if (focus) {
-    requestAnimationFrame(() =>
-      document
-        .querySelector("[data-execution-debug]")
-        ?.focus({ preventScroll: true }),
-    );
-  }
-}
-
-function setDebugPosition(line, column, { focus = false } = {}) {
-  const lines = executionDebugSource().split("\n");
-  const nextLine = Math.min(Math.max(line, 1), lines.length);
-  const nextColumn = Math.min(
-    Math.max(column, 0),
-    (lines[nextLine - 1] || "").length,
-  );
-  state.debugCursor = { line: nextLine, column: nextColumn };
-  const matrix = executionDebugMatrix();
-  const reducerState = matrix?.reducerStates[nextColumn];
-  if (reducerState) setExecutionCore(reducerState);
-  refreshExecutionDebug({ focus });
-}
-
-function openDebugAuditTarget(kind, id) {
-  const matrix = executionDebugMatrix();
-  const cursor = normalizedDebugCursor();
-  const baselineState = matrix?.reducerStates[cursor.column];
-  if (!baselineState || !id) return;
-  const result = dispatchExecutionIntent(baselineState, {
-    kind: kind === "occurrence" ? "occurrence-chosen" : "activation-chosen",
-    ...(kind === "occurrence" ? { occurrenceId: id } : { activationId: id }),
-  });
-  if (!result.state) return;
-  const moved = result.effects.find(
-    (effect) =>
-      effect.kind === "move-editor-cursor" && effect.range.path === state.path,
-  );
-  const position = moved?.position || cursor;
-  state.debugCursor = { line: position.line, column: position.column };
-  setExecutionCore(result.state);
-  storeCursorInSession(state.debugCursor);
-  state.sourceMode = "literate";
-  state.debugAuditBaseline = null;
-  localStorage.setItem("dox:v2:editor-mode", "literate");
-  render();
-  requestAnimationFrame(() => {
-    moveEditorToDebugCursor({ animate: true, focus: true });
-  });
-}
-
-function bindDebugEvents() {
-  const explorer = document.querySelector("[data-execution-debug]");
-  if (!explorer) return;
-  explorer.querySelectorAll("[data-debug-code]").forEach((code) => {
-    code.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || !event.isPrimary) return;
-      const line = Number(code.closest("[data-debug-line]").dataset.debugLine);
-      setDebugPosition(line, debugColumnFromPointer(event, code), {
-        focus: true,
-      });
-      event.preventDefault();
-    });
-  });
-  explorer.querySelectorAll("[data-debug-boundary]").forEach((button) => {
-    button.addEventListener("click", () => {
-      setDebugPosition(
-        normalizedDebugCursor().line,
-        Number(button.dataset.debugBoundary),
-        { focus: true },
-      );
-    });
-  });
-  explorer.addEventListener("keydown", (event) => {
-    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
-      return;
-    }
-    const lines = executionDebugSource().split("\n");
-    const cursor = normalizedDebugCursor();
-    let { line, column } = cursor;
-    if (event.key === "ArrowLeft") {
-      if (column > 0) column -= 1;
-      else if (line > 1) {
-        line -= 1;
-        column = lines[line - 1].length;
-      }
-    } else if (event.key === "ArrowRight") {
-      if (column < lines[line - 1].length) column += 1;
-      else if (line < lines.length) {
-        line += 1;
-        column = 0;
-      }
-    } else {
-      line += event.key === "ArrowUp" ? -1 : 1;
-      line = Math.min(Math.max(line, 1), lines.length);
-      column = Math.min(column, lines[line - 1].length);
-    }
-    setDebugPosition(line, column, { focus: true });
-    event.preventDefault();
-  });
-  document.querySelectorAll("[data-debug-audit-activation]").forEach((button) => {
-    button.addEventListener("click", () =>
-      openDebugAuditTarget("activation", button.dataset.debugAuditActivation),
-    );
-  });
-  document.querySelectorAll("[data-debug-audit-occurrence]").forEach((button) => {
-    button.addEventListener("click", () =>
-      openDebugAuditTarget("occurrence", button.dataset.debugAuditOccurrence),
-    );
-  });
 }
 
 function bindEvents() {
@@ -4941,10 +5201,21 @@ function bindEvents() {
     ?.addEventListener("click", () =>
       setSourceMode(nextSourceMode()),
     );
+  document
+    .querySelector("#inspector-width-toggle")
+    ?.addEventListener("click", toggleInspectorExpanded);
+  document.querySelector(".document-shell")?.addEventListener("pointerdown", () => {
+    if (state.inspectorExpanded) setInspectorExpanded(false);
+  });
   document.querySelector("#new-document")?.addEventListener("click", createDocument);
   document.querySelector("#files-toggle")?.addEventListener("click", () => {
     const workspace = document.querySelector(".workspace");
-    workspace?.classList.toggle("show-files");
+    const expanded = workspace?.classList.toggle("show-files") || false;
+    const button = document.querySelector("#files-toggle");
+    const label = expanded ? "Hide project files" : "Show project files";
+    button?.setAttribute("aria-expanded", String(expanded));
+    button?.setAttribute("aria-label", label);
+    if (button) button.title = label;
   });
   document.querySelectorAll("[data-project-path]").forEach((card) => {
     const open = async () => {
@@ -4968,7 +5239,6 @@ function bindEvents() {
     });
   });
   bindInspectorEvents();
-  bindDebugEvents();
   mountEmbeddedEditors();
 }
 
@@ -4989,6 +5259,7 @@ function refreshInspector({ revealExecutionChoice = false } = {}) {
       return;
     }
     const scrollTop = inspector.scrollTop;
+    hideExecutionValueLens({ immediately: true });
     inspector.innerHTML = html;
     inspector.dataset.rendered = "true";
     state.inspectorHtml = html;
@@ -5007,7 +5278,34 @@ initialize();
 
 window.addEventListener("resize", scheduleCompletionPopupPosition);
 window.addEventListener("resize", clampPaneWidths);
+window.addEventListener("resize", () => hideExecutionValueLens({ immediately: true }));
 document.addEventListener("scroll", scheduleCompletionPopupPosition, true);
+document.addEventListener(
+  "scroll",
+  (event) => {
+    if (event.target.closest?.(".execution-value-lens")) return;
+    hideExecutionValueLens({ immediately: true });
+  },
+  true,
+);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") hideExecutionValueLens({ immediately: true });
+});
+document.addEventListener(
+  "keydown",
+  (event) => {
+    if (
+      event.key === "Enter" &&
+      event.shiftKey &&
+      (event.metaKey || event.ctrlKey) &&
+      toggleInspectorExpanded()
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  },
+  true,
+);
 
 window.addEventListener("popstate", (event) => {
   state.navigationGeneration += 1;

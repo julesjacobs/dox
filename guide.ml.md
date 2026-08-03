@@ -11,8 +11,8 @@ shown in the left pane.
 - Press `Shift–Tab` to return a code line to prose.
 - Definitions remain live across every code block on the page.
 - Use an inline expression ending in `=` to show its value, as in `1 + 2 =`.
-- The upper-right control cycles through the normal `Document`, raw Markdown
-  `Source`, and the visual execution auditor in `Debug`.
+- The upper-right control switches between the normal `Document` and raw
+  Markdown `Source` views.
 
 At the end of a code block, `Down` creates prose below it when no following line
 exists. `Shift–Enter` exits a code block anywhere.
@@ -90,4 +90,6 @@ not rerun the program.
 Git provides history and collaboration; Dox does not add a second history
 model. Drag the vertical dividers to resize panes. Their positions survive a
 refresh. Double-click a divider to reset it, or focus it and use `Left` and
-`Right` to resize from the keyboard.
+`Right` to resize from the keyboard. Press `Command–Shift–Enter` on macOS or
+`Control–Shift–Enter` elsewhere to give the context pane most of the window;
+press it again, or click in the document, to restore the normal width.

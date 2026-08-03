@@ -38,8 +38,12 @@ import {
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { createDebugNavigationGate } from "./debug-navigation.js";
-import { executionAnnotationColumn } from "./execution-annotation-layout.js";
 import {
+  executionAnnotationColumn,
+  executionAnnotationRail,
+} from "./execution-annotation-layout.js";
+import {
+  changeBlankOutlineDepth,
   indentOutlineSubtree,
   moveOutlineSibling,
   moveOutlineSubtree,
@@ -71,18 +75,20 @@ function debugAnnotationKey(item, sourceLine, order) {
 }
 
 class DebugAnnotationsWidget extends WidgetType {
-  constructor(items, sourceLine = 0, sourceLength = 0) {
+  constructor(items, sourceLine = 0, sourceLength = 0, preferredColumn = 72) {
     super();
     this.items = items;
     this.sourceLine = sourceLine;
     this.sourceLength = sourceLength;
+    this.preferredColumn = preferredColumn;
   }
 
   eq(other) {
     return (
       JSON.stringify(this.items) === JSON.stringify(other.items) &&
       this.sourceLine === other.sourceLine &&
-      this.sourceLength === other.sourceLength
+      this.sourceLength === other.sourceLength &&
+      this.preferredColumn === other.preferredColumn
     );
   }
 
@@ -92,12 +98,13 @@ class DebugAnnotationsWidget extends WidgetType {
     row.dataset.debugAnnotationSourceLine = String(this.sourceLine);
     row.style.setProperty(
       "--execution-annotation-column",
-      `${executionAnnotationColumn(this.sourceLength)}ch`,
+      `${executionAnnotationColumn(this.sourceLength, this.preferredColumn)}ch`,
     );
     const item = this.items[0];
     if (item) {
       const value = document.createElement("span");
       value.className = `cm-debug-annotation cm-debug-annotation-${item.kind || "value"}`;
+      value.classList.toggle("is-selected", item.selected === true);
       value.dataset.debugAnnotationId = debugAnnotationKey(item, this.sourceLine, 0);
       value.dataset.debugAnnotationSourceLine = String(this.sourceLine);
       value.dataset.debugAnnotationOrder = "0";
@@ -143,6 +150,52 @@ class DebugAnnotationsWidget extends WidgetType {
 function debugProjectionDecorations(state, projection) {
   if (!projection) return Decoration.none;
   const decorations = [];
+  const activationRanges = [
+    ...(projection.activeRanges || []),
+    ...(projection.activationInactiveRanges || []),
+  ].filter(
+    (range) =>
+      range?.startLine >= 1 &&
+      range?.endLine >= range.startLine &&
+      range.endLine <= state.doc.lines,
+  );
+  const activationStart = activationRanges.length
+    ? Math.min(...activationRanges.map((range) => range.startLine))
+    : null;
+  const activationEnd = activationRanges.length
+    ? Math.max(...activationRanges.map((range) => range.endLine))
+    : null;
+  const activationLines = [];
+  if (activationStart !== null && activationEnd !== null) {
+    for (let number = activationStart; number <= activationEnd; number += 1) {
+      const line = state.doc.line(number);
+      if (/^\s{4}/.test(line.text)) activationLines.push(number);
+    }
+  }
+  const activationLineSet = new Set(activationLines);
+  const preferredAnnotationColumn = executionAnnotationRail();
+  for (const number of activationLines) {
+    const previous = activationLineSet.has(number - 1);
+    const next = activationLineSet.has(number + 1);
+    const className = [
+      "cm-debug-activation-scope-line",
+      previous ? "" : "cm-debug-activation-scope-start",
+      next ? "" : "cm-debug-activation-scope-end",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    decorations.push(
+      Decoration.line({
+        class: className,
+        attributes: {
+          style: `--execution-scope-width: ${executionAnnotationColumn(
+            state.doc.line(number).length,
+            preferredAnnotationColumn,
+          ) + 5}ch`,
+        },
+      }).range(state.doc.line(number).from),
+    );
+  }
   const rails = new Map();
   const railFor = (line) => {
     if (!rails.has(line)) {
@@ -229,6 +282,7 @@ function debugProjectionDecorations(state, projection) {
           rail.items,
           number,
           line.length,
+          preferredAnnotationColumn,
         ),
         side: 1,
       }).range(line.to),
@@ -333,27 +387,40 @@ const embeddedTheme = EditorView.theme({
   ".cm-activeLine": {
     backgroundColor: "transparent",
   },
+  ".cm-debug-activation-scope-line": {
+    background:
+      "linear-gradient(90deg, rgba(40, 95, 78, 0.032), rgba(40, 95, 78, 0.016) 72%, transparent)",
+    backgroundRepeat: "no-repeat",
+    backgroundSize: "var(--execution-scope-width, 100%) 100%",
+    transition: "background-color 130ms ease",
+  },
+  ".cm-debug-activation-scope-start": {
+    borderRadius: "6px 6px 0 0",
+  },
+  ".cm-debug-activation-scope-end": {
+    borderRadius: "0 0 6px 6px",
+  },
+  ".cm-debug-activation-scope-start.cm-debug-activation-scope-end": {
+    borderRadius: "6px",
+  },
   ".cm-debug-active-range": {
-    borderRadius: "2px",
-    backgroundColor: "rgba(40, 95, 78, 0.052)",
-    boxShadow: "inset 0 -1px rgba(40, 95, 78, 0.11)",
-    transition: "background-color 90ms ease, box-shadow 90ms ease",
+    transition: "color 120ms ease",
   },
   ".cm-debug-activation-inactive-range": {
-    opacity: "0.46",
-    filter: "saturate(0.62)",
-    transition: "opacity 90ms ease, filter 90ms ease",
+    opacity: "0.56",
+    filter: "saturate(0.7)",
+    transition: "opacity 120ms ease, filter 120ms ease",
   },
   ".cm-debug-inactive-range": {
-    opacity: "0.3",
-    filter: "saturate(0.58)",
-    transition: "opacity 90ms ease, filter 90ms ease",
+    opacity: "0.38",
+    filter: "saturate(0.48)",
+    transition: "opacity 120ms ease, filter 120ms ease",
   },
   ".cm-debug-cursor-focus": {
     borderRadius: "2px",
-    backgroundColor: "rgba(184, 106, 53, 0.105)",
-    boxShadow: "inset 0 -1px rgba(155, 91, 48, 0.42)",
-    transition: "background-color 90ms ease, box-shadow 90ms ease",
+    backgroundColor: "rgba(184, 106, 53, 0.13)",
+    boxShadow: "inset 0 -1px rgba(155, 91, 48, 0.5)",
+    transition: "background-color 120ms ease, box-shadow 120ms ease",
   },
   ".cm-debug-annotation-lines": {
     position: "relative",
@@ -365,7 +432,10 @@ const embeddedTheme = EditorView.theme({
     backgroundColor: "transparent",
     boxShadow: "none",
   },
-  "&.cm-execution-lens-stale .cm-debug-inactive-range": {
+  "&.cm-execution-lens-stale .cm-debug-activation-scope-line": {
+    background: "transparent",
+  },
+  "&.cm-execution-lens-stale .cm-debug-inactive-range, &.cm-execution-lens-stale .cm-debug-activation-inactive-range": {
     opacity: "1",
     filter: "none",
   },
@@ -385,9 +455,10 @@ const embeddedTheme = EditorView.theme({
     marginLeft: "0",
     padding: "0",
     overflow: "visible",
-    color: "#6d7972",
+    color: "#596860",
     font: "13px/1.64 SFMono-Regular, Consolas, Liberation Mono, monospace",
     pointerEvents: "none",
+    transition: "color 120ms ease, opacity 120ms ease",
     whiteSpace: "nowrap",
   },
   ".cm-debug-annotation": {
@@ -409,7 +480,7 @@ const embeddedTheme = EditorView.theme({
     textAlign: "left",
     whiteSpace: "nowrap",
     pointerEvents: "auto",
-    transition: "color 80ms ease",
+    transition: "color 120ms ease",
   },
   ".cm-debug-annotation code": {
     display: "block",
@@ -417,9 +488,15 @@ const embeddedTheme = EditorView.theme({
     overflow: "visible",
     minWidth: "0",
     maxWidth: "none",
-    color: "#53635b",
+    color: "#46584f",
     font: "inherit",
     whiteSpace: "nowrap",
+  },
+  ".cm-debug-annotation.is-selected code": {
+    borderRadius: "2px",
+    backgroundColor: "rgba(184, 106, 53, 0.08)",
+    boxShadow: "inset 0 -1px rgba(155, 91, 48, 0.42)",
+    color: "#8b5938",
   },
   ".cm-debug-annotation-function-raise code": {
     color: "#9a4f45",
@@ -441,6 +518,9 @@ const embeddedTheme = EditorView.theme({
   },
   "&.cm-focused .cm-activeLine": {
     backgroundColor: "rgba(255, 255, 255, 0.28)",
+  },
+  "&.cm-execution-lens.cm-focused .cm-activeLine": {
+    backgroundColor: "transparent",
   },
   ".cm-matchingBracket": {
     borderBottom: "1px solid rgba(19, 95, 75, 0.55)",
@@ -1560,6 +1640,7 @@ function buildBlockResultDecorations(state, { evaluation, blocks, path }) {
   }
 
   for (const view of evaluation.views || []) {
+    if (view.kind === "stdout" || view.kind === "stderr") continue;
     const matchingBlock = codeBlocks.find(
       (block) => block.id === view.id || block.name === view.id,
     );
@@ -2404,9 +2485,14 @@ function outlineDecorations(view) {
       classes.push("cm-outline-invalid");
     }
     if (entry?.namespace) classes.push("cm-outline-namespace");
+    const moduleCandidates = [
+      entry?.targetModule,
+      entry?.originTarget,
+      entry?.pageModule,
+    ].filter(Boolean);
     const modulePath =
-      entry?.originTarget ||
-      entry?.pageModule ||
+      moduleCandidates.find((candidate) => candidate === activeModule) ||
+      moduleCandidates[0] ||
       null;
     if (modulePath === activeModule) classes.push("cm-outline-active");
     if (pendingModule && modulePath === pendingModule) {
@@ -2447,6 +2533,7 @@ function insertOutlineSibling(view, onCommit) {
     scrollIntoView: true,
     userEvent: "input",
   });
+  onCommit?.("new-draft", insertionPoint + 1 + indent.length);
   return true;
 }
 
@@ -2504,8 +2591,9 @@ function changeOutlineNesting(view, direction, onCommit) {
   if (!selection.empty) return false;
   const line = view.state.doc.lineAt(selection.head);
   const source = view.state.doc.toString();
-  const transform =
-    direction > 0
+  const transform = !line.text.trim()
+    ? changeBlankOutlineDepth(source, line.number - 1, direction)
+    : direction > 0
       ? indentOutlineSubtree(source, line.number - 1)
       : outdentOutlineSubtree(source, line.number - 1);
   return applyOutlineTransform(view, transform, onCommit);
@@ -2542,12 +2630,19 @@ function outlineDragPlugin(onCommit) {
         this.onPointerDown = (event) => this.start(event);
         this.onPointerMove = (event) => this.move(event);
         this.onPointerUp = (event) => this.finish(event);
+        this.onLostPointerCapture = (event) => this.cancel(event);
+        this.onWindowPointerUp = (event) => this.finish(event);
+        this.onWindowBlur = () => this.cancel();
         view.dom.addEventListener("pointermove", this.onHover);
         view.dom.addEventListener("pointerleave", this.onLeave);
         this.handle.addEventListener("pointerdown", this.onPointerDown);
         this.handle.addEventListener("pointermove", this.onPointerMove);
         this.handle.addEventListener("pointerup", this.onPointerUp);
         this.handle.addEventListener("pointercancel", this.onPointerUp);
+        this.handle.addEventListener(
+          "lostpointercapture",
+          this.onLostPointerCapture,
+        );
       }
 
       lineAt(event) {
@@ -2605,6 +2700,9 @@ function outlineDragPlugin(onCommit) {
           transform: null,
         };
         this.handle.setPointerCapture(event.pointerId);
+        window.addEventListener("pointerup", this.onWindowPointerUp);
+        window.addEventListener("pointercancel", this.onWindowPointerUp);
+        window.addEventListener("blur", this.onWindowBlur);
         this.view.dom.classList.add("cm-outline-dragging");
       }
 
@@ -2686,14 +2784,32 @@ function outlineDragPlugin(onCommit) {
         event.preventDefault();
         event.stopPropagation();
         const transform = this.drag.transform;
-        this.drag = null;
-        this.view.dom.classList.remove("cm-outline-dragging");
-        this.clearDrop();
-        this.hideHandle();
+        this.endDrag();
         if (transform) {
           this.view.focus();
           applyOutlineTransform(this.view, transform, onCommit);
         }
+      }
+
+      cancel(event = null) {
+        if (
+          !this.drag ||
+          (event?.pointerId !== undefined &&
+            event.pointerId !== this.drag.pointerId)
+        ) {
+          return;
+        }
+        this.endDrag();
+      }
+
+      endDrag() {
+        this.drag = null;
+        window.removeEventListener("pointerup", this.onWindowPointerUp);
+        window.removeEventListener("pointercancel", this.onWindowPointerUp);
+        window.removeEventListener("blur", this.onWindowBlur);
+        this.view.dom.classList.remove("cm-outline-dragging");
+        this.clearDrop();
+        this.hideHandle();
       }
 
       destroy() {
@@ -2703,6 +2819,13 @@ function outlineDragPlugin(onCommit) {
         this.handle.removeEventListener("pointermove", this.onPointerMove);
         this.handle.removeEventListener("pointerup", this.onPointerUp);
         this.handle.removeEventListener("pointercancel", this.onPointerUp);
+        this.handle.removeEventListener(
+          "lostpointercapture",
+          this.onLostPointerCapture,
+        );
+        window.removeEventListener("pointerup", this.onWindowPointerUp);
+        window.removeEventListener("pointercancel", this.onWindowPointerUp);
+        window.removeEventListener("blur", this.onWindowBlur);
         this.handle.remove();
         this.indicator.remove();
         this.parentHighlight.remove();

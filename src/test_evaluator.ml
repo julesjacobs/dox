@@ -23,6 +23,17 @@ let () =
     "# Runtime\n\n\
      ```ocaml name=output\n\
      let () = print_string \"first\\n\\nsecond\\n\"\n\
+     let () = Printf.printf \"formatted:%d\\n\" 7\n\
+     let () = Format.printf \"pretty:%s@.\" \"ok\"\n\
+     let pp_int formatter value = Format.fprintf formatter \"<%d>\" value\n\
+     let () = Format.printf \"nested:%a@.\" pp_int 9\n\
+     let failing_printer channel () = output_string channel \"partial\"; \
+     failwith \"printer\"\n\
+     let () = try Printf.printf \"failed:%a\" failing_printer () with Failure \
+     _ -> ()\n\
+     let () = print_endline \"after-error\"\n\
+     let () = output_string stdout \"channel\\n\"\n\
+     let () = Printf.eprintf \"warning:%d\\n\" 3\n\
      let () = Doc.text ~id:\"output\" \"structured\"\n\
      ```\n"
   in
@@ -39,7 +50,8 @@ let () =
   let unique_compiler_construct_ids =
     compiler_construct_ids |> List.sort_uniq String.compare
   in
-  expect (compiler_construct_ids <> [])
+  expect
+    (compiler_construct_ids <> [])
     "the compiler did not emit a construct manifest";
   expect
     (List.length unique_compiler_construct_ids
@@ -48,19 +60,37 @@ let () =
   expect
     (List.for_all
        (fun (event : Evaluator.trace_event) ->
-         List.mem event.site_id unique_compiler_construct_ids)
+         (not (String.equal event.path "runtime.ml.md"))
+         || List.mem event.site_id unique_compiler_construct_ids)
        evaluation.traces)
     "a runtime observation did not carry its compiler construct ID";
   expect
-    (evaluation.stdout = "first\n\nsecond\n")
+    (evaluation.stdout
+   = "first\n\n\
+      second\n\
+      formatted:7\n\
+      pretty:ok\n\
+      nested:<9>\n\
+      failed:partialafter-error\n\
+      channel\n")
     "ordinary stdout was not preserved byte-for-byte";
+  expect
+    (evaluation.stderr = "warning:3\n")
+    "ordinary stderr was not preserved byte-for-byte";
   expect
     (match evaluation.block_outputs with
     | [ output ] ->
         output.block_id = "code-output"
         && output.path = "runtime.ml.md"
-        && output.stdout = "first\n\nsecond\n"
-        && output.stderr = ""
+        && output.stdout
+           = "first\n\n\
+              second\n\
+              formatted:7\n\
+              pretty:ok\n\
+              nested:<9>\n\
+              failed:partialafter-error\n\
+              channel\n"
+        && output.stderr = "warning:3\n"
     | _ -> false)
     "ordinary stdout was not attributed to its code block";
   let two_blocks =
@@ -143,11 +173,61 @@ let () =
        invalid_inline.diagnostics)
     "an inline compiler error was not mapped back to the Markdown span";
   expect
-    (match evaluation.views with
-    | [ view ] ->
-        view.kind = "text" && view.id = "output" && view.content = "structured"
-    | _ -> false)
+    (List.exists
+       (fun (view : Evaluator.view) ->
+         view.kind = "text" && view.id = "output" && view.content = "structured")
+       evaluation.views)
     "structured runtime event was not captured";
+  expect
+    (List.exists
+       (fun (view : Evaluator.view) ->
+         view.kind = "stdout" && view.content = "formatted:7\n")
+       evaluation.views)
+    "Printf output was not added to the execution event stream";
+  expect
+    (List.filter
+       (fun (view : Evaluator.view) ->
+         view.kind = "stdout" && String.contains view.content '9')
+       evaluation.views
+    |> List.map (fun (view : Evaluator.view) -> view.content)
+    = [ "nested:<9>\n" ])
+    "nested formatted output was duplicated in the execution event stream";
+  expect
+    (List.exists
+       (fun (view : Evaluator.view) ->
+         view.kind = "stdout" && view.content = "after-error\n")
+       evaluation.views)
+    "a caught formatting exception disabled subsequent output capture";
+  expect
+    (let outputs =
+       List.filter
+         (fun (view : Evaluator.view) ->
+           view.kind = "stdout" || view.kind = "stderr")
+         evaluation.views
+     in
+     let structured =
+       List.find_opt
+         (fun (view : Evaluator.view) -> view.id = "output")
+         evaluation.views
+     in
+     match (List.rev outputs, structured) with
+     | last_output :: _, Some structured ->
+         last_output.sequence < structured.sequence
+         && List.for_all
+              (fun (view : Evaluator.view) ->
+                Option.is_some view.parent_occurrence_id)
+              evaluation.views
+         && List.exists
+              (fun (event : Evaluator.trace_event) ->
+                event.sequence < (List.hd outputs).sequence)
+              evaluation.traces
+         && List.exists
+              (fun (event : Evaluator.trace_event) ->
+                event.sequence > structured.sequence)
+              evaluation.traces
+     | _ -> false)
+    "output events were not placed in the ordered trace at their emitting \
+     occurrences";
   let invalid =
     Document.parse ~path:"invalid.ml.md"
       "```ocaml\nlet answer : string = 42\n```\n"
@@ -569,14 +649,14 @@ let () =
     "a bounded value preview did not report renderer truncation";
   expect
     (structured_returned "first" "Next (1, [Stop; Next (2, [])])"
-     && structured_returned "second" "{x = 3; y = 4}")
+    && structured_returned "second" "{x = 3; y = 4}")
     "destructuring bindings did not record every bound identifier";
   expect
-    (structured_returned "left" "2" && structured_returned "right" "3"
-     && structured_returned "head" "1"
-     && structured_returned "rest" "[Stop; Next (2, [])]"
-     && structured_returned "replacement"
-          "Next (1, [Stop; Next (2, [])])")
+    (structured_returned "left" "2"
+    && structured_returned "right" "3"
+    && structured_returned "head" "1"
+    && structured_returned "rest" "[Stop; Next (2, [])]"
+    && structured_returned "replacement" "Next (1, [Stop; Next (2, [])])")
     "function and match patterns did not record every bound identifier";
   let structured_pattern type_ detail =
     List.exists
@@ -604,8 +684,7 @@ let () =
        structured.traces)
     "a destructured anonymous-function argument was omitted from its activation";
   expect
-    (structured_pattern "sample option"
-       "Some (Next (1, [Stop; Next (2, [])]))")
+    (structured_pattern "sample option" "Some (Next (1, [Stop; Next (2, [])]))")
     "a constructor pattern displayed unit instead of its matched value";
   expect
     (structured_pattern "sample" "Next (1, [Stop; Next (2, [])])")
@@ -664,12 +743,13 @@ let () =
         && String.equal event.detail detail)
       traced.traces
   in
-  expect (returned "cell" "{contents = 1}")
+  expect
+    (returned "cell" "{contents = 1}")
     "a mutable value was not snapshotted when it was observed";
-  expect (returned "before" "1" && returned "after" "2")
+  expect
+    (returned "before" "1" && returned "after" "2")
     "values around a mutation were not recorded at their execution time";
-  expect (returned "values" "[|1; 2; 3|]")
-    "an array snapshot was not recorded";
+  expect (returned "values" "[|1; 2; 3|]") "an array snapshot was not recorded";
   let normalized_writes =
     Evaluator.execution_artifact_to_json traced
     |> Yojson.Safe.Util.member "execution"
@@ -680,11 +760,13 @@ let () =
     (List.exists
        (fun write ->
          String.equal
-           (write |> Yojson.Safe.Util.member "operation"
+           (write
+           |> Yojson.Safe.Util.member "operation"
            |> Yojson.Safe.Util.to_string)
            "ref"
          && String.equal
-              (write |> Yojson.Safe.Util.member "newValue"
+              (write
+              |> Yojson.Safe.Util.member "newValue"
               |> Yojson.Safe.Util.member "display"
               |> Yojson.Safe.Util.to_string)
               "2")
@@ -694,11 +776,13 @@ let () =
     (List.exists
        (fun write ->
          String.equal
-           (write |> Yojson.Safe.Util.member "operation"
+           (write
+           |> Yojson.Safe.Util.member "operation"
            |> Yojson.Safe.Util.to_string)
            "array"
          && String.equal
-              (write |> Yojson.Safe.Util.member "newValue"
+              (write
+              |> Yojson.Safe.Util.member "newValue"
               |> Yojson.Safe.Util.member "display"
               |> Yojson.Safe.Util.to_string)
               "9")
@@ -706,11 +790,13 @@ let () =
     && List.exists
          (fun write ->
            String.equal
-             (write |> Yojson.Safe.Util.member "operation"
+             (write
+             |> Yojson.Safe.Util.member "operation"
              |> Yojson.Safe.Util.to_string)
              "field"
            && String.equal
-                (write |> Yojson.Safe.Util.member "newValue"
+                (write
+                |> Yojson.Safe.Util.member "newValue"
                 |> Yojson.Safe.Util.member "display"
                 |> Yojson.Safe.Util.to_string)
                 "7")
@@ -719,18 +805,16 @@ let () =
   let callback_parameters =
     traced.traces
     |> List.filter (fun (event : Evaluator.trace_event) ->
-        String.equal event.phase "parameter"
-        && String.equal event.label "value")
+        String.equal event.phase "parameter" && String.equal event.label "value")
     |> List.map (fun (event : Evaluator.trace_event) -> event.detail)
   in
-  expect (callback_parameters = [ "1"; "2" ])
+  expect
+    (callback_parameters = [ "1"; "2" ])
     "callbacks from uninstrumented library code did not re-enter the trace";
   expect
     (List.for_all
        (fun (event : Evaluator.trace_event) ->
-         if
-           List.mem event.phase
-             [ "enter"; "return"; "raise"; "parameter" ]
+         if List.mem event.phase [ "enter"; "return"; "raise"; "parameter" ]
          then String.equal event.path "trace.ml.md"
          else true)
        traced.traces)
@@ -762,7 +846,7 @@ let () =
     "matched nested or-pattern alternatives did not emit their own execution \
      events";
   expect
-    (not (matched_pattern 3 21 24) && not (matched_pattern 4 20 24))
+    ((not (matched_pattern 3 21 24)) && not (matched_pattern 4 20 24))
     "unmatched nested or-pattern alternatives emitted execution events";
   expect
     (match
@@ -804,8 +888,7 @@ let () =
           sites
         && List.exists
              (fun (site : Evaluator.execution_site) ->
-               site.site_kind = "pattern"
-               && Option.is_some site.site_selection)
+               site.site_kind = "pattern" && Option.is_some site.site_selection)
              sites
         && List.exists
              (fun (site : Evaluator.execution_site) ->
@@ -824,7 +907,8 @@ let () =
              sites
         && List.exists
              (fun (site : Evaluator.execution_site) ->
-               site.site_kind = "syntax" && site.site_role = Some "when"
+               site.site_kind = "syntax"
+               && site.site_role = Some "when"
                && Option.is_some site.site_target)
              sites)
     "compiler sites did not retain tree identity or map a guarded pattern to \
@@ -837,7 +921,8 @@ let () =
     (match
        Evaluator.execution_sites_with_cancel
          ~cancelled:(fun () -> false)
-         ~documents:[ lambda_pattern_document ] ~target:lambda_pattern_document
+         ~documents:[ lambda_pattern_document ]
+         ~target:lambda_pattern_document
      with
     | Error _ -> false
     | Ok sites ->
@@ -878,14 +963,14 @@ let () =
         let nested_lambda =
           List.find_opt
             (fun (site : Evaluator.execution_site) ->
-              site.site_kind = "syntax" && site.site_role = Some "function"
+              site.site_kind = "syntax"
+              && site.site_role = Some "function"
               && site.site_start_line = 3)
             sites
         in
         Option.fold ~none:false
           ~some:(fun (site : Evaluator.execution_site) ->
-            Option.is_some site.site_selection
-            && Option.is_none site.site_role)
+            Option.is_some site.site_selection && Option.is_none site.site_role)
           local_binding
         && Option.fold ~none:false
              ~some:(fun (site : Evaluator.execution_site) ->
@@ -925,9 +1010,9 @@ let () =
         let targeted_roles =
           sites
           |> List.filter_map (fun (site : Evaluator.execution_site) ->
-                 if site.site_kind = "syntax" && Option.is_some site.site_target
-                 then site.site_role
-                 else None)
+              if site.site_kind = "syntax" && Option.is_some site.site_target
+              then site.site_role
+              else None)
         in
         let role_sites role =
           List.filter
@@ -1004,7 +1089,8 @@ let () =
       (fun (event : Evaluator.trace_event) -> String.equal event.detail "Zero")
       alternative_values
     && List.exists
-         (fun (event : Evaluator.trace_event) -> String.equal event.detail "One")
+         (fun (event : Evaluator.trace_event) ->
+           String.equal event.detail "One")
          alternative_values
     && List.length
          (List.sort_uniq Int.compare
@@ -1019,8 +1105,7 @@ let () =
         Printf.eprintf "value binding: %s at %d:%d-%d\n" event.detail
           event.source_line event.source_column event.source_end_column)
       alternative_values;
-  expect
-    alternatives_are_exact
+  expect alternatives_are_exact
     "or-pattern bindings did not retain each matched alternative's value and \
      source location";
   expect
@@ -1045,23 +1130,28 @@ let () =
     |> Yojson.Safe.Util.member "execution"
   in
   let activation_outcomes =
-    small_tail_execution |> Yojson.Safe.Util.member "activations"
+    small_tail_execution
+    |> Yojson.Safe.Util.member "activations"
     |> Yojson.Safe.Util.to_list
     |> List.map (fun activation ->
-        activation |> Yojson.Safe.Util.member "outcome"
-        |> Yojson.Safe.Util.member "kind" |> Yojson.Safe.Util.to_string)
+        activation
+        |> Yojson.Safe.Util.member "outcome"
+        |> Yojson.Safe.Util.member "kind"
+        |> Yojson.Safe.Util.to_string)
   in
   expect
     (activation_outcomes <> []
-    && List.for_all (fun kind -> not (String.equal kind "incomplete"))
+    && List.for_all
+         (fun kind -> not (String.equal kind "incomplete"))
          activation_outcomes)
-    "an explicit tail relation did not carry the final outcome back through every activation";
+    "an explicit tail relation did not carry the final outcome back through \
+     every activation";
   let has_tail_attempt =
-    small_tail_execution |> Yojson.Safe.Util.member "callAttempts"
+    small_tail_execution
+    |> Yojson.Safe.Util.member "callAttempts"
     |> Yojson.Safe.Util.to_list
     |> List.exists (fun attempt ->
-        attempt |> Yojson.Safe.Util.member "tail"
-        |> Yojson.Safe.Util.to_bool)
+        attempt |> Yojson.Safe.Util.member "tail" |> Yojson.Safe.Util.to_bool)
   in
   expect has_tail_attempt
     "a compiler-recorded tail call was not marked as a tail call attempt";
@@ -1082,7 +1172,8 @@ let () =
        tail.block_outputs)
     "a large tail-recursive execution returned the wrong result";
   expect
-    (tail.tail_handoffs > 0 && tail.tail_linked_enters > 0
+    (tail.tail_handoffs > 0
+    && tail.tail_linked_enters > 0
     && tail.tail_handoff_outcomes = 0)
     "the bytecode evaluator did not preserve the raw tail-handoff invariant";
   let mixed_tail_document =
@@ -1127,23 +1218,29 @@ let () =
   let apply_outcome =
     List.find_opt
       (fun (event : Evaluator.trace_event) ->
-        String.equal event.kind "function" && String.equal event.label "apply"
-        && String.equal event.phase "return" && String.equal event.detail "5")
+        String.equal event.kind "function"
+        && String.equal event.label "apply"
+        && String.equal event.phase "return"
+        && String.equal event.detail "5")
       higher_order_tail.traces
   in
-  expect (Option.is_some apply_outcome)
+  expect
+    (Option.is_some apply_outcome)
     "a higher-order caller did not inherit its tail callee's outcome";
   expect
     (List.exists
        (fun (event : Evaluator.trace_event) ->
-         String.equal event.kind "call" && event.source_line = 2
-         && String.equal event.phase "return" && String.equal event.detail "5")
+         String.equal event.kind "call"
+         && event.source_line = 2
+         && String.equal event.phase "return"
+         && String.equal event.detail "5")
        higher_order_tail.traces)
     "the higher-order tail call site did not retain an execution outcome";
   expect
     (List.exists
        (fun (event : Evaluator.trace_event) ->
-         String.equal event.kind "call" && event.source_line = 5
+         String.equal event.kind "call"
+         && event.source_line = 5
          && String.equal event.phase "return"
          && String.equal event.detail "[2; 3; 4]")
        higher_order_tail.traces)
@@ -1151,24 +1248,27 @@ let () =
   let partial_outcomes =
     List.filter
       (fun (event : Evaluator.trace_event) ->
-        String.equal event.kind "call" && event.source_line = 8
+        String.equal event.kind "call"
+        && event.source_line = 8
         && String.equal event.phase "return"
         && String.equal event.detail "<function>")
       higher_order_tail.traces
   in
-  expect (List.length partial_outcomes = 3)
+  expect
+    (List.length partial_outcomes = 3)
     "a partial application handed off before its function body entered";
   let make_occurrences =
     higher_order_tail.traces
     |> List.filter (fun (event : Evaluator.trace_event) ->
-        String.equal event.kind "function" && String.equal event.label "make"
+        String.equal event.kind "function"
+        && String.equal event.label "make"
         && String.equal event.phase "enter")
     |> List.map (fun (event : Evaluator.trace_event) -> event.occurrence_id)
   in
   expect
     (List.for_all
        (fun (event : Evaluator.trace_event) ->
-         not (String.equal event.label "after_partials")
+         (not (String.equal event.label "after_partials"))
          || Option.fold ~none:true
               ~some:(fun parent -> not (List.mem parent make_occurrences))
               event.parent_id)
@@ -1178,14 +1278,14 @@ let () =
     (List.exists
        (fun (event : Evaluator.trace_event) ->
          String.equal event.label "over_result"
-         && String.equal event.phase "return" && String.equal event.detail "5")
+         && String.equal event.phase "return"
+         && String.equal event.detail "5")
        higher_order_tail.traces)
     "tail tracing changed an overapplication's result";
   expect
     (List.for_all
        (fun (event : Evaluator.trace_event) ->
-         if String.equal event.label "after_alias"
-         then
+         if String.equal event.label "after_alias" then
            match apply_outcome with
            | Some apply -> event.parent_id <> Some apply.occurrence_id
            | None -> false
@@ -1233,7 +1333,7 @@ let () =
   expect
     (List.for_all
        (fun (event : Evaluator.trace_event) ->
-         not (String.equal event.label "after_exception")
+         (not (String.equal event.label "after_exception"))
          || Option.fold ~none:true
               ~some:(fun parent -> not (List.mem parent explode_occurrences))
               event.parent_id)
@@ -1253,18 +1353,19 @@ let () =
   expect truncated.trace_truncated "a bounded trace did not report truncation";
   let open Yojson.Safe.Util in
   let truncated_root =
-    Evaluator.to_json truncated |> member "executionArtifact"
-    |> member "execution" |> member "activations" |> to_list
+    Evaluator.to_json truncated
+    |> member "executionArtifact" |> member "execution" |> member "activations"
+    |> to_list
     |> List.find (fun activation ->
-           match activation |> member "functionConstructId" with
-           | `Null -> true
-           | _ -> false)
+        match activation |> member "functionConstructId" with
+        | `Null -> true
+        | _ -> false)
   in
   expect
     (truncated_root |> member "outcomeAt" = `Null)
     "a truncated root activation claimed a completion time";
   expect
     (truncated_root |> member "outcome" |> member "kind" |> to_string
-    = "incomplete")
+   = "incomplete")
     "a truncated root activation claimed a completed value";
   print_endline "evaluator tests passed"

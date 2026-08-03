@@ -49,6 +49,15 @@ let () =
        with
       | Ok () -> ()
       | Error message -> fail message);
+      let alternate_build = Filename.concat directory "_build-review" in
+      Unix.mkdir alternate_build 0o755;
+      (match
+         Util.write_file
+           (Filename.concat alternate_build "generated.ml.md")
+           "# Generated build artifact\n"
+       with
+      | Ok () -> ()
+      | Error message -> fail message);
       let project = Project.create directory in
       let grouped_before =
         Document.parse ~path:"grouped.ml.md"
@@ -121,7 +130,7 @@ let () =
       in
       expect
         (List.length snapshot.documents = 1)
-        "project snapshot traversed an ignored dependency directory";
+        "project snapshot traversed a generated build directory";
       let draft = Document.parse ~path:"change.ml.md" changed in
       let validation =
         Evaluator.evaluate ~project_version:snapshot.version draft
@@ -462,6 +471,13 @@ let () =
         "a stale page-order edit overwrote a newer order";
       expect
         (Result.is_error
+           (Project.create_pages
+              ~page_order:("Stale" :: original_order)
+              project ~module_paths:[ "Stale" ]
+              ~base_project_version:imported_snapshot.version ~principal:"test"))
+        "a compound mutation accepted a project version from before a reorder";
+      expect
+        (Result.is_error
            (Project.create_document project ~path:"./noncanonical.ml.md"
               ~source:"# Invalid path\n"
               ~base_project_version:imported_snapshot.version ~principal:"test"))
@@ -549,6 +565,35 @@ let () =
         && Util.read_file quarantine_path = Ok "old source")
         "refactor publication did not preserve displaced contents";
       (match Project.remove_checked quarantine_path with
+      | Ok () -> ()
+      | Error message -> fail message);
+      let order_path = Filename.concat directory ".dox-order" in
+      let order_intent =
+        Filename.concat directory ".dox/transactions/order-conflict.json"
+      in
+      (match Util.write_file order_path "Concurrent\n" with
+      | Ok () -> ()
+      | Error message -> fail message);
+      (match
+         Util.write_file order_intent
+           (Yojson.Safe.to_string
+              (`Assoc
+                 [
+                   ("kind", `String "delete-pages");
+                   ("id", `String "order-conflict");
+                   ("pageOrder", `String "After\n");
+                   ("pageOrderBefore", `String "Before\n");
+                   ("entries", `List []);
+                 ]))
+       with
+      | Ok () -> ()
+      | Error message -> fail message);
+      expect
+        (Result.is_error (Project.snapshot project)
+        && Util.read_file order_path = Ok "Concurrent\n"
+        && Sys.file_exists order_intent)
+        "transaction recovery overwrote a concurrently edited page order";
+      (match Project.remove_checked order_intent with
       | Ok () -> ()
       | Error message -> fail message);
       print_endline "project tests passed")

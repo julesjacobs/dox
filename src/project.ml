@@ -81,12 +81,16 @@ let read_document_file project path =
         | Ok source -> Ok (Document.parse ~path source)
         | Error message -> Error (Io message))
 
-let version_of_documents documents =
-  documents
-  |> List.sort (fun left right -> String.compare left.Document.path right.path)
-  |> List.map (fun document ->
-      document.Document.path ^ "\x00" ^ document.version)
-  |> String.concat "\x00" |> Util.digest
+let version_of_documents ~order documents =
+  let documents =
+    documents
+    |> List.sort (fun left right ->
+        String.compare left.Document.path right.path)
+    |> List.map (fun document ->
+        document.Document.path ^ "\x00" ^ document.version)
+    |> String.concat "\x00"
+  in
+  Util.digest (documents ^ "\x00page-order\x00" ^ String.concat "\x00" order)
 
 let snapshot_unlocked project =
   let rec read accumulator = function
@@ -120,7 +124,7 @@ let snapshot_unlocked project =
       let module_graph = Module_graph.build page_index in
       Ok
         {
-          version = version_of_documents documents;
+          version = version_of_documents ~order documents;
           captured_at = Util.timestamp ();
           documents;
           page_index;
@@ -782,6 +786,26 @@ let recover_file_set_intent project intent intent_path =
   in
   let* () = publish entries in
   let* () = remove_old entries in
+  let* () =
+    match member "pageOrder" intent with
+    | `String source ->
+        let expected =
+          match member "pageOrderBefore" intent with
+          | `String source -> Some source
+          | _ -> None
+        in
+        let* current = optional_file (page_order_path project) in
+        if Option.equal String.equal current (Some source) then Ok ()
+        else if Option.equal String.equal current expected then
+          Util.write_file_atomic (page_order_path project) source
+          |> Result.map_error (fun message -> Io message)
+        else
+          Error
+            (Conflict
+               "The page order changed while this operation was being \
+                published.")
+    | _ -> Ok ()
+  in
   let* () = clean quarantines in
   let quarantine_directories =
     quarantines |> List.map Filename.dirname |> List.sort_uniq String.compare
@@ -874,7 +898,11 @@ let recover_transactions project =
                   if
                     List.mem
                       (Yojson.Safe.Util.member "kind" intent)
-                      [ `String "refactor"; `String "create-pages" ]
+                      [
+                        `String "refactor";
+                        `String "create-pages";
+                        `String "delete-pages";
+                      ]
                   then recover_file_set_intent project intent path
                   else if
                     Yojson.Safe.Util.member "kind" intent = `String "page-save"
@@ -1031,7 +1059,8 @@ let save_document project ~path ~source ~base_version ~base_project_version
               in
               let module_graph = Module_graph.build page_index in
               let after_project_version =
-                version_of_documents after_documents
+                version_of_documents ~order:(read_page_order project)
+                  after_documents
               in
               let* before_object = store_object project before.source in
               let* after_object = store_object project after.source in
@@ -1160,7 +1189,10 @@ let create_document project ~path ~source ~base_project_version ~principal =
                   |> Result.map_error (fun message -> Invalid message)
                 in
                 let module_graph = Module_graph.build page_index in
-                let project_version = version_of_documents documents in
+                let project_version =
+                  version_of_documents ~order:(read_page_order project)
+                    documents
+                in
                 let* before_object = store_object project "" in
                 let* after_object = store_object project source in
                 let timestamp = Util.timestamp () in
@@ -1573,26 +1605,34 @@ let validate_module_renames snapshot renames =
             Module_path.validate rename.after
             |> Result.map_error (fun message -> Invalid message)
           in
-          let* _ = page snapshot rename.before in
-          if
-            (not (List.mem rename.after before))
-            && Option.is_some (Page_index.find snapshot.page_index rename.after)
-          then
+          if Module_path.is_beneath ~namespace:"Dox_prelude" rename.after then
             Error
-              (Conflict
-                 (Printf.sprintf "Page module %s already exists." rename.after))
-          else validate rest
+              (Invalid
+                 "Dox_prelude is reserved for the generated Dox support module.")
+          else
+            let* _ = page snapshot rename.before in
+            if
+              (not (List.mem rename.after before))
+              && Option.is_some
+                   (Page_index.find snapshot.page_index rename.after)
+            then
+              Error
+                (Conflict
+                   (Printf.sprintf "Page module %s already exists." rename.after))
+            else validate rest
     in
     validate renames
 
-let refactor_preview_id snapshot renames =
+let refactor_preview_id ?page_order snapshot renames =
   Util.digest
     (snapshot.version
     ^ (renames
       |> List.map (fun rename -> rename.before ^ "\x00" ^ rename.after)
-      |> String.concat "\x00"))
+      |> String.concat "\x00")
+    ^ "\x00order\x00"
+    ^ Option.value ~default:"" (Option.map (String.concat "\x00") page_order))
 
-let refactor_preview snapshot renames =
+let refactor_preview ?page_order snapshot renames =
   let* () = validate_module_renames snapshot renames in
   let transformed_documents =
     let module_paths = Page_index.modules snapshot.page_index in
@@ -1619,9 +1659,13 @@ let refactor_preview snapshot renames =
           (rewrite_document_module_paths ~module_paths renames document))
   in
   let* transformed_index =
-    Page_index.build
-      ~order:(rename_page_order renames (Page_index.order snapshot.page_index))
-      transformed_documents
+    let order =
+      Option.value
+        ~default:
+          (rename_page_order renames (Page_index.order snapshot.page_index))
+        page_order
+    in
+    Page_index.build ~order transformed_documents
     |> Result.map_error (fun message -> Invalid message)
   in
   let compiler_analysis =
@@ -1675,7 +1719,7 @@ let refactor_preview snapshot renames =
                    `Bool (not (String.equal source document.Document.source)) );
                ]))
   in
-  let preview_id = refactor_preview_id snapshot renames in
+  let preview_id = refactor_preview_id ?page_order snapshot renames in
   Ok
     (`Assoc
        [
@@ -1694,8 +1738,8 @@ let refactor_preview snapshot renames =
          ("files", `List rewritten);
        ])
 
-let apply_module_refactor project ~expected_project_version ~expected_preview_id
-    renames =
+let apply_module_refactor ?page_order project ~expected_project_version
+    ~expected_preview_id renames =
   match Util.ensure_directory (metadata_directory project) with
   | Error message -> Error (Io message)
   | Ok () ->
@@ -1707,13 +1751,13 @@ let apply_module_refactor project ~expected_project_version ~expected_preview_id
           else if
             not
               (String.equal expected_preview_id
-                 (refactor_preview_id snapshot renames))
+                 (refactor_preview_id ?page_order snapshot renames))
           then
             Error
               (Conflict
                  "The refactor request does not match the reviewed preview.")
           else
-            let* preview = refactor_preview snapshot renames in
+            let* preview = refactor_preview ?page_order snapshot renames in
             let transformed =
               let module_paths = Page_index.modules snapshot.page_index in
               snapshot.documents
@@ -1757,11 +1801,14 @@ let apply_module_refactor project ~expected_project_version ~expected_preview_id
                 transformed
             in
             let* page_index =
-              Page_index.build
-                ~order:
-                  (rename_page_order renames
-                     (Page_index.order snapshot.page_index))
-                documents
+              let order =
+                Option.value
+                  ~default:
+                    (rename_page_order renames
+                       (Page_index.order snapshot.page_index))
+                  page_order
+              in
+              Page_index.build ~order documents
               |> Result.map_error (fun message -> Invalid message)
             in
             let original_paths =
@@ -1839,11 +1886,22 @@ let apply_module_refactor project ~expected_project_version ~expected_preview_id
               Util.ensure_directory quarantine_directory
               |> Result.map_error (fun message -> Io message)
             in
+            let page_order_source =
+              match Page_index.order page_index with
+              | [] -> ""
+              | order -> String.concat "\n" order ^ "\n"
+            in
+            let* page_order_before = optional_file (page_order_path project) in
             let intent =
               `Assoc
                 [
                   ("kind", `String "create-pages");
                   ("id", `String intent_id);
+                  ("pageOrder", `String page_order_source);
+                  ( "pageOrderBefore",
+                    Option.fold ~none:`Null
+                      ~some:(fun source -> `String source)
+                      page_order_before );
                   ( "entries",
                     `List
                       (List.map
@@ -1928,57 +1986,22 @@ let apply_module_refactor project ~expected_project_version ~expected_preview_id
                 let* () =
                   remove_old entries |> Result.map_error preserve_intent
                 in
-                let quarantines =
-                  entries
-                  |> List.concat_map
-                       (fun
-                         ( _,
-                           _,
-                           _,
-                           target_before,
-                           target_quarantine,
-                           old_quarantine )
-                       ->
-                         (if Option.is_some target_before then
-                            [ target_quarantine ]
-                          else [])
-                         @ [ old_quarantine ])
-                in
-                let rec clean = function
-                  | [] -> Ok ()
-                  | path :: rest ->
-                      let* () =
-                        remove_checked path
-                        |> Result.map_error (fun message -> Io message)
-                      in
-                      clean rest
-                in
                 let* () =
-                  clean quarantines |> Result.map_error preserve_intent
-                in
-                let* () =
-                  (try
-                     Unix.rmdir quarantine_directory;
-                     Ok ()
-                   with
-                    | Unix.Unix_error (error, _, _) ->
-                        Error (Io (Unix.error_message error))
-                    | Sys_error message -> Error (Io message))
-                  |> Result.map_error preserve_intent
+                  match recover_file_set_intent project intent intent_path with
+                  | Ok () -> Ok ()
+                  | Error error -> Error (preserve_intent error)
                 in
                 let module_graph = Module_graph.build page_index in
                 let result_snapshot =
                   {
-                    version = version_of_documents documents;
+                    version =
+                      version_of_documents ~order:(read_page_order project)
+                        documents;
                     captured_at = Util.timestamp ();
                     documents;
                     page_index;
                     module_graph;
                   }
-                in
-                let* () =
-                  remove_checked intent_path
-                  |> Result.map_error (fun message -> Io message)
                 in
                 Ok
                   ( preview,
@@ -1993,7 +2016,8 @@ let apply_module_refactor project ~expected_project_version ~expected_preview_id
                              ])
                          renames) ))
 
-let create_pages project ~module_paths ~base_project_version ~principal =
+let create_pages ?page_order project ~module_paths ~base_project_version
+    ~principal =
   let rec validate validated = function
     | [] -> Ok (List.rev validated)
     | module_path :: rest ->
@@ -2001,7 +2025,11 @@ let create_pages project ~module_paths ~base_project_version ~principal =
           Module_path.validate module_path
           |> Result.map_error (fun message -> Invalid message)
         in
-        if List.mem module_path validated then
+        if Module_path.is_beneath ~namespace:"Dox_prelude" module_path then
+          Error
+            (Invalid
+               "Dox_prelude is reserved for the generated Dox support module.")
+        else if List.mem module_path validated then
           Error (Invalid ("Duplicate module creation: " ^ module_path))
         else validate (module_path :: validated) rest
   in
@@ -2044,10 +2072,27 @@ let create_pages project ~module_paths ~base_project_version ~principal =
               List.map (fun (_, _, _, document) -> document) pages
               @ before_snapshot.documents
             in
+            let* order =
+              match page_order with
+              | None -> Ok (Page_index.order before_snapshot.page_index)
+              | Some order ->
+                  let expected =
+                    module_paths @ Page_index.modules before_snapshot.page_index
+                    |> List.sort_uniq Module_path.compare
+                  in
+                  let actual = List.sort_uniq Module_path.compare order in
+                  if
+                    List.length actual <> List.length order
+                    || actual <> expected
+                  then
+                    Error
+                      (Invalid
+                         "A page creation order must contain every page module \
+                          exactly once.")
+                  else Ok order
+            in
             let* page_index =
-              Page_index.build
-                ~order:(Page_index.order before_snapshot.page_index)
-                documents
+              Page_index.build ~order documents
               |> Result.map_error (fun message -> Invalid message)
             in
             let intent_id =
@@ -2060,7 +2105,7 @@ let create_pages project ~module_paths ~base_project_version ~principal =
                 (transaction_directory project)
                 (intent_id ^ ".files")
             in
-            let entries =
+            let page_entries =
               pages
               |> List.mapi (fun index (_, path, source, _) ->
                   `Assoc
@@ -2080,6 +2125,44 @@ let create_pages project ~module_paths ~base_project_version ~principal =
                       ("targetBeforeSource", `Null);
                     ])
             in
+            let* order_entries =
+              match page_order with
+              | None -> Ok []
+              | Some order ->
+                  let source =
+                    match order with
+                    | [] -> ""
+                    | _ -> String.concat "\n" order ^ "\n"
+                  in
+                  let* before = optional_file (page_order_path project) in
+                  if Option.equal String.equal before (Some source) then Ok []
+                  else
+                    let index = List.length page_entries in
+                    Ok
+                      [
+                        `Assoc
+                          [
+                            ("oldPath", `String ".dox-order");
+                            ("targetPath", `String ".dox-order");
+                            ( "beforeSource",
+                              `String (Option.value ~default:"" before) );
+                            ("afterSource", `String source);
+                            ( "targetQuarantine",
+                              `String
+                                (Filename.concat quarantine_directory
+                                   (Printf.sprintf "%04d-target" index)) );
+                            ( "oldQuarantine",
+                              `String
+                                (Filename.concat quarantine_directory
+                                   (Printf.sprintf "%04d-old" index)) );
+                            ( "targetBeforeSource",
+                              Option.fold ~none:`Null
+                                ~some:(fun value -> `String value)
+                                before );
+                          ];
+                      ]
+            in
+            let entries = page_entries @ order_entries in
             let intent =
               `Assoc
                 [
@@ -2113,7 +2196,9 @@ let create_pages project ~module_paths ~base_project_version ~principal =
             in
             let snapshot =
               {
-                version = version_of_documents documents;
+                version =
+                  version_of_documents ~order:(read_page_order project)
+                    documents;
                 captured_at = Util.timestamp ();
                 documents;
                 page_index;
@@ -2121,6 +2206,165 @@ let create_pages project ~module_paths ~base_project_version ~principal =
               }
             in
             Ok (List.map (fun (_, _, _, document) -> document) pages, snapshot))
+
+let delete_pages ?page_order project ~module_paths ~base_project_version
+    ~principal =
+  let rec validate validated = function
+    | [] -> Ok (List.rev validated)
+    | module_path :: rest ->
+        let* module_path =
+          Module_path.validate module_path
+          |> Result.map_error (fun message -> Invalid message)
+        in
+        if List.mem module_path validated then
+          Error (Invalid ("Duplicate module deletion: " ^ module_path))
+        else validate (module_path :: validated) rest
+  in
+  let* module_paths =
+    match module_paths with
+    | [] -> Error (Invalid "Delete at least one module.")
+    | module_paths -> validate [] module_paths
+  in
+  match Util.ensure_directory (metadata_directory project) with
+  | Error message -> Error (Io message)
+  | Ok () ->
+      Util.with_file_lock (lock_path project) (fun () ->
+          let* () = recover_transactions project in
+          let* before_snapshot = snapshot_unlocked project in
+          if not (String.equal before_snapshot.version base_project_version)
+          then Error (Conflict "The project changed before deletion.")
+          else
+            let rec collect deleted_paths = function
+              | [] -> Ok (List.rev deleted_paths)
+              | module_path :: rest -> (
+                  match
+                    Page_index.find before_snapshot.page_index module_path
+                  with
+                  | None ->
+                      Error
+                        (Not_found
+                           (Printf.sprintf "Page module %S was not found."
+                              module_path))
+                  | Some page ->
+                      collect (page.source_path :: deleted_paths) rest)
+            in
+            let* deleted_paths = collect [] module_paths in
+            let documents =
+              before_snapshot.documents
+              |> List.filter (fun document ->
+                  not (List.mem document.Document.path deleted_paths))
+            in
+            let remaining_modules =
+              Page_index.modules before_snapshot.page_index
+              |> List.filter (fun module_path ->
+                  not (List.mem module_path module_paths))
+            in
+            let* order =
+              match page_order with
+              | None ->
+                  Ok
+                    (Page_index.order before_snapshot.page_index
+                    |> List.filter (fun module_path ->
+                        List.mem module_path remaining_modules))
+              | Some order ->
+                  let expected =
+                    List.sort_uniq Module_path.compare remaining_modules
+                  in
+                  let actual = List.sort_uniq Module_path.compare order in
+                  if
+                    List.length actual <> List.length order
+                    || actual <> expected
+                  then
+                    Error
+                      (Invalid
+                         "A page deletion order must contain every remaining \
+                          page module exactly once.")
+                  else Ok order
+            in
+            let* page_index =
+              Page_index.build ~order documents
+              |> Result.map_error (fun message -> Invalid message)
+            in
+            let intent_id =
+              "delete-pages-"
+              ^ String.sub (Util.digest (principal ^ Util.random_token ())) 0 24
+            in
+            let intent_path = transaction_path project intent_id in
+            let quarantine_directory =
+              Filename.concat
+                (transaction_directory project)
+                (intent_id ^ ".files")
+            in
+            let trash_root = Filename.concat ".dox/trash" intent_id in
+            let rec entries index result = function
+              | [] -> Ok (List.rev result)
+              | path :: rest ->
+                  let* source =
+                    read_document_file project path
+                    |> Result.map (fun document -> document.Document.source)
+                  in
+                  let target_path = Filename.concat trash_root path in
+                  let entry =
+                    `Assoc
+                      [
+                        ("oldPath", `String path);
+                        ("targetPath", `String target_path);
+                        ("beforeSource", `String source);
+                        ("afterSource", `String source);
+                        ( "targetQuarantine",
+                          `String
+                            (Filename.concat quarantine_directory
+                               (Printf.sprintf "%04d-target" index)) );
+                        ( "oldQuarantine",
+                          `String
+                            (Filename.concat quarantine_directory
+                               (Printf.sprintf "%04d-old" index)) );
+                        ("targetBeforeSource", `Null);
+                      ]
+                  in
+                  entries (index + 1) (entry :: result) rest
+            in
+            let* entries = entries 0 [] deleted_paths in
+            let page_order_source =
+              match order with
+              | [] -> ""
+              | order -> String.concat "\n" order ^ "\n"
+            in
+            let* page_order_before = optional_file (page_order_path project) in
+            let intent =
+              `Assoc
+                [
+                  ("kind", `String "delete-pages");
+                  ("id", `String intent_id);
+                  ("pageOrder", `String page_order_source);
+                  ( "pageOrderBefore",
+                    Option.fold ~none:`Null
+                      ~some:(fun source -> `String source)
+                      page_order_before );
+                  ("entries", `List entries);
+                ]
+            in
+            let* () =
+              Util.ensure_directory quarantine_directory
+              |> Result.map_error (fun message -> Io message)
+            in
+            let* () =
+              Util.write_file_atomic intent_path (Yojson.Safe.to_string intent)
+              |> Result.map_error (fun message -> Io message)
+            in
+            let* () = recover_file_set_intent project intent intent_path in
+            let snapshot =
+              {
+                version =
+                  version_of_documents ~order:(read_page_order project)
+                    documents;
+                captured_at = Util.timestamp ();
+                documents;
+                page_index;
+                module_graph = Module_graph.build page_index;
+              }
+            in
+            Ok (snapshot, trash_root))
 
 let create_page project ~module_path ~base_project_version ~principal =
   let* module_path =

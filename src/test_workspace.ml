@@ -571,8 +571,13 @@ let () =
         (String.equal created.path "models/linear.ml.md")
         "nested module creation used the wrong source path";
       let batch_created, batch_snapshot =
+        let page_order =
+          [ "Batch"; "Batch.Child" ]
+          @ Page_index.order created_snapshot.page_index
+        in
         project_result
-          (Project.create_pages project ~module_paths:[ "Batch"; "Batch.Child" ]
+          (Project.create_pages ~page_order project
+             ~module_paths:[ "Batch"; "Batch.Child" ]
              ~base_project_version:created_snapshot.version ~principal:"test")
       in
       expect
@@ -580,8 +585,15 @@ let () =
          = [ "batch.ml.md"; "batch/child.ml.md" ]
         && Option.is_some (Page_index.find batch_snapshot.page_index "Batch")
         && Option.is_some
-             (Page_index.find batch_snapshot.page_index "Batch.Child"))
-        "batch page creation did not publish a parent and child together";
+             (Page_index.find batch_snapshot.page_index "Batch.Child")
+        && (match Page_index.order batch_snapshot.page_index with
+          | "Batch" :: "Batch.Child" :: _ -> true
+          | _ -> false)
+        && Util.read_file (Filename.concat directory ".dox-order")
+           = Ok
+               (String.concat "\n" (Page_index.order batch_snapshot.page_index)
+               ^ "\n"))
+        "batch page creation did not atomically publish its pages and order";
       expect
         (Result.is_error
            (Project.create_pages project
@@ -589,6 +601,14 @@ let () =
               ~base_project_version:batch_snapshot.version ~principal:"test")
         && not (Sys.file_exists (Filename.concat directory "batch/new.ml.md")))
         "a conflicting batch creation published only part of the batch";
+      expect
+        (Result.is_error
+           (Project.create_pages project ~module_paths:[ "Dox_prelude.Hidden" ]
+              ~base_project_version:batch_snapshot.version ~principal:"test")
+        && not
+             (Sys.file_exists
+                (Filename.concat directory "dox_prelude/hidden.ml.md")))
+        "batch creation accepted the reserved compiler-support namespace";
       let renames =
         [
           {
@@ -597,17 +617,58 @@ let () =
           };
         ]
       in
+      let renamed_order =
+        Page_index.order batch_snapshot.page_index
+        |> List.map (function
+          | "Models.Statistics" -> "Analysis.Statistics"
+          | module_path -> module_path)
+      in
+      expect
+        (Result.is_error
+           (Project.refactor_preview batch_snapshot
+              [ { Project.before = "Batch"; after = "Dox_prelude" } ]))
+        "module refactoring accepted the reserved compiler-support namespace";
       let _, renamed_snapshot, _ =
-        let preview_id = Project.refactor_preview_id batch_snapshot renames in
+        let preview_id =
+          Project.refactor_preview_id ~page_order:renamed_order batch_snapshot
+            renames
+        in
         project_result
-          (Project.apply_module_refactor project
+          (Project.apply_module_refactor ~page_order:renamed_order project
              ~expected_project_version:batch_snapshot.version
              ~expected_preview_id:preview_id renames)
       in
       expect
         (Option.is_some
-           (Page_index.find renamed_snapshot.page_index "Analysis.Statistics"))
-        "module refactor did not create the renamed identity";
+           (Page_index.find renamed_snapshot.page_index "Analysis.Statistics")
+        && Page_index.order renamed_snapshot.page_index = renamed_order
+        && Util.read_file (Filename.concat directory ".dox-order")
+           = Ok (String.concat "\n" renamed_order ^ "\n"))
+        "module refactor did not atomically publish its identity and order";
+      let deleted_order =
+        Page_index.order renamed_snapshot.page_index
+        |> List.filter (fun module_path ->
+            not (String.equal module_path "Batch.Child"))
+      in
+      let deleted_snapshot, trash_path =
+        project_result
+          (Project.delete_pages ~page_order:deleted_order project
+             ~module_paths:[ "Batch.Child" ]
+             ~base_project_version:renamed_snapshot.version ~principal:"test")
+      in
+      expect
+        (Option.is_none
+           (Page_index.find deleted_snapshot.page_index "Batch.Child")
+        && (not
+              (Sys.file_exists (Filename.concat directory "batch/child.ml.md")))
+        && Sys.file_exists
+             (Filename.concat directory
+                (Filename.concat trash_path "batch/child.ml.md"))
+        && Util.read_file (Filename.concat directory ".dox-order")
+           = Ok (String.concat "\n" deleted_order ^ "\n"))
+        "page deletion did not atomically move the page to trash and update \
+         the order";
+      let renamed_snapshot = deleted_snapshot in
       expect
         (not
            (Sys.file_exists

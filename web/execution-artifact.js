@@ -58,6 +58,16 @@ const occurrenceKinds = new Set([
 ]);
 const outcomeKinds = new Set(["return", "raise", "incomplete"]);
 const outcomeSources = new Set(["runtime", "call-attempt", "truncated"]);
+const executionEventKinds = new Set([
+  "html",
+  "link",
+  "status",
+  "stderr",
+  "stdout",
+  "text",
+  "trace",
+  "value",
+]);
 
 export function executionChecksum(input) {
   let hash = 2166136261;
@@ -1002,6 +1012,9 @@ export function buildExecutionSnapshot(envelope) {
     problems,
   );
   const writeById = collectUnique(execution.writes, "write", problems);
+  const events = Array.isArray(execution.events)
+    ? execution.events.map((event) => freezeRecord(event))
+    : [];
   const finalSequence = envelope?.terminal?.finalSequence;
   if (!Number.isInteger(finalSequence) || finalSequence < 0) {
     problems.push(
@@ -1012,6 +1025,30 @@ export function buildExecutionSnapshot(envelope) {
         String(finalSequence ?? "missing"),
       ),
     );
+  }
+
+  for (const [index, event] of events.entries()) {
+    if (
+      !validSequence(event.sequence, finalSequence) ||
+      !executionEventKinds.has(event.kind) ||
+      typeof event.id !== "string" ||
+      typeof event.content !== "string" ||
+      !(
+        event.parentOccurrenceId == null ||
+        typeof event.parentOccurrenceId === "string"
+      ) ||
+      (event.parentOccurrenceId != null &&
+        !occurrenceById.has(event.parentOccurrenceId))
+    ) {
+      problems.push(
+        problem(
+          "execution-event-invalid",
+          "event",
+          String(index),
+          `${event.sequence ?? "-"}:${event.kind ?? "-"}`,
+        ),
+      );
+    }
   }
 
   const unitByGeneratedPath = new Map();
@@ -2211,6 +2248,7 @@ export function buildExecutionSnapshot(envelope) {
       closures: closureById.size,
       callAttempts: callAttemptById.size,
       writes: writeById.size,
+      events: events.length,
     }),
   });
   snapshotStores.set(snapshot, {
@@ -2236,6 +2274,14 @@ export function buildExecutionSnapshot(envelope) {
     writeIdsByActivation,
     writeIdsByConstruct,
     writeIdsByTarget,
+    events: Object.freeze(
+      events.sort(
+        (left, right) =>
+          left.sequence - right.sequence ||
+          compareText(left.kind, right.kind) ||
+          compareText(left.id, right.id),
+      ),
+    ),
   });
   return snapshotResult([], snapshot);
 }
@@ -2319,6 +2365,10 @@ export function snapshotCallAttemptsForActivation(snapshot, activationId) {
 
 export function snapshotWrites(snapshot) {
   return Object.freeze([...storesFor(snapshot).writeById.values()]);
+}
+
+export function snapshotEvents(snapshot) {
+  return storesFor(snapshot).events;
 }
 
 export function snapshotTerminal(snapshot) {

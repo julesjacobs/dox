@@ -18,6 +18,7 @@ import {
   chooseAnnotationSlot,
   composeCoverageIntervals,
   executionViewModelCacheStats,
+  summarizeParameterHeading,
 } from "./execution-view-model.js";
 
 const source = "Intro\n\n    let x = 1\n";
@@ -78,11 +79,59 @@ test("annotation precedence is stable and cursor override restores persistent st
     depth: -2,
     value: value("cursor"),
   };
-  assert.equal(
+  assert.deepEqual(
     chooseAnnotationSlot(4, [inner, outer, cursorAnnotation]).effective,
-    cursorAnnotation,
+    { ...cursorAnnotation, selected: true },
   );
   assert.equal(chooseAnnotationSlot(4, [inner, outer]).effective, outer);
+});
+
+test("a cursor value remains visibly selected when it matches an existing annotation", () => {
+  const value = {
+    text: "13",
+    fullText: "13",
+    kind: "return",
+    truncated: false,
+    segments: [{ from: 0, to: 2, role: "literal" }],
+  };
+  const persistent = {
+    kind: "binding",
+    boundaryId: "binding",
+    occurrenceId: "occurrence",
+    depth: 1,
+    value,
+  };
+  const cursorAnnotation = {
+    kind: "cursor",
+    boundaryId: "cursor",
+    occurrenceId: "occurrence",
+    depth: -2,
+    value,
+  };
+  const slot = chooseAnnotationSlot(4, [persistent, cursorAnnotation]);
+  assert.equal(slot.effective.kind, "binding");
+  assert.equal(slot.effective.selected, true);
+});
+
+test("parameter headings abbreviate source patterns without losing the full label", () => {
+  assert.deepEqual(summarizeParameterHeading(["n"]), {
+    text: "n",
+    fullText: "n",
+    abbreviated: false,
+  });
+  assert.deepEqual(summarizeParameterHeading(["Apply (function_, argument)"]), {
+    text: "Apply (…)",
+    fullText: "Apply (function_, argument)",
+    abbreviated: true,
+  });
+  assert.deepEqual(
+    summarizeParameterHeading(["substitution", "Type_variable variable as original"]),
+    {
+      text: "substitution, Type_variable …",
+      fullText: "substitution, Type_variable variable as original",
+      abbreviated: true,
+    },
+  );
 });
 
 test("a matched arm keeps both its input and function result", () => {
@@ -259,6 +308,8 @@ function callEnvelope() {
   const functionConstructId = `${prefix}-function-construct`;
   const functionScopeId = `${prefix}-function-scope`;
   const functionOccurrenceId = `${prefix}-function-occurrence`;
+  const parameterConstructId = `${prefix}-parameter-construct`;
+  const parameterOccurrenceId = `${prefix}-parameter-occurrence`;
   const childActivationId = `${prefix}-child-activation`;
   const attemptId = `${prefix}-call-attempt`;
   artifact.staticProgram.executionScopes.push({
@@ -282,6 +333,22 @@ function callEnvelope() {
     lexicalScopeId: `${prefix}-scope`,
     syntaxFingerprint: "function",
     lexicalAncestryFingerprint: "top/function",
+    ghost: false,
+  });
+  artifact.staticProgram.constructs.push({
+    id: parameterConstructId,
+    category: "pattern",
+    semanticKind: "binder",
+    compilerRange: {
+      generatedPath: "sample.ml",
+      startByte: 3,
+      endByte: 4,
+    },
+    parentId: functionConstructId,
+    ownerScopeId: functionScopeId,
+    lexicalScopeId: functionScopeId,
+    syntaxFingerprint: "parameter-x",
+    lexicalAncestryFingerprint: "top/function/parameter-x",
     ghost: false,
   });
   artifact.staticProgram.selectors.push(
@@ -311,6 +378,19 @@ function callEnvelope() {
       tieBreakRank: 2,
       syntaxFingerprint: "function-selector",
     },
+    {
+      id: `${prefix}-parameter-selector`,
+      compilerRange: {
+        generatedPath: "sample.ml",
+        startByte: 3,
+        endByte: 4,
+      },
+      subjectId: parameterConstructId,
+      role: "binder",
+      priority: 20,
+      tieBreakRank: 2,
+      syntaxFingerprint: "parameter-selector",
+    },
   );
   for (const addedSelectorId of [
     `${prefix}-callee-selector`,
@@ -326,6 +406,15 @@ function callEnvelope() {
       endUtf16: 14,
     });
   }
+  artifact.sourceMaps.entries.push({
+    selectorId: `${prefix}-parameter-selector`,
+    generatedPath: "sample.ml",
+    startByte: 3,
+    endByte: 4,
+    documentPath: "sample.ml.md",
+    startUtf16: 15,
+    endUtf16: 16,
+  });
   artifact.sourceMaps.entries.sort(
     (left, right) =>
       left.generatedPath.localeCompare(right.generatedPath) ||
@@ -348,6 +437,16 @@ function callEnvelope() {
     outcomeAt: 4,
     outcome: outcome("2"),
   });
+  artifact.execution.occurrences.push({
+    id: parameterOccurrenceId,
+    constructId: parameterConstructId,
+    activationId: childActivationId,
+    parentOccurrenceId: functionOccurrenceId,
+    kind: "parameter",
+    enteredAt: 3,
+    outcomeAt: 3,
+    outcome: outcome("7"),
+  });
   artifact.execution.activations[0] = {
     ...artifact.execution.activations[0],
     outcomeAt: 6,
@@ -361,15 +460,15 @@ function callEnvelope() {
     dynamicParentId: parentActivationId,
     callsiteOccurrenceId: callOccurrenceId,
     consumedCallAttemptId: attemptId,
-    occurrenceIds: [functionOccurrenceId],
-    parameterOccurrenceIds: [],
+    occurrenceIds: [functionOccurrenceId, parameterOccurrenceId],
+    parameterOccurrenceIds: [parameterOccurrenceId],
     enteredAt: 2,
     outcomeAt: 4,
     outcome: outcome("2"),
     signature: {
       functionKey: "function-fingerprint",
       callsiteKey: "let-x",
-      parameterFingerprints: [],
+      parameterFingerprints: ["7"],
       outcomeFingerprint: "2",
     },
   });
@@ -384,6 +483,78 @@ function callEnvelope() {
     outcome: outcome("2"),
   });
   artifact.terminal.finalSequence = 6;
+  return sealExecutionEnvelope(artifact);
+}
+
+function functionCaseEnvelope() {
+  const artifact = structuredClone(callEnvelope());
+  const functionConstructId = "old-function-construct";
+  const functionScopeId = "old-function-scope";
+  const activation = artifact.execution.activations.find(
+    (candidate) => candidate.id === "old-child-activation",
+  );
+  const parameter = artifact.execution.occurrences.find(
+    (candidate) => candidate.id === "old-parameter-occurrence",
+  );
+  parameter.constructId = functionConstructId;
+  const patternConstructId = "old-function-case-pattern";
+  const patternOccurrenceId = "old-function-case-occurrence";
+  const patternSelectorId = "old-function-case-selector";
+  artifact.staticProgram.constructs.push({
+    id: patternConstructId,
+    category: "pattern",
+    semanticKind: "binder",
+    compilerRange: {
+      generatedPath: "sample.ml",
+      startByte: 4,
+      endByte: 5,
+    },
+    parentId: functionConstructId,
+    ownerScopeId: functionScopeId,
+    lexicalScopeId: functionScopeId,
+    syntaxFingerprint: "function-case-pattern",
+    lexicalAncestryFingerprint: "top/function/function-case-pattern",
+    ghost: false,
+  });
+  artifact.staticProgram.selectors.push({
+    id: patternSelectorId,
+    compilerRange: {
+      generatedPath: "sample.ml",
+      startByte: 4,
+      endByte: 5,
+    },
+    subjectId: patternConstructId,
+    role: "binder",
+    priority: 20,
+    tieBreakRank: 2,
+    syntaxFingerprint: "function-case-selector",
+  });
+  artifact.sourceMaps.entries.push({
+    selectorId: patternSelectorId,
+    generatedPath: "sample.ml",
+    startByte: 4,
+    endByte: 5,
+    documentPath: "sample.ml.md",
+    startUtf16: 15,
+    endUtf16: 16,
+  });
+  artifact.sourceMaps.entries.sort(
+    (left, right) =>
+      left.generatedPath.localeCompare(right.generatedPath) ||
+      left.startByte - right.startByte ||
+      left.endByte - right.endByte,
+  );
+  artifact.execution.occurrences.push({
+    id: patternOccurrenceId,
+    constructId: patternConstructId,
+    activationId: activation.id,
+    parentOccurrenceId: activation.functionOccurrenceId,
+    kind: "binder",
+    enteredAt: 3,
+    outcomeAt: 3,
+    outcome: outcome("7"),
+  });
+  activation.occurrenceIds.push(patternOccurrenceId);
   return sealExecutionEnvelope(artifact);
 }
 
@@ -699,6 +870,7 @@ test("the pure view model contains all execution presentation data", () => {
   const model = buildExecutionViewModel(state);
   assert.equal(model.authority, "exact");
   assert.equal(model.occurrenceList.rows.length, 1);
+  assert.equal(model.occurrenceList.rows[0].isProgram, true);
   assert.equal(model.occurrenceList.rows[0].value.text, "1");
   assert.equal(model.cursorInspection.value.outcome.text, "1");
   assert.equal(model.projection.coverage[0].state, "active");
@@ -711,6 +883,12 @@ test("warm cursor presentation does not rescan the full trace", () => {
   let state = initialState(callEnvelope());
   state = transition(state, { kind: "cursor-moved", position: cursor }).state;
   const first = buildExecutionViewModel(state);
+  assert.deepEqual(first.occurrenceList.rows[0].parameterLabels, ["x"]);
+  assert.deepEqual(first.occurrenceList.parameterHeading, {
+    text: "x",
+    fullText: "x",
+    abbreviated: false,
+  });
   assert.equal(buildExecutionViewModel(state), first);
   const warmed = executionViewModelCacheStats(state);
   assert.ok(warmed.coverageCompositions > 0);
@@ -726,11 +904,18 @@ test("warm cursor presentation does not rescan the full trace", () => {
   assert.deepEqual(executionViewModelCacheStats(state), warmed);
 });
 
+test("a function-case input is labelled by its matched source pattern", () => {
+  let state = initialState(functionCaseEnvelope());
+  state = transition(state, { kind: "cursor-moved", position: cursor }).state;
+  const model = buildExecutionViewModel(state);
+  assert.deepEqual(model.occurrenceList.rows[0].parameterLabels, ["x"]);
+});
+
 test("call and caller links navigate through the reducer's activation path", () => {
   let state = initialState(callEnvelope());
   state = transition(state, {
     kind: "cursor-moved",
-    position: { ...cursor, column: 8 },
+    position: { ...cursor, column: 9 },
   }).state;
   let model = buildExecutionViewModel(state);
   const childLink = model.projection.links.find((link) => link.kind === "child");

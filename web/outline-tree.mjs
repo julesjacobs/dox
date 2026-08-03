@@ -138,3 +138,28 @@ export function outdentOutlineSubtree(source, startLine) {
   }
   return moveOutlineSubtree(source, startLine, target, "after");
 }
+
+export function changeBlankOutlineDepth(source, startLine, direction) {
+  const lines = source.split("\n");
+  const line = lines[startLine];
+  if (line === undefined || line.trim()) return null;
+  const spaces = line.match(/^ */)?.[0].length || 0;
+  const nextSpaces = Math.max(0, spaces + (direction > 0 ? 2 : -2));
+  if (nextSpaces === spaces) return null;
+  if (direction > 0) {
+    const parentDepth = nextSpaces / 2 - 1;
+    const hasParent = lines
+      .slice(0, startLine)
+      .reverse()
+      .some((candidate) =>
+        candidate.trim() && outlineDepth(candidate) === parentDepth
+      );
+    if (!hasParent) return null;
+  }
+  lines[startLine] = " ".repeat(nextSpaces);
+  return {
+    source: lines.join("\n"),
+    movedLine: startLine,
+    originLines: lines.map((_, index) => index + 1),
+  };
+}

@@ -411,6 +411,7 @@ test("normalized artifacts publish complete immutable indexes atomically", () =>
     closures: 1,
     callAttempts: 1,
     writes: 0,
+    events: 0,
   });
   assert.equal(snapshotConstruct(snapshot, "construct-value").parentId, "construct-fib");
   assert.equal(snapshotOccurrence(snapshot, "occurrence-value").outcome.value.display, "3");

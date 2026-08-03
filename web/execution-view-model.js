@@ -1,15 +1,19 @@
 import {
   snapshotActivation,
+  snapshotActivations,
   snapshotActivationIdsForConstruct,
   snapshotCallAttemptsForActivation,
   snapshotClosures,
   snapshotConstruct,
   snapshotOccurrence,
+  snapshotOccurrences,
   snapshotOccurrenceIdsForActivationConstruct,
   snapshotTerminal,
+  snapshotEvents,
   snapshotWritesForActivation,
   snapshotWritesForConstruct,
 } from "./execution-artifact.js";
+import { buildExecutionTraceStructure } from "./execution-trace.js";
 import {
   focusedOccurrenceValue,
   occurrenceHasUserValue,
@@ -51,6 +55,7 @@ const activationLinksCache = new WeakMap();
 const globalCoverageCache = new WeakMap();
 const globalComposedCoverageCache = new WeakMap();
 const occurrencePresentationCache = new WeakMap();
+const wholeTraceCache = new WeakMap();
 const cacheStats = {
   coverageCompositions: 0,
   persistentAnnotationBuilds: 0,
@@ -170,6 +175,184 @@ function parameterOutcomes(snapshot, activation) {
     const occurrence = snapshotOccurrence(snapshot, occurrenceId);
     return occurrence ? [occurrence.outcome] : [];
   });
+}
+
+function compactSourceLabel(source) {
+  return String(source || "").trim().replace(/\s+/g, " ");
+}
+
+function constructSourceLabel(view, constructId) {
+  const selectors = executionViewSelectorsForConstruct(view, constructId).filter(
+    (selector) => selector.valid !== false,
+  );
+  for (const role of ["construct", "binder"]) {
+    const selector = selectors.find((candidate) => candidate.role === role);
+    const source = selector && compactSourceLabel(
+      executionViewSourceText(view, selector.range),
+    );
+    if (source) return source;
+  }
+  return "";
+}
+
+function matchedFunctionParameterConstruct(snapshot, activation) {
+  if (!activation?.functionConstructId) return null;
+  for (const occurrenceId of activation.occurrenceIds || []) {
+    const occurrence = snapshotOccurrence(snapshot, occurrenceId);
+    const construct = occurrence && snapshotConstruct(snapshot, occurrence.constructId);
+    if (
+      occurrence?.kind !== "parameter" &&
+      construct?.category === "pattern" &&
+      construct.parentId === activation.functionConstructId
+    ) {
+      return construct.id;
+    }
+  }
+  return null;
+}
+
+function parameterLabels(view, snapshot, activation) {
+  const matchedFunctionParameter = matchedFunctionParameterConstruct(
+    snapshot,
+    activation,
+  );
+  return (activation?.parameterOccurrenceIds || []).map((occurrenceId) => {
+    const occurrence = snapshotOccurrence(snapshot, occurrenceId);
+    if (!occurrence) return "input";
+    const constructId =
+      occurrence.constructId === activation.functionConstructId &&
+      matchedFunctionParameter
+        ? matchedFunctionParameter
+        : occurrence.constructId;
+    return constructSourceLabel(view, constructId) || "input";
+  });
+}
+
+function presentTraceEvent(event) {
+  const content = String(event.content || "");
+  if (event.kind === "value") {
+    const [type = "", value = ""] = content.split("\u001f");
+    return {
+      kind: "value",
+      marker: "=",
+      label: event.id,
+      text: value,
+      type,
+    };
+  }
+  if (event.kind === "link") {
+    const [label = "", url = ""] = content.split("\u001f");
+    return {
+      kind: "link",
+      marker: "↗",
+      label: event.id,
+      text: `${label}${url ? ` — ${url}` : ""}`,
+      type: "",
+    };
+  }
+  if (event.kind === "html") {
+    return {
+      kind: "html",
+      marker: "↗",
+      label: event.id,
+      text: "HTML output",
+      type: "",
+    };
+  }
+  const text = content.endsWith("\n") ? content.slice(0, -1) : content;
+  return {
+    kind: event.kind,
+    marker: event.kind === "stderr" ? "!" : "›",
+    label: ["stdout", "stderr"].includes(event.kind) ? "" : event.id,
+    text: text || (content ? "↵" : ""),
+    type: "",
+  };
+}
+
+function wholeTrace(view, snapshot) {
+  const cached = wholeTraceCache.get(view);
+  if (cached) return cached;
+  const structure = buildExecutionTraceStructure({
+    activations: snapshotActivations(snapshot),
+    occurrences: snapshotOccurrences(snapshot),
+    events: snapshotEvents(snapshot),
+    finalSequence: snapshotTerminal(snapshot).finalSequence,
+  });
+  const rows = freeze(
+    structure.map((row) => {
+      if (row.kind === "output") {
+        return {
+          kind: "output",
+          depth: row.depth,
+          sequence: row.sequence,
+          activationId: row.activationId,
+          occurrenceId: row.occurrenceId,
+          output: presentTraceEvent(row.event),
+        };
+      }
+      return {
+        kind: "activation",
+        depth: row.depth,
+        sequence: row.sequence,
+        activationId: row.activation.id,
+        name: activationName(view, row.activation),
+        inputs: parameterOutcomes(snapshot, row.activation).map((outcome) =>
+          renderExecutionValue(outcome, { budget: 54 }),
+        ),
+        outcome: renderExecutionValue(row.activation.outcome, { budget: 72 }),
+      };
+    }),
+  );
+  wholeTraceCache.set(view, rows);
+  return rows;
+}
+
+function compactPatternLabel(label) {
+  const source = compactSourceLabel(label);
+  const constructorApplication = source.match(/^([A-Z][\w']*)\s*\(/);
+  if (constructorApplication) return `${constructorApplication[1]} (…)`;
+  const constructor = source.match(/^([A-Z][\w']*)\b/);
+  if (constructor && source !== constructor[1]) return `${constructor[1]} …`;
+  if (source.startsWith("(")) return "(…)";
+  if (source.startsWith("{")) return "{ … }";
+  if (source.startsWith("[")) return "[…]";
+  return source;
+}
+
+export function summarizeParameterHeading(labels, budget = 32) {
+  const normalized = labels.map(compactSourceLabel).filter(Boolean);
+  const fullText = normalized.join(", ") || "input";
+  const compacted = normalized.map(compactPatternLabel).join(", ") || "input";
+  const benefitsFromPatternSummary = normalized.some(
+    (label) => label.length > 18 && label !== compactPatternLabel(label),
+  );
+  if (fullText.length <= budget && !benefitsFromPatternSummary) {
+    return { text: fullText, fullText, abbreviated: false };
+  }
+  if (compacted.length <= budget) {
+    return { text: compacted, fullText, abbreviated: compacted !== fullText };
+  }
+  const text = `${compacted.slice(0, Math.max(1, budget - 1)).trimEnd()}…`;
+  return { text, fullText, abbreviated: text !== fullText };
+}
+
+function parameterHeadingForRows(rows) {
+  const signatures = [
+    ...new Map(
+      rows
+        .filter((row) => !row.isProgram)
+        .map((row) => {
+          const heading = summarizeParameterHeading(row.parameterLabels);
+          return [heading.fullText, heading];
+        }),
+    ).values(),
+  ];
+  if (signatures.length === 1) return signatures[0];
+  return {
+    text: "input",
+    fullText: signatures.map((heading) => heading.fullText).join(" · ") || "input",
+    abbreviated: signatures.length > 1,
+  };
 }
 
 function joinedValue(outcomes, separator, budget = 120) {
@@ -536,7 +719,12 @@ export function chooseAnnotationSlot(line, annotations) {
     persistent,
     cursor,
     effective:
-      cursor && !cursorMatchesPersistent ? cursor : persistent,
+      cursor
+        ? {
+            ...(cursorMatchesPersistent ? persistent : cursor),
+            selected: true,
+          }
+        : persistent,
   };
 }
 
@@ -808,7 +996,9 @@ function occurrenceRow(view, snapshot, row, showValue) {
   return {
     occurrenceId: row.occurrence.id,
     activationId: activation.id,
+    isProgram: !activation.functionConstructId,
     name: activationName(view, activation),
+    parameterLabels: parameterLabels(view, snapshot, activation),
     inputs: parameterOutcomes(snapshot, activation).map(displayOutcome),
     outcome: displayOutcome(activation.outcome),
     value: showValue && valueOutcome
@@ -966,12 +1156,14 @@ export function buildExecutionViewModel(state) {
     authority: view.runtimeAuthority,
     evaluation: state.evaluation,
     selection: state.selection,
+    wholeTrace: snapshot ? wholeTrace(view, snapshot) : [],
     cursorInspection,
     occurrenceList: {
       expression: selectedSelector
         ? executionViewSourceText(view, selectedRange)?.trim() || ""
         : "",
       count: rows.length,
+      parameterHeading: parameterHeadingForRows(rows),
       selectedActivationId: state.selection.activationId,
       selectedOccurrenceId: state.selection.focusedOccurrenceId,
       rows,

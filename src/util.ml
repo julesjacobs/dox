@@ -339,7 +339,10 @@ let list_files root =
     Sys.readdir absolute |> Array.to_list |> List.sort String.compare
     |> List.fold_left
          (fun accumulator name ->
-           if List.mem name ignored_directories then accumulator
+           if
+             List.mem name ignored_directories
+             || starts_with ~prefix:"_build" name
+           then accumulator
            else
              let child_relative =
                if String.equal relative "" then name
