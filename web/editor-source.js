@@ -856,7 +856,7 @@ const embeddedTheme = EditorView.theme({
   },
   ".cm-inline-result": {
     display: "inline",
-    marginLeft: "0.42em",
+    marginLeft: "0",
     color: "#607169",
     fontFamily: "SFMono-Regular, Consolas, Liberation Mono, monospace",
     fontSize: "0.77em",

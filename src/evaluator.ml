@@ -2904,6 +2904,12 @@ let compile_source ~directory ~source ~cancelled =
 
 type block_marker = { index : int; path : string; block_id : string }
 
+(* A browser plan is compiled separately from the request that consumes its
+   result. Keeping its marker identity stable lets unchanged generated units be
+   reused. Server evaluation still uses its fresh [evaluation_id], and the
+   public [evaluation_id] always identifies the resulting execution artifact. *)
+let compilation_marker_id = "dox-markers-v1"
+
 let block_marker evaluation_id index phase =
   Printf.sprintf "\030DOX:%s:%d:%c\031" evaluation_id index phase
 
@@ -2968,7 +2974,7 @@ let browser_evaluation_plan ~documents ~target =
     Util.random_token () |> fun token -> String.sub token 0 24
   in
   let sources, _, _ =
-    instrumented_compilation_source evaluation_id documents target
+    instrumented_compilation_source compilation_marker_id documents target
   in
   let unit_name document =
     match Module_path.of_source_path document.Document.path with
@@ -3564,11 +3570,16 @@ let evaluate_documents ?project_version ?request_code_digest ?evaluation_id
   let request_code_digest =
     Option.value ~default:computed_request_code_digest request_code_digest
   in
+  let marker_id =
+    match browser_execution with
+    | Some _ -> compilation_marker_id
+    | None -> evaluation_id
+  in
   let directory = Filename.temp_dir "dox-eval-" "" in
   let event_path = Filename.concat directory "events" in
   let trace_path = Filename.concat directory "trace-events" in
   let document_sources, block_markers, inline_markers =
-    instrumented_compilation_source evaluation_id documents target
+    instrumented_compilation_source marker_id documents target
   in
   let parse_diagnostics =
     documents
@@ -3830,10 +3841,10 @@ let evaluate_documents ?project_version ?request_code_digest ?evaluation_id
     List.map (normalize_inline_diagnostic inline_markers) diagnostics
   in
   let stdout, block_stdouts =
-    split_block_output evaluation_id block_markers stdout
+    split_block_output marker_id block_markers stdout
   in
   let stderr, block_stderrs =
-    split_block_output evaluation_id block_markers stderr
+    split_block_output marker_id block_markers stderr
   in
   let block_outputs =
     block_markers

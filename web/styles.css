@@ -403,7 +403,7 @@ button {
   min-width: 0;
   display: grid;
   grid-template-columns:
-    minmax(0, 0.9fr) 1ch fit-content(26%)
+    minmax(6ch, 0.9fr) 1ch minmax(4ch, 0.35fr)
     minmax(8ch, 1.35fr);
   column-gap: 5px;
   margin: -5px 0 19px;
@@ -411,7 +411,9 @@ button {
 }
 
 .execution-panel.activation-only {
-  grid-template-columns: minmax(0, 1fr) 1ch fit-content(34%);
+  grid-template-columns:
+    minmax(6ch, 0.9fr) 1ch minmax(4ch, 0.35fr)
+    minmax(8ch, 1.35fr);
 }
 
 .execution-panel > * {
@@ -504,19 +506,11 @@ button {
   min-width: 0;
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 6px;
   padding-left: 8px;
 }
 
 .execution-expression-heading code {
   color: #8b5938;
-}
-
-.execution-expression-heading small {
-  flex: none;
-  color: #a17a60;
-  font: 9.5px/1.4 var(--mono);
 }
 
 .execution-runtime-neutral {

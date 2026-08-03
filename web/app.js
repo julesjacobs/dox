@@ -3598,7 +3598,7 @@ function renderExecutionCoreInspector() {
             ${programRows
               ? '<code class="execution-activation-heading" title="Top-level activation">top level</code>'
               : `<code class="execution-arguments-heading" title="${escapeHtml(`Function parameters: ${parameterHeading.fullText}`)}">${escapeHtml(parameterHeading.text)}</code><span class="execution-heading-arrow" aria-hidden="true">→</span><code class="execution-result-heading" title="Function result">${escapeHtml(resultHeading)}</code>`}
-            ${showExpressionColumn ? `<span class="execution-expression-heading" title="Selected expression"><code>${escapeHtml(model.occurrenceList.expression)}</code>${model.occurrenceList.count > 1 ? `<small>${model.occurrenceList.count}×</small>` : ""}</span>` : ""}
+            ${showExpressionColumn ? `<span class="execution-expression-heading" title="Selected expression"><code>${escapeHtml(model.occurrenceList.expression)}</code></span>` : ""}
           </header><div class="execution-occurrences${showExpressionColumn ? "" : " activation-only"}" role="list" aria-label="Executions of the selected expression">${rows}</div>`
         : `<p class="execution-note">${
             stale
@@ -4659,7 +4659,7 @@ async function performEvaluation(request, signal) {
     body: JSON.stringify(body),
   });
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-  const backend = await import("./oxcaml/backend.js?v=20260803d");
+  const backend = await import("./oxcaml/backend.js?v=20260803g");
   const removeStatusListener = backend.addBackendStatusListener(({ state: backendState, text }) => {
     const toggle = document.querySelector("#evaluation-engine-toggle");
     if (!toggle) return;
@@ -5718,11 +5718,51 @@ function refreshInspector({ revealExecutionChoice = false } = {}) {
       return;
     }
     const scrollTop = inspector.scrollTop;
+    const inspectorBounds = inspector.getBoundingClientRect();
+    const anchorRow = document
+      .elementFromPoint(
+        inspectorBounds.left + 10,
+        inspectorBounds.top + Math.min(48, inspector.clientHeight - 1),
+      )
+      ?.closest(".execution-occurrence");
+    const scrollAnchor = anchorRow && inspector.contains(anchorRow)
+      ? {
+          activation: anchorRow.querySelector(
+            "[data-execution-core-activation]",
+          )?.dataset.executionCoreActivation,
+          occurrence: anchorRow.querySelector(
+            "[data-execution-core-occurrence]",
+          )?.dataset.executionCoreOccurrence,
+          offset: anchorRow.getBoundingClientRect().top - inspectorBounds.top,
+        }
+      : null;
     hideExecutionValueLens({ immediately: true });
     inspector.innerHTML = html;
     inspector.dataset.rendered = "true";
     state.inspectorHtml = html;
     inspector.scrollTop = scrollTop;
+    if (scrollAnchor?.activation) {
+      const row = Array.from(
+        inspector.querySelectorAll(".execution-occurrence"),
+      ).find((candidate) => {
+        const activation = candidate.querySelector(
+          "[data-execution-core-activation]",
+        )?.dataset.executionCoreActivation;
+        const occurrence = candidate.querySelector(
+          "[data-execution-core-occurrence]",
+        )?.dataset.executionCoreOccurrence;
+        return (
+          activation === scrollAnchor.activation &&
+          occurrence === scrollAnchor.occurrence
+        );
+      });
+      if (row) {
+        inspector.scrollTop +=
+          row.getBoundingClientRect().top -
+          inspectorBounds.top -
+          scrollAnchor.offset;
+      }
+    }
     if (revealExecutionChoice) {
       inspector
         .querySelector('[data-execution-core-activation][aria-current="true"]')

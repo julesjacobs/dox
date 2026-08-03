@@ -9,6 +9,6 @@ Here is a fib function:
 
 Here is a call to it:
 
-    let k = fib 6
+    let k = fib 7
     
 `fib 5 =`

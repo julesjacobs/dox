@@ -36,7 +36,7 @@ dune exec dox -- serve --root /path/to/project --port 9000
 This checkout uses the project-local OxCaml compiler in
 `_toolchain/oxcaml/bin/ocamlc` for evaluation and artifacts. Its source is in
 `vendor/oxcaml`; the browser integration is maintained on the
-`jujacobs/dox-browser-integration` branch. `OCAMLC` can override it.
+`jujacobs/dox` branch. `OCAMLC` can override it.
 `ocamlmerlin` provides types at the cursor and can be overridden with
 `OCAMLMERLIN`.
 
