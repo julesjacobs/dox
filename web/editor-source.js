@@ -271,8 +271,11 @@ class HttpCollaborationProvider {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ messages }),
       });
-      if (response.status === 409) {
-        // The stream was replaced; reopen and resend.
+      // 409: this subscriber is unknown. 403: the room itself is gone, which is
+      // what happens when the collaboration service restarts under us. Both are
+      // recoverable by reopening the stream, and without handling 403 the client
+      // silently stops syncing until someone reloads.
+      if (response.status === 409 || response.status === 403) {
         this.pending = messages.concat(this.pending);
         this.disconnect();
         this.connect();
@@ -385,7 +388,82 @@ export async function connectPageCollaboration({
   };
 }
 
-export function connectWorkspacePresence({ port, token, onPresence, onStatus }) {
+/* Presence over ordinary HTTP: an EventSource for the participant list, a POST
+   to announce ourselves. Same messages as the WebSocket transport, so the server
+   validates and broadcasts both through one path. */
+function connectWorkspacePresenceOverHttp({ token, onPresence, onStatus }) {
+  const identity = collaborationIdentity();
+  const clientId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  const query = new URLSearchParams({ token, sub: clientId });
+  let modulePath = "";
+  let source = null;
+  let destroyed = false;
+
+  const announce = async () => {
+    if (destroyed || !modulePath) return;
+    try {
+      await fetch(`/presence/update?${query}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "presence",
+          clientId,
+          userId: identity.id,
+          module: modulePath,
+          ...identity,
+        }),
+      });
+    } catch {
+      // Presence is advisory; document collaboration is independent of it.
+    }
+  };
+
+  const connect = () => {
+    if (destroyed || source) return;
+    source = new EventSource(`/presence/events?${query}`, { withCredentials: true });
+    source.onopen = () => {
+      onStatus?.("connected");
+      void announce();
+    };
+    source.onerror = () => {
+      onStatus?.("disconnected");
+      // EventSource reconnects on its own; re-announce when it next opens.
+    };
+    source.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message?.type === "presence" && Array.isArray(message.participants)) {
+          onPresence?.(
+            message.participants.filter(
+              (participant) => participant.userId !== identity.id,
+            ),
+          );
+        }
+      } catch {
+        // A malformed presence packet is ignored.
+      }
+    };
+  };
+
+  connect();
+  return {
+    setModule(nextModule) {
+      modulePath = nextModule || "";
+      void announce();
+    },
+    destroy() {
+      destroyed = true;
+      source?.close();
+      source = null;
+    },
+  };
+}
+
+export function connectWorkspacePresence({ port, token, transport, onPresence, onStatus }) {
+  if (transport === "http") {
+    return connectWorkspacePresenceOverHttp({ token, onPresence, onStatus });
+  }
   const identity = collaborationIdentity();
   const clientId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
   const protocol = location.protocol === "https:" ? "wss" : "ws";

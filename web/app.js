@@ -310,6 +310,7 @@ async function initialize() {
     state.workspacePresence = connectWorkspacePresence({
       port: state.collaborationPort,
       token: state.sessionToken,
+      transport: state.collaborationTransport,
       onPresence: (participants) => {
         const byModule = new Map();
         const seenByModule = new Map();

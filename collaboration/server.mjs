@@ -165,7 +165,10 @@ function createEventStreamConnection(response) {
     isAlive: true,
     send(message) {
       if (connection.readyState !== connection.OPEN) return;
-      const payload = Buffer.from(message).toString("base64");
+      // Binary y-protocol frames are base64'd; presence frames are already JSON
+      // strings and are passed through so the client can JSON.parse them.
+      const payload =
+        typeof message === "string" ? message : Buffer.from(message).toString("base64");
       try {
         response.write(`data: ${payload}\n\n`);
       } catch {
@@ -838,6 +841,80 @@ export async function createCollaborationServer({
     request.on("error", teardown);
   }
 
+  async function handlePresenceRoute(request, response, kind) {
+    const url = new URL(request.url, "http://localhost");
+    const subscriber = url.searchParams.get("sub");
+    if (
+      !constantTimeEqual(url.searchParams.get("token"), token) ||
+      // A same-origin request sends no Origin header; only reject one that is
+      // present and not allowlisted.
+      (origins.length &&
+        request.headers.origin !== undefined &&
+        !origins.includes(request.headers.origin))
+    ) {
+      jsonResponse(response, 403, { error: "Forbidden" });
+      return;
+    }
+    if (!subscriber) {
+      jsonResponse(response, 400, { error: "Missing subscriber id." });
+      return;
+    }
+
+    if (kind === "update") {
+      if (request.method !== "POST") {
+        jsonResponse(response, 405, { error: "Method not allowed." });
+        return;
+      }
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      let input;
+      try {
+        input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch {
+        jsonResponse(response, 400, { error: "Invalid workspace presence" });
+        return;
+      }
+      if (!validPresence(input)) {
+        jsonResponse(response, 400, { error: "Invalid workspace presence" });
+        return;
+      }
+      recordPresence(subscriber, input);
+      jsonResponse(response, 200, { ok: true });
+      return;
+    }
+
+    if (request.method !== "GET") {
+      jsonResponse(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    const connection = createEventStreamConnection(response);
+    presenceStreams.set(subscriber, connection);
+    response.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-store",
+      "x-accel-buffering": "no",
+      connection: "keep-alive",
+    });
+    broadcastPresence();
+    const keepAlive = setInterval(() => {
+      if (connection.readyState !== connection.OPEN) return;
+      try {
+        response.write(": keep-alive\n\n");
+      } catch {
+        connection.readyState = 3;
+      }
+    }, 20_000);
+    const teardown = () => {
+      clearInterval(keepAlive);
+      presenceStreams.delete(subscriber);
+      connection.close();
+      // Drop this participant, mirroring the WebSocket close handler.
+      if (presence.delete(subscriber)) broadcastPresence();
+    };
+    request.on("close", teardown);
+    request.on("error", teardown);
+  }
+
   const httpServer = http.createServer(async (request, response) => {
     try {
       if (request.url === "/health" && request.method === "GET") {
@@ -849,6 +926,11 @@ export async function createCollaborationServer({
       );
       if (streamRoute) {
         await handleStreamRoute(request, response, streamRoute[1], streamRoute[2]);
+        return;
+      }
+      const presenceRoute = request.url.match(/^\/presence\/(events|update)(\?|$)/);
+      if (presenceRoute) {
+        await handlePresenceRoute(request, response, presenceRoute[1]);
         return;
       }
       if (!constantTimeEqual(request.headers["x-dox-token"], token)) {
@@ -905,12 +987,43 @@ export async function createCollaborationServer({
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 16_000_000, perMessageDeflate: false });
   const presenceWss = new WebSocketServer({ noServer: true, maxPayload: 16_384, perMessageDeflate: false });
+  // Presence subscribers that arrived over HTTP rather than as a WebSocket. They
+  // expose the same readyState/send interface, so both kinds are broadcast to
+  // through one path.
+  const presenceStreams = new Map();
   const broadcastPresence = () => {
     const message = JSON.stringify({
       type: "presence",
       participants: Array.from(presence.values()),
     });
     for (const connection of presenceWss.clients) send(connection, message);
+    for (const connection of presenceStreams.values()) send(connection, message);
+  };
+
+  // Shared by both transports so they cannot drift apart.
+  const validPresence = (input) =>
+    input?.type === "presence" &&
+    typeof input.module === "string" &&
+    typeof input.name === "string" &&
+    typeof input.color === "string" &&
+    typeof input.clientId === "string" &&
+    typeof input.userId === "string" &&
+    input.module.length <= 512 &&
+    input.name.length <= 80 &&
+    input.color.length <= 40 &&
+    input.clientId.length <= 80 &&
+    input.userId.length <= 80;
+
+  const recordPresence = (id, input) => {
+    presence.set(id, {
+      id,
+      clientId: input.clientId,
+      userId: input.userId,
+      module: input.module,
+      name: input.name,
+      color: input.color,
+    });
+    broadcastPresence();
   };
   httpServer.on("upgrade", async (request, socket, head) => {
     try {
@@ -961,30 +1074,8 @@ export async function createCollaborationServer({
     connection.on("message", (data) => {
       try {
         const input = JSON.parse(data.toString());
-        if (
-          input?.type !== "presence" ||
-          typeof input.module !== "string" ||
-          typeof input.name !== "string" ||
-          typeof input.color !== "string" ||
-          typeof input.clientId !== "string" ||
-          typeof input.userId !== "string" ||
-          input.module.length > 512 ||
-          input.name.length > 80 ||
-          input.color.length > 40 ||
-          input.clientId.length > 80 ||
-          input.userId.length > 80
-        ) {
-          throw new Error("Invalid workspace presence");
-        }
-        presence.set(id, {
-          id,
-          clientId: input.clientId,
-          userId: input.userId,
-          module: input.module,
-          name: input.name,
-          color: input.color,
-        });
-        broadcastPresence();
+        if (!validPresence(input)) throw new Error("Invalid workspace presence");
+        recordPresence(id, input);
       } catch {
         connection.close(1003, "Invalid workspace presence");
       }
