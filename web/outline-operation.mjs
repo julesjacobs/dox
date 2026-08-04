@@ -27,6 +27,15 @@ export function outlineDraftPreviewTitle(lineText, row) {
   return row?.invalid ? visibleText : row?.proposedPath || visibleText;
 }
 
+export function isOptimisticOutlineCreation(row, projectModules = []) {
+  const modulePath = row?.targetModule || null;
+  return Boolean(
+    modulePath &&
+      !row?.originTarget &&
+      !projectModules.includes(modulePath),
+  );
+}
+
 export function remapModule(modulePath, mapping = []) {
   if (!modulePath) return modulePath;
   for (const { before, after } of mapping) {

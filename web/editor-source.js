@@ -2423,6 +2423,7 @@ function mountEditor(
     onDebugNavigate,
     onOutputNavigate,
     sourceMode = "literate",
+    ariaLabel = "Dox document editor",
     wikiModules = [],
     onWikiNavigate,
     collaboration = null,
@@ -2430,6 +2431,7 @@ function mountEditor(
 ) {
   if (editorState) {
     const view = new EditorView({ state: editorState, parent });
+    view.contentDOM.setAttribute("aria-label", ariaLabel);
     installDebugNavigationCapture(parent, view, onDebugNavigate);
     view.dispatch({
       effects: [
@@ -2518,6 +2520,7 @@ function mountEditor(
     embeddedTheme,
     highlightStyle,
     EditorView.lineWrapping,
+    EditorView.contentAttributes.of({ "aria-label": ariaLabel }),
     EditorView.updateListener.of((update) => {
       onStateChange?.(update.state);
       if (update.docChanged) {
@@ -3364,6 +3367,7 @@ export function mountModuleOutlineEditor(
     drawSelection(),
     highlightActiveLine(),
     outlineTheme,
+    EditorView.contentAttributes.of({ "aria-label": "Dox module outline" }),
     outlineConfigField,
     presentation,
     outlineDragPlugin(onCommit),

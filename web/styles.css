@@ -876,7 +876,7 @@ button.execution-trace-row:focus-visible {
 
 .module-compiler-error {
   margin-top: 10px;
-  color: var(--error);
+  color: var(--red);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -1899,6 +1899,10 @@ button.execution-trace-row:focus-visible {
   font-size: 11.5px;
 }
 
+.sidebar-backdrop {
+  display: none;
+}
+
 @media (max-width: 1000px) {
   .workspace {
     --dox-main-left-width: 0px;
@@ -1939,6 +1943,24 @@ button.execution-trace-row:focus-visible {
 
   .workspace.show-files .sidebar {
     transform: translateX(0);
+  }
+
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 11;
+    display: block;
+    border: 0;
+    padding: 0;
+    opacity: 0;
+    pointer-events: none;
+    background: rgb(29 40 35 / 10%);
+    transition: opacity 180ms ease;
+  }
+
+  .workspace.show-files .sidebar-backdrop {
+    opacity: 1;
+    pointer-events: auto;
   }
 
   .pane-toggle.files-toggle {

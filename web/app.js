@@ -11,7 +11,7 @@ import {
   connectPageCollaboration,
   connectWorkspacePresence,
   encodeCollaborationUpdate,
-} from "./editor.bundle.js?v=20260803a";
+} from "./editor.bundle.js?v=20260803b";
 import {
   dispatchExecutionIntent,
   executionPendingToken,
@@ -21,6 +21,7 @@ import {
 import {
   deriveOutlineOperation,
   duplicateOutlineModule,
+  isOptimisticOutlineCreation,
   outlineDraftPreviewTitle,
   remapModule,
 } from "./outline-operation.mjs";
@@ -894,6 +895,11 @@ function remapSessions(mapping, { preservePersistence = false } = {}) {
   const sessions = new Map();
   for (const [modulePath, session] of state.sessions) {
     const nextModule = remapModule(modulePath, mapping);
+    if (nextModule !== modulePath) {
+      // EditorState owns callbacks mounted for modulePath. Reusing it under a
+      // new identity makes edits visible in CodeMirror but invisible to Dox.
+      session.editorState = null;
+    }
     if (preservePersistence && nextModule !== modulePath) {
       session.persistenceModule ||= modulePath;
     }
@@ -1674,6 +1680,7 @@ function renderShell() {
     >
       <div class="body-grid">
         <aside class="sidebar">${renderSidebar()}</aside>
+        <button class="sidebar-backdrop" id="files-backdrop" type="button" aria-label="Close project files"></button>
         <div class="pane-resizer pane-resizer-left" data-pane-resizer="sidebar" role="separator" aria-label="Resize module pane" aria-orientation="vertical" tabindex="0"></div>
         <button class="pane-toggle files-toggle" id="files-toggle" type="button" aria-label="Show project files" aria-expanded="false" title="Show project files"><span class="files-toggle-icon" aria-hidden="true"></span></button>
         <main class="main" id="main-pane">
@@ -1702,7 +1709,7 @@ function renderShell() {
 
 function renderSidebar() {
   if (!state.project?.documents.length) {
-    return `<div class="sidebar-brand">Dox</div><div class="module-outline-host" data-module-outline></div>${renderEvaluationEngineToggle()}`;
+    return `<div class="sidebar-brand">Dox</div><div class="module-outline-host" data-module-outline aria-label="Editable module outline"></div>${renderEvaluationEngineToggle()}`;
   }
   return `
     <div class="sidebar-brand">Dox</div>
@@ -2190,7 +2197,10 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
         session,
         source,
         changedDuringRefactor,
-        editorState: replaceEditorStateDocument(session.editorState, source),
+        editorState:
+          modulePath === oldModule
+            ? replaceEditorStateDocument(session.editorState, source)
+            : null,
       });
     }
     if (
@@ -2241,6 +2251,7 @@ async function refreshSessionsAfterRefactor(mapping, project, bases) {
     session.editorState = replaceEditorStateDocument(editorState, source);
     session.savedSource = savedSource;
     session.savedVersion = payload.digest || payload.document.version;
+    session.provisional = false;
     session.persistenceModule = null;
     session.evaluation = null;
     session.evaluationPlan = null;
@@ -2681,6 +2692,12 @@ async function performOutlineCommit({
       if (position !== null) state.outlineSelection = position;
     }
     if (reason === "reorder") state.outlineFocusTransfer = true;
+    if (
+      state.module &&
+      window.location.pathname !== `/page/${encodeURIComponent(state.module)}`
+    ) {
+      updateRoute(state.module, "replace");
+    }
     render();
     if (deletedCurrent && fallbackModule) {
       await loadDocument(fallbackModule, {
@@ -2807,8 +2824,9 @@ async function openOutlineModule(row, kind) {
     (row?.originPath && !row?.originModule ? row.proposedPath || row.path : null);
   if (!modulePath) return;
   const pageDraft = state.outlinePageDraft;
-  const optimisticCreation = Boolean(
-    !state.project?.pageIndex?.modules?.includes(modulePath),
+  const optimisticCreation = isOptimisticOutlineCreation(
+    row,
+    state.project?.pageIndex?.modules || [],
   );
   const previousModule = pageDraft?.previousModule || state.module;
   if (optimisticCreation) {
@@ -3034,7 +3052,7 @@ function mountOutlineEditor() {
 
 function renderMain() {
   if (!state.document) {
-    return `<div class="empty-state"><h2>The project has no live documents yet.</h2><p>Create a file ending in <code>.ml.md</code>.</p></div>`;
+    return `<div class="empty-state"><h2>This project has no pages yet.</h2><p>Press Enter in the module list, then type a module name.</p></div>`;
   }
   return renderDocument();
 }
@@ -3080,7 +3098,7 @@ function renderProject() {
         ${state.project.documents
           .map(
             (document) => `
-              <article class="project-card" data-project-path="${escapeHtml(document.path)}" tabindex="0">
+              <article class="project-card" data-project-path="${escapeHtml(document.path)}" tabindex="0" role="button" aria-label="Open ${escapeHtml(document.title)}">
                 <h2>${escapeHtml(document.title)}</h2>
                 <div class="project-card-path">${escapeHtml(document.path)}</div>
                 ${(document.outline || [])
@@ -5291,28 +5309,6 @@ function mountEmbeddedEditors() {
   state.sourceEditorView = null;
 }
 
-async function createDocument() {
-  const modulePath = window.prompt("New module", "NewPage");
-  if (!modulePath) return;
-  try {
-    const payload = await withProjectMutation(async () => {
-      const result = await api("/api/page", {
-        method: "POST",
-        body: JSON.stringify({
-          module: modulePath,
-          baseProjectVersion: state.projectVersion,
-        }),
-      });
-      installAuthoritativeProject(result.project, { forceOutline: true });
-      return result;
-    });
-    await loadDocument(modulePath, { force: true });
-  } catch (error) {
-    state.workspaceError = error.message;
-    updateStatusOnly();
-  }
-}
-
 function openSourceLine(line) {
   if (!line) return;
   state.view = "document";
@@ -5675,6 +5671,24 @@ function setSourceMode(mode) {
   }
 }
 
+function setFilesExpanded(expanded) {
+  const workspace = document.querySelector(".workspace");
+  const button = document.querySelector("#files-toggle");
+  const mobile = window.matchMedia("(max-width: 1000px)").matches;
+  const next = Boolean(expanded && mobile);
+  workspace?.classList.toggle("show-files", next);
+  const label = next ? "Hide project files" : "Show project files";
+  button?.setAttribute("aria-expanded", String(next));
+  button?.setAttribute("aria-label", label);
+  if (button) button.title = label;
+  const main = document.querySelector(".main");
+  const inspector = document.querySelector(".inspector");
+  if (main) main.inert = next;
+  if (inspector) inspector.inert = next;
+  if (next) state.outlineView?.focus();
+  else button?.focus();
+}
+
 function bindEvents() {
   mountOutlineEditor();
   bindPaneResizers();
@@ -5745,16 +5759,13 @@ function bindEvents() {
   document.querySelector(".document-shell")?.addEventListener("pointerdown", () => {
     if (state.inspectorExpanded) setInspectorExpanded(false);
   });
-  document.querySelector("#new-document")?.addEventListener("click", createDocument);
   document.querySelector("#files-toggle")?.addEventListener("click", () => {
     const workspace = document.querySelector(".workspace");
-    const expanded = workspace?.classList.toggle("show-files") || false;
-    const button = document.querySelector("#files-toggle");
-    const label = expanded ? "Hide project files" : "Show project files";
-    button?.setAttribute("aria-expanded", String(expanded));
-    button?.setAttribute("aria-label", label);
-    if (button) button.title = label;
+    setFilesExpanded(!workspace?.classList.contains("show-files"));
   });
+  document
+    .querySelector("#files-backdrop")
+    ?.addEventListener("click", () => setFilesExpanded(false));
   document.querySelectorAll("[data-project-path]").forEach((card) => {
     const open = async () => {
       const path = card.dataset.projectPath;
@@ -5773,7 +5784,10 @@ function bindEvents() {
     };
     card.addEventListener("click", open);
     card.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") open();
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
     });
   });
   bindInspectorEvents();
@@ -5867,8 +5881,14 @@ document.addEventListener(
   true,
 );
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") hideExecutionValueLens({ immediately: true });
-});
+  if (event.key !== "Escape") return;
+  hideExecutionValueLens({ immediately: true });
+  if (document.querySelector(".workspace.show-files")) {
+    setFilesExpanded(false);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}, true);
 document.addEventListener(
   "keydown",
   (event) => {

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   deriveOutlineOperation,
   duplicateOutlineModule,
+  isOptimisticOutlineCreation,
   outlineDraftPreviewTitle,
   remapModule,
   selectedWorkspaceInvariant,
@@ -39,6 +40,30 @@ test("an invalid page preview follows typed text instead of stale identity", () 
       proposedPath: "Parent.Child",
     }),
     "Parent.Child",
+  );
+});
+
+test("only rows without an existing origin are optimistic page creations", () => {
+  assert.equal(
+    isOptimisticOutlineCreation(
+      { targetModule: "Beta", originTarget: "Alpha" },
+      ["Alpha"],
+    ),
+    false,
+  );
+  assert.equal(
+    isOptimisticOutlineCreation(
+      { targetModule: "Beta", originTarget: null },
+      ["Alpha"],
+    ),
+    true,
+  );
+  assert.equal(
+    isOptimisticOutlineCreation(
+      { targetModule: "Beta", originTarget: null },
+      ["Beta"],
+    ),
+    false,
   );
 });
 
