@@ -1083,6 +1083,25 @@ let merlin () =
   | Some path -> path
   | None -> "ocamlmerlin"
 
+(* Merlin is optional. Diagnostics come from the compiler, so without merlin the
+   workspace still reports errors; only the cursor and execution-site queries
+   have nothing to answer with. Report them as "found nothing" rather than as a
+   failure, so a missing merlin degrades those features instead of surfacing a
+   503 on every keystroke. *)
+let merlin_available =
+  lazy
+    (let program = merlin () in
+     if String.contains program '/' then Sys.file_exists program
+     else
+       Sys.getenv_opt "PATH"
+       |> Option.value ~default:""
+       |> String.split_on_char ':'
+       |> List.exists (fun directory ->
+              directory <> "" && Sys.file_exists (Filename.concat directory program)))
+
+let merlin_missing () = not (Lazy.force merlin_available)
+let merlin_available_now () = Lazy.force merlin_available
+
 let source_line source line =
   if line < 1 then None
   else List.nth_opt (String.split_on_char '\n' source) (line - 1)
@@ -1615,6 +1634,8 @@ let merlin_source_with_segments ~documents ~target =
     imported @ [ (target_start, target_start + target_lines - 1, target) ] )
 
 let type_at_with_cancel ~cancelled ~documents ~target ~line ~column =
+  if merlin_missing () then Ok None
+  else
   let source, line_offset = merlin_source ~documents ~target in
   let column =
     max 0 (column - source_indentation target line)
@@ -2192,6 +2213,8 @@ let syntax_execution_sites sites tokens =
               }))
 
 let execution_sites_with_cancel ~cancelled ~documents ~target =
+  if merlin_missing () then Ok []
+  else
   let source, line_offset = merlin_source ~documents ~target in
   let result =
     run_process ~stdin:source ~timeout_seconds:3. ~output_limit:8_000_000
@@ -2591,6 +2614,8 @@ let definition_info_of_json ~documents ~target json =
   | None -> Error "Merlin returned an invalid response."
 
 let definition_at_with_cancel ~cancelled ~documents ~target ~line ~column =
+  if merlin_missing () then Ok None
+  else
   let source, line_offset, _ = merlin_source_with_segments ~documents ~target in
   let column =
     max 0 (column - source_indentation target line)
@@ -2653,6 +2678,8 @@ let completion_entries_of_json json =
 
 let complete_at_with_cancel ~cancelled ~documents ~target ~line ~column ~context
     =
+  if merlin_missing () then Ok []
+  else
   let source, line_offset = merlin_source ~documents ~target in
   let column =
     max 0 (column - source_indentation target line)

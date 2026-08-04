@@ -1500,6 +1500,11 @@ let route context ~cancelled method_ target headers body =
                  `String (if context.browser_execution_only then "browser" else "server") );
                ("executionEngineLocked", `Bool context.browser_execution_only);
                ("collaborationTransport", `String context.collaboration_transport);
+               (* Cursor types, go-to-definition, completion and execution-site
+                  selection need merlin; errors do not. Advertised so a client
+                  can say which features are unavailable instead of appearing
+                  broken. *)
+               ("merlinAvailable", `Bool (Evaluator.merlin_available_now ()));
                ("projectRoot", `String context.project.root);
                ( "collaborationPort",
                  `Int (collaboration_port_for context headers) );
