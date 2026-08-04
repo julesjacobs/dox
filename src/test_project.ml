@@ -141,6 +141,79 @@ let () =
       expect
         (List.length snapshot.documents = 1)
         "project snapshot traversed a generated build directory";
+      (* A browser-execution deployment compiles the project in the page, and
+         that compiler reports a failure by raising. The bridge stringifies the
+         exception, so what arrives here carries neither message nor location -
+         Env.Error(_) for an unbound name. Recompile to answer with the ordinary
+         diagnostic, and keep the browser's account only when this compiler
+         disagrees, since then nothing else describes the difference. *)
+      let browser_exception =
+        "Failure(\"compiling dox__Change.ml.md: Env.Error(_)\")"
+      in
+      let browser_failure source =
+        let response =
+          Server.browser_evaluation_result_response context
+            ~cancelled:(fun () -> false)
+            (Yojson.Safe.to_string
+               (`Assoc
+                  [
+                    ("path", `String "change.ml.md");
+                    ("source", `String source);
+                    ("baseProjectVersion", `String snapshot.version);
+                    ("evaluationId", `String "browser-failure-test");
+                    ( "result",
+                      `Assoc
+                        [
+                          ("kind", `String "error");
+                          ("message", `String browser_exception);
+                        ] );
+                  ]))
+        in
+        let evaluation =
+          Yojson.Safe.from_string response.body
+          |> Yojson.Safe.Util.member "evaluation"
+        in
+        ( response.status,
+          Yojson.Safe.Util.member "ok" evaluation,
+          Yojson.Safe.Util.member "diagnostics" evaluation
+          |> Yojson.Safe.Util.to_list
+          |> List.map (fun diagnostic ->
+              ( Yojson.Safe.Util.member "message" diagnostic
+                |> Yojson.Safe.Util.to_string,
+                Yojson.Safe.Util.member "line" diagnostic )) )
+      in
+      let mentions needle message =
+        try
+          ignore (Str.search_forward (Str.regexp_string needle) message 0);
+          true
+        with Not_found -> false
+      in
+      let broken =
+        Str.global_replace (Str.regexp_string "let b = a + 1")
+          "let b = a + missing" original
+      in
+      (match browser_failure broken with
+      | 200, `Bool false, [ (message, `Int line) ] ->
+          expect
+            (mentions "Unbound value missing" message
+            && (not (mentions "Env.Error" message))
+            && line > 0)
+            "a browser compile failure did not report the compiler's diagnostic"
+      | status, ok, diagnostics ->
+          fail
+            (Printf.sprintf
+               "browser compile failure answered %d, ok=%s, %d diagnostic(s)"
+               status (Yojson.Safe.to_string ok) (List.length diagnostics)));
+      (match browser_failure original with
+      | 200, `Bool false, [ (message, _) ] ->
+          expect
+            (String.equal message browser_exception)
+            "a browser-only failure lost the browser's own report"
+      | status, ok, diagnostics ->
+          fail
+            (Printf.sprintf
+               "browser-only failure answered %d, ok=%s, %d diagnostic(s)"
+               status (Yojson.Safe.to_string ok) (List.length diagnostics)));
       let draft = Document.parse ~path:"change.ml.md" changed in
       let validation =
         Evaluator.evaluate ~project_version:snapshot.version draft

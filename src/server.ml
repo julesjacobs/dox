@@ -1115,14 +1115,34 @@ let browser_evaluation_result_response context ~cancelled body =
     let* _base_project_version = string_member "baseProjectVersion" request in
     let* evaluation_id = string_member "evaluationId" request in
     let result = Yojson.Safe.Util.member "result" request in
-    let* stdout = string_member "stdout" result in
-    let* stderr = string_member "stderr" result in
-    let* events = string_member "events" result in
-    let* trace = string_member "trace" result in
+    let optional_string name =
+      match Yojson.Safe.Util.member name result with
+      | `String value -> value
+      | _ -> ""
+    in
+    let stdout = optional_string "stdout" in
+    let stderr = optional_string "stderr" in
+    let events = optional_string "events" in
+    let trace = optional_string "trace" in
+    (* A failed compilation reports no execution data. Its message is the only
+       account the browser gives, and it is a poor one, so the evaluator
+       recompiles to produce the ordinary diagnostic and falls back to this. *)
+    let browser_failure =
+      match optional_string "kind" with
+      | "" | "ok" -> None
+      | _ -> (
+          match
+            List.find_opt
+              (fun candidate -> not (String.equal (String.trim candidate) ""))
+              [ optional_string "message"; stderr; stdout ]
+          with
+          | Some message -> Some message
+          | None -> Some "The browser compiler reported an error.")
+    in
     let manifests =
-      Yojson.Safe.Util.member "manifests" result
-      |> Yojson.Safe.Util.to_list
-      |> List.map Yojson.Safe.Util.to_string
+      match Yojson.Safe.Util.member "manifests" result with
+      | `List values -> List.map Yojson.Safe.Util.to_string values
+      | _ -> []
     in
     match Project.snapshot context.project with
     | Error project_error_ -> Error (Project.error_message project_error_)
@@ -1144,8 +1164,8 @@ let browser_evaluation_result_response context ~cancelled body =
               in
               let evaluation =
                 Evaluator.evaluate_documents ~project_version:snapshot.version
-                  ~evaluation_id ~browser_execution ~cancelled ~documents
-                  ~target:document ()
+                  ~evaluation_id ~browser_execution ?browser_failure ~cancelled
+                  ~documents ~target:document ()
               in
               Ok (document, evaluation, snapshot.version))
   with

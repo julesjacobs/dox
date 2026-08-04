@@ -3554,7 +3554,7 @@ type browser_execution = {
 }
 
 let evaluate_documents ?project_version ?request_code_digest ?evaluation_id
-    ?browser_execution ?(execute = true)
+    ?browser_execution ?browser_failure ?(execute = true)
     ?(cancelled = fun () -> false) ~documents ~target () =
   let started = Unix.gettimeofday () in
   let started_at = Util.timestamp () in
@@ -3598,9 +3598,9 @@ let evaluate_documents ?project_version ?request_code_digest ?evaluation_id
     Option.value ~default:computed_request_code_digest request_code_digest
   in
   let marker_id =
-    match browser_execution with
-    | Some _ -> compilation_marker_id
-    | None -> evaluation_id
+    match (browser_execution, browser_failure) with
+    | Some _, _ | _, Some _ -> compilation_marker_id
+    | None, None -> evaluation_id
   in
   let directory = Filename.temp_dir "dox-eval-" "" in
   let event_path = Filename.concat directory "events" in
@@ -3632,6 +3632,23 @@ let evaluate_documents ?project_version ?request_code_digest ?evaluation_id
         | None | Some _ -> remove_temp_directory directory)
       (fun () ->
         if cancelled () then raise Cancelled;
+        match browser_failure with
+        | Some message -> (
+            (* Compile, never run: user code executes in the browser only. *)
+            match
+              compile_document_units
+                ~environment:[ ("DOX_TRACE_ALL", "1") ]
+                ~directory ~sources:document_sources ~target ~cancelled ()
+            with
+            | Error compilation ->
+                ( "compile-error", "", "", "", [], [], [], false, 0, 0, 0, [],
+                  [ compilation ] )
+            | Ok _ ->
+                (* The browser rejected what compiles here, so its own report is
+                   the only account of the difference. *)
+                ( "compile-error", "", "", "", [], [], [], false, 0, 0, 0, [],
+                  [ diagnostic ~stage:"compile" ~severity:"error" message ] ))
+        | None ->
         match browser_execution with
         | Some browser ->
             let compiler_manifests =

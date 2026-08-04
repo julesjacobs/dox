@@ -4767,17 +4767,23 @@ async function performEvaluation(request, signal) {
     globalThis.__doxDiagnostics.browserEvaluation,
   );
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-  if (result?.kind !== "ok") {
-    const detail = result?.stderr || result?.stdout || result?.message || "Unknown browser compiler failure";
-    throw new Error(`Browser OxCaml evaluation failed: ${detail.trim()}`);
-  }
+  // A failed compilation is reported through the same endpoint as a successful
+  // run: the server recompiles and answers with the compiler's own diagnostic,
+  // which belongs in the diagnostics panel. Throwing here instead would show a
+  // toast carrying a stringified OCaml exception and no location.
+  const failure = result?.kind === "ok"
+    ? null
+    : String(
+        result?.message || result?.stderr || result?.stdout ||
+          "The browser compiler reported an error.",
+      ).trim();
   return api("/api/browser-evaluation-result", {
     method: "POST",
     signal,
     body: JSON.stringify({
       ...body,
       evaluationId: planPayload.plan.evaluationId,
-      result,
+      result: failure === null ? result : { ...result, message: failure },
     }),
   });
 }
