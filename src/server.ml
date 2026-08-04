@@ -1026,7 +1026,7 @@ let evaluate_response context ~cancelled body =
     let* request = json_body body in
     let* path = string_member "path" request in
     let* source = string_member "source" request in
-    let* base_project_version = string_member "baseProjectVersion" request in
+    let* _base_project_version = string_member "baseProjectVersion" request in
     let request_code_digest =
       match Yojson.Safe.Util.member "requestCodeDigest" request with
       | `String value when not (String.equal value "") -> Some value
@@ -1036,10 +1036,7 @@ let evaluate_response context ~cancelled body =
     | Error project_error_ -> Error (Project.error_message project_error_)
     | Ok snapshot -> (
         profile "snapshot" request_started;
-        if not (String.equal snapshot.version base_project_version) then
-          Error "The project changed; reload before evaluating this draft."
-        else
-          let document = Document.parse ~path source in
+        let document = Document.parse ~path source in
           let expected_request_code_digest =
             Evaluator.request_code_digest_for_document document
           in
@@ -1084,14 +1081,11 @@ let browser_evaluation_plan_response context ~cancelled body =
     let* request = json_body body in
     let* path = string_member "path" request in
     let* source = string_member "source" request in
-    let* base_project_version = string_member "baseProjectVersion" request in
+    let* _base_project_version = string_member "baseProjectVersion" request in
     match Project.snapshot context.project with
     | Error project_error_ -> Error (Project.error_message project_error_)
     | Ok snapshot ->
-        if not (String.equal snapshot.version base_project_version) then
-          Error "The project changed; reload before evaluating this draft."
-        else
-          let document = Document.parse ~path source in
+        let document = Document.parse ~path source in
           (match
              Project.resolve_documents ~cancelled context.project snapshot
                document
@@ -1118,7 +1112,7 @@ let browser_evaluation_result_response context ~cancelled body =
     let* request = json_body body in
     let* path = string_member "path" request in
     let* source = string_member "source" request in
-    let* base_project_version = string_member "baseProjectVersion" request in
+    let* _base_project_version = string_member "baseProjectVersion" request in
     let* evaluation_id = string_member "evaluationId" request in
     let result = Yojson.Safe.Util.member "result" request in
     let* stdout = string_member "stdout" result in
@@ -1133,10 +1127,7 @@ let browser_evaluation_result_response context ~cancelled body =
     match Project.snapshot context.project with
     | Error project_error_ -> Error (Project.error_message project_error_)
     | Ok snapshot ->
-        if not (String.equal snapshot.version base_project_version) then
-          Error "The project changed; reload before accepting browser results."
-        else
-          let document = Document.parse ~path source in
+        let document = Document.parse ~path source in
           (match
              Project.resolve_documents ~cancelled context.project snapshot
                document
@@ -1181,15 +1172,11 @@ let type_at_response context ~cancelled body =
   in
   match parsed with
   | Error message -> error message
-  | Ok (path, source, line, column, base_project_version) -> (
+  | Ok (path, source, line, column, _base_project_version) -> (
       match Project.snapshot context.project with
       | Error project_error_ -> project_error project_error_
       | Ok snapshot -> (
-          if not (String.equal snapshot.version base_project_version) then
-            error ~status:409
-              "The project changed; reopen the document before querying types."
-          else
-            let target = Document.parse ~path source in
+          let target = Document.parse ~path source in
             match
               Project.resolve_documents ~cancelled context.project snapshot
                 target
@@ -1221,16 +1208,11 @@ let execution_sites_response context ~cancelled body =
   in
   match parsed with
   | Error message -> error message
-  | Ok (path, source, base_project_version) -> (
+  | Ok (path, source, _base_project_version) -> (
       match Project.snapshot context.project with
       | Error project_error_ -> project_error project_error_
       | Ok snapshot -> (
-          if not (String.equal snapshot.version base_project_version) then
-            error ~status:409
-              "The project changed; reopen the document before indexing its \
-               execution sites."
-          else
-            let target = Document.parse ~path source in
+          let target = Document.parse ~path source in
             match
               Project.resolve_documents ~cancelled context.project snapshot
                 target
@@ -1267,16 +1249,11 @@ let definition_at_response context ~cancelled body =
   in
   match parsed with
   | Error message -> error message
-  | Ok (path, source, line, column, base_project_version) -> (
+  | Ok (path, source, line, column, _base_project_version) -> (
       match Project.snapshot context.project with
       | Error project_error_ -> project_error project_error_
       | Ok snapshot -> (
-          if not (String.equal snapshot.version base_project_version) then
-            error ~status:409
-              "The project changed; reopen the document before locating \
-               definitions."
-          else
-            let target = Document.parse ~path source in
+          let target = Document.parse ~path source in
             match
               Project.resolve_documents ~cancelled context.project snapshot
                 target
@@ -1316,16 +1293,12 @@ let complete_response context ~cancelled body =
   in
   match parsed with
   | Error message -> error message
-  | Ok (path, source, line, column, completion_context, base_project_version)
+  | Ok (path, source, line, column, completion_context, _base_project_version)
     -> (
       match Project.snapshot context.project with
       | Error project_error_ -> project_error project_error_
       | Ok snapshot -> (
-          if not (String.equal snapshot.version base_project_version) then
-            error ~status:409
-              "The project changed; reopen the document before completing code."
-          else
-            let target = Document.parse ~path source in
+          let target = Document.parse ~path source in
             match
               Project.resolve_documents ~cancelled context.project snapshot
                 target
