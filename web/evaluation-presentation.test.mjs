@@ -75,6 +75,21 @@ test("compiler locations become a concise message and related source ranges", ()
   );
 });
 
+test("a hint keeps its own line while wrapped text is rejoined", () => {
+  assert.equal(
+    formatDiagnosticMessage(
+      // Exactly as the compiler wraps it: the hint's continuation is not
+      // indented, so only the label marks a real break.
+      'File "page.ml.md", line 14, characters 4-10:\n' +
+        "Error: Unbound value adjust\n" +
+        "Hint: If this is a recursive definition,\n" +
+        "you should add the rec keyword on line 10\n",
+    ),
+    "Unbound value adjust\n" +
+      "Hint: If this is a recursive definition, you should add the rec keyword on line 10",
+  );
+});
+
 test("wrapped compiler prose reads as one compact message", () => {
   assert.equal(
     formatDiagnosticMessage(

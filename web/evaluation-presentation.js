@@ -17,6 +17,27 @@ export function staleExecutionLabel(evaluation) {
 
 const compilerLocation = /File "([^"]+)", line (\d+), characters (\d+)-(\d+):\n/g;
 
+/* A compiler message is a sequence of labelled parts - the error, then any hint
+   or warning - and OCaml rewraps each part at its own margin, indenting the
+   continuation in some messages and not in others. So indentation says nothing
+   about structure: a break matters only where a new label begins, and every
+   other break is rewrapping to be undone. */
+const compilerLabel = /^(?:Error|Warning(?: \d+)?|Hint|Alert(?: \w+)?)\s*:/;
+
+function reflowCompilerDetail(detail) {
+  const lines = [];
+  for (const line of detail.split("\n")) {
+    const text = line.trim();
+    if (!text) continue;
+    if (lines.length && !compilerLabel.test(text)) {
+      lines[lines.length - 1] = `${lines[lines.length - 1]} ${text}`;
+    } else {
+      lines.push(text);
+    }
+  }
+  return lines.join("\n");
+}
+
 export function formatDiagnosticMessage(message) {
   const source = String(message || "").trim();
   const matches = [...source.matchAll(compilerLocation)];
@@ -28,11 +49,10 @@ export function formatDiagnosticMessage(message) {
     const to = matches[index + 1]?.index ?? source.length;
     let detail = source.slice(from, to).trim();
     if (index === 0) {
-      detail = detail.replace(/^Error:\s*/, "");
-      detail = detail.replace(/\s*\n\s*/g, " ");
+      detail = reflowCompilerDetail(detail.replace(/^Error:[ \t]*/, ""));
       if (detail) parts.push(detail);
     } else if (detail) {
-      parts.push(`Line ${match[2]} · ${detail.replace(/\s*\n\s*/g, " ")}`);
+      parts.push(`Line ${match[2]} · ${reflowCompilerDetail(detail)}`);
     }
   }
   return parts.join("\n") || source;
